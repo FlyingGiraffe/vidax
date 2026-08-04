@@ -1,0 +1,42 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large Model Checkpoints & Local Weights
+checkpoints/
+*.safetensors
+*.pt
+*.bin
+*.onnx
+
+# Output generated videos / evaluation runs
+*.mp4
+*.gif
+*.png
+
+# Caching & Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+.pytest_cache/
+.coverage
+
+# Packaging & Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# OS / Editor specific files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local example outputs
+out/
+
+# reference codebases
+refs/

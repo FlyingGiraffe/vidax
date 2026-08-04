@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]  # or "flit_core>=3.2,<4"
+build-backend = "hatchling.build"
+
+[project]
+name = "vidax"
+version = "0.1.0"
+description = "Lightweight, hardware-agnostic JAX/Flax inference engine and PyTorch translator for Video DiTs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+
+# Core dependencies required by anyone using `vidax`
+dependencies = [
+    "jax>=0.4.30",
+    "flax>=0.8.0",
+    "numpy>=1.24.0",
+    "safetensors>=0.4.0",
+    "imageio>=2.30.0",
+    "imageio-ffmpeg>=0.4.9",
+]
+
+# Optional dependency groups for specific environments
+[project.optional-dependencies]
+# Required for running unit tests & linting
+dev = [
+    "pytest>=7.0.0",
+    "pytest-xdist",    # Optional: for parallel test execution
+]
+
+# Required on TPU VMs to get the correct TPU jaxlib wheel
+tpu = [
+    "jax[tpu]>=0.4.30",
+]
+
+# Required to load `.pth`/`.pt` checkpoints (e.g. the released Wan2.1 VAE and
+# T5 text encoder weights ship this way, unlike the DiT's .safetensors).
+torch = [
+    "torch>=2.0.0",
+]
+
+# Required for `vidax.models.wan.t5.Umt5Tokenizer` (tokenizing prompts for
+# the T5 text encoder). `sentencepiece` backs the umt5-xxl tokenizer itself.
+text = [
+    "transformers>=4.40.0",
+    "sentencepiece>=0.1.99",
+]
+
+# Required for examples/generate_wan2_1_i2v.py (loading the conditioning image).
+i2v = [
+    "pillow>=10.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/FlyingGiraffe/vidax"
+Repository = "https://github.com/FlyingGiraffe/vidax"

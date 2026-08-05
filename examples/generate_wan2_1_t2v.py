@@ -16,15 +16,16 @@ import imageio
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.experimental.shard_map import shard_map
 from jax.sharding import PartitionSpec as P, NamedSharding
 
 from vidax.core.sharding import (
     build_tpu_mesh, shard_wan_params, get_replicated_sharding, get_batch_sharding,
 )
 from vidax.core.rope3d import create_rope3d_freqs
-from vidax.models.wan.dit import WanDiT
-from vidax.models.wan.vae import WanVAEDecoder
-from vidax.models.wan.t5 import T5Encoder, Umt5Tokenizer
+from vidax.models.wan.wan2_1.dit import WanDiT
+from vidax.models.wan.wan2_1.vae import WanVAEDecoder, Decoder3d, _count_causal_convs
+from vidax.models.wan.common.t5 import T5Encoder, Umt5Tokenizer
 from vidax.schedulers.flow_match import RectifiedFlowScheduler
 from vidax.translator.mappings import load_torch_checkpoint_to_jax
 
@@ -112,9 +113,23 @@ def main(args):
     logging.info(f"Using {num_devices} devices: {dp_size}-way data // {tp_size}-way tensor parallel.")
 
     dtype = DTYPES[args.dtype]
+    sequence_parallel = args.sequence_parallel
 
     # --- Initialize models and scheduler ---
-    dit_model = WanDiT(mesh=mesh)
+    # `sequence_parallel=True` shards the DiT's token sequence itself across
+    # the 'tp' axis (DeepSpeed-Ulysses -- see `WanDiT`'s module docstring),
+    # instead of Megatron-style tensor parallelism (sharding attention
+    # heads/FFN channels, `shard_wan_params` below). It's off by default: at
+    # the 1.3B model's typical resolutions Megatron TP already fits fine
+    # (this script's originally-verified path), but sequence parallelism is
+    # what the much larger 14B models are expected to need instead -- see
+    # `vidax.models.wan.wan2_2.dit`'s module docstring, which hit this for
+    # real for Wan2.2's 5B model, for the underlying reasoning (Wan2.1's
+    # timestep modulation isn't per-token the way Wan2.2's is, so it doesn't
+    # contribute to that specific problem, but the attention-activation
+    # memory a big-enough DiT needs still doesn't shrink under Megatron TP
+    # alone the way it does under sequence parallelism).
+    dit_model = WanDiT(mesh=mesh, sequence_parallel=sequence_parallel, sp_axis_name="tp")
     vae_model = WanVAEDecoder()
     t5_model = T5Encoder()
     scheduler = RectifiedFlowScheduler(num_steps=args.num_steps, shift=args.shift)
@@ -139,24 +154,33 @@ def main(args):
         args.vae_checkpoint_path, model_type="wan2.1_vae")
     logging.info(f"Loading T5 weights from {args.t5_checkpoint_path}...")
     t5_params = load_torch_checkpoint_to_jax(
-        args.t5_checkpoint_path, model_type="wan2.1_t5")
+        args.t5_checkpoint_path, model_type="wan_t5")
 
     # Shard onto devices *before* dtype-casting: casting is elementwise and
     # preserves sharding (each device casts only its own local shard), so
     # doing it after sharding avoids ever holding two full-size copies of a
-    # multi-GB param tree on a single device.
-    # DiT and T5 are tensor-parallel sharded (attention heads / FFN channels
-    # split across the 'tp' axis); the VAE is comparatively small and stays
-    # fully replicated.
+    # multi-GB param tree on a single device. Casting itself happens on the
+    # host (numpy), before any of this -- see
+    # `vidax.translator.converter.convert_pt_tensor_to_jax`'s docstring for
+    # why (matters most for the DiT once it's large enough to ship as raw
+    # float32, e.g. Wan2.2's 5B/14B; Wan2.1's checkpoints are already bf16).
+    # T5 is tensor-parallel sharded (attention heads / FFN channels split
+    # across the 'tp' axis). The DiT is sharded the same way *unless*
+    # `sequence_parallel`, in which case its weights are instead left fully
+    # **replicated**: sequence parallelism shards activations along the
+    # token axis, not weights, so every device needs its own complete copy
+    # of every DiT weight. The VAE is comparatively small and stays
+    # replicated either way.
     replicated = get_replicated_sharding(mesh)
-    dit_params = jax.device_put(dit_params, shard_wan_params(dit_params, mesh))
-    t5_params = jax.device_put(t5_params, shard_wan_params(t5_params, mesh))
-    vae_params = jax.device_put(vae_params, replicated)
-
     dit_params = cast_to_dtype(dit_params, dtype)
     vae_params = cast_to_dtype(vae_params, dtype)
     t5_params = cast_to_dtype(t5_params, dtype)
-    logging.info("Weights loaded, sharded, and cast across devices.")
+
+    dit_params = jax.device_put(
+        dit_params, replicated if sequence_parallel else shard_wan_params(dit_params, mesh))
+    t5_params = jax.device_put(t5_params, shard_wan_params(t5_params, mesh))
+    vae_params = jax.device_put(vae_params, replicated)
+    logging.info("Weights loaded, cast, and sharded across devices.")
 
     # --- Prepare inputs ---
     prompts = resolve_batch_prompts(args.prompt, dp_size)
@@ -164,7 +188,7 @@ def main(args):
 
     # Wan2.1's causal VAE compresses time by 4x (with a "+1" for the leading
     # frame) and space by 8x: see `vae_stride = (4, 8, 8)` in the reference
-    # configs, and vidax.models.wan.vae.WanVAEDecoder's docstring.
+    # configs, and vidax.models.wan.wan2_1.vae.WanVAEDecoder's docstring.
     latent_t = 1 + (args.num_frames - 1) // 4
     latent_h = args.height // 8
     latent_w = args.width // 8
@@ -197,6 +221,29 @@ def main(args):
         t=latent_t // pt, h=latent_h // ph, w=latent_w // pw, head_dim=head_dim)
     freqs = jax.device_put(freqs, replicated)
 
+    # `sequence_parallel=True` reshapes/reshuffles activations across the
+    # 'tp' mesh axis inside `WanDiT.__call__` itself -- these are
+    # collectives, so the call needs to run inside `shard_map`, not a plain
+    # `jax.jit` (which only sees ordinary per-device-local ops). `in_specs`
+    # mirror the shardings already applied above (`get_batch_sharding`
+    # shards the leading batch axis on 'dp' and replicates the rest,
+    # `replicated` is fully replicated) -- `shard_map` requires the actual
+    # input array shardings to agree with what it's told here. When
+    # `sequence_parallel` is off, this is just `dit_model.apply` directly
+    # (the original, unmodified path).
+    def _dit_apply(params, latents, t, freqs, context):
+        return dit_model.apply(params, latents=latents, t=t, freqs=freqs, context=context)
+
+    if sequence_parallel:
+        dit_apply = shard_map(
+            _dit_apply, mesh=mesh,
+            in_specs=(P(), P('dp', None, None, None, None), P('dp'), (P(), P()), P('dp', None, None)),
+            out_specs=P('dp', None, None, None, None),
+            check_rep=False,
+        )
+    else:
+        dit_apply = _dit_apply
+
     # --- Euler sampling loop ---
     # `single_step` is jit-compiled once (t_val varies by *value*, not shape
     # or dtype, so this never recompiles) and called from a plain Python
@@ -225,10 +272,8 @@ def main(args):
         # unconditional/negative-prompt), amplifying their difference. This
         # is not optional in the reference pipeline -- see the comment above
         # `negative_prompts` in main().
-        v_cond = dit_model.apply(
-            params, latents=current_latents, t=t_vec, freqs=freqs, context=prompt_embeds)
-        v_uncond = dit_model.apply(
-            params, latents=current_latents, t=t_vec, freqs=freqs, context=negative_embeds)
+        v_cond = dit_apply(params, current_latents, t_vec, freqs, prompt_embeds)
+        v_uncond = dit_apply(params, current_latents, t_vec, freqs, negative_embeds)
         velocity = v_uncond + guide_scale * (v_cond - v_uncond)
         return scheduler.step(velocity, step_index, current_latents)
 
@@ -241,16 +286,34 @@ def main(args):
 
     # --- Decode latents to video frames ---
     logging.info("Decoding final latents into video frames...")
-    # Not jax.jit-wrapped: WanVAEDecoder decodes one latent frame at a time
-    # internally (to match the reference's causal streaming algorithm, see
-    # its docstring), and jax.jit would trace/unroll that whole per-chunk
-    # Python loop into a single fused XLA program -- for a ~20-chunk decode
-    # at full resolution, that unrolling is what actually blows the HBM
-    # budget (each chunk's conv activations need to coexist as one giant
-    # program's buffers, rather than being freed between chunks). Running
-    # eagerly dispatches each chunk (and each op within it) separately, so
-    # buffers are freed as soon as they're no longer needed.
-    decoded_frames = vae_model.apply(vae_params, latents.astype(dtype))
+    # Uses `WanVAEDecoder.decode_chunk`, not a single `vae_model.apply(
+    # vae_params, latents)` call: jit-ing the *whole* per-chunk loop in one
+    # call would unroll all ~20 chunks into a single HLO program (each
+    # chunk's conv activations needing to coexist as one giant program's
+    # buffers instead of being freed between chunks -- what actually blows
+    # the HBM budget at full resolution), while not jit-ing anything at all
+    # means every individual op inside the decoder triggers its own,
+    # separate XLA compilation (tolerable at Wan2.1's default resolution,
+    # but not a good habit -- see `vidax.models.wan.wan2_2.vae.WanVAEDecoder
+    # .decode_chunk`'s docstring for where this stopped being tolerable).
+    # `decode_chunk` (jit-wrapped here, called from a plain Python loop)
+    # avoids both: each per-frame computation is compiled as one fused
+    # program, and only ever one chunk's activations are live in any given
+    # jit call.
+    x_full = vae_model.apply(vae_params, latents.astype(dtype), method=vae_model.pre_process)
+    decode_chunk_jit = jax.jit(
+        lambda params, x_chunk, cache_list: vae_model.apply(
+            params, x_chunk, cache_list, method=vae_model.decode_chunk))
+
+    decoder_cfg = Decoder3d(
+        vae_model.dim, vae_model.z_dim, vae_model.dim_mult, vae_model.num_res_blocks,
+        vae_model.attn_scales, vae_model.temperal_upsample, vae_model.eps)
+    cache_list = [None] * _count_causal_convs(decoder_cfg)
+    decoded_chunks = []
+    for i in range(x_full.shape[1]):
+        out_chunk, cache_list = decode_chunk_jit(vae_params, x_full[:, i:i + 1], cache_list)
+        decoded_chunks.append(out_chunk)
+    decoded_frames = jnp.concatenate(decoded_chunks, axis=1)
 
     # One output video per batch element.
     base, ext = os.path.splitext(args.output_path)
@@ -272,6 +335,7 @@ if __name__ == "__main__":
     parser.add_argument("--negative_prompt", type=str, default=DEFAULT_NEGATIVE_PROMPT, help="Negative prompt for classifier-free guidance. Defaults to the reference's `sample_neg_prompt`.")
     parser.add_argument("--guide_scale", type=float, default=5.0, help="Classifier-free guidance scale: velocity = uncond + guide_scale * (cond - uncond). The reference's default is 5.0; skipping CFG (there is no flag to do so here, matching the reference always running it) produces washed-out, low-contrast output.")
     parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to shard each model's attention heads / FFN channels across. Must divide num_heads (12 for the 1.3B DiT, 64 for the T5 encoder) and num_devices. Increase this if you hit HBM OOM at high resolution.")
+    parser.add_argument("--sequence_parallel", action="store_true", help="Shard the DiT's token sequence itself across --tensor_parallel_size devices (DeepSpeed-Ulysses) instead of Megatron-style tensor parallelism. Off by default since Megatron TP already fits the 1.3B model fine at typical resolutions; intended for the much larger 14B models, where it's expected to be necessary the way it was for Wan2.2's 5B model (see WanDiT's module docstring). Also requires the DiT's patch token count to be evenly divisible by --tensor_parallel_size.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the DiT, VAE, and T5 (and cast target for their loaded checkpoints). The reference uses bfloat16 for the DiT/T5 and float32 for the VAE; vidax uses one unified dtype for simplicity. Note: TPU's XLA backend does not implement float16 matmuls (a hardware/compiler limitation, not a vidax one) -- float16 will fail at runtime on TPU.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=50, help="Number of sampling steps for the scheduler.")

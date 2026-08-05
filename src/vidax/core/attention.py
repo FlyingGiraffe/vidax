@@ -109,6 +109,76 @@ def _flash_attention_tpu_sharded(
         out_specs=_QKV_SPEC, check_rep=False)(q, k, v)
 
 
+def local_attention(
+    q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray, scale: Optional[float] = None,
+) -> jnp.ndarray:
+    """Plain dot-product attention that always runs as a single, local
+    (non-cross-device) call -- for use from *within* an already per-device
+    context (e.g. inside `shard_map`, alongside
+    `sequence_parallel_self_attention`'s calls for cross-attention against a
+    small, fully-replicated context, where no cross-device communication is
+    needed for that op specifically). `dot_product_attention`'s own
+    heuristics can't tell they're already inside a sharded body -- they'd
+    see `jax.device_count() > 1` with no `mesh` given and fall back to the
+    slow XLA-materializing path, so this bypasses that dispatch entirely.
+    """
+    head_dim = q.shape[-1]
+    sm_scale = head_dim ** -0.5 if scale is None else scale
+    if jax.devices()[0].platform == "tpu":
+        return _flash_attention_tpu(q, k, v, None, sm_scale)
+    return jax.nn.dot_product_attention(q, k, v, scale=sm_scale)
+
+
+def sequence_parallel_self_attention(
+    q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray,
+    sp_axis_name: str, scale: Optional[float] = None,
+) -> jnp.ndarray:
+    """DeepSpeed-Ulysses sequence-parallel self-attention (arxiv.org/abs/2309.14509),
+    matching Wan2.2-main/wan/distributed/ulysses.py's `distributed_attention`.
+
+    Must be called from *within* an active `shard_map` over a mesh with an
+    axis named `sp_axis_name` (bound by the caller -- typically the entire
+    DiT forward pass runs inside one `shard_map`, not just this call; see
+    `vidax.models.wan.wan2_2.dit`'s module docstring for why and how the
+    surrounding chunk-before/gather-after logic fits together).
+
+    Where Megatron-style tensor parallelism (`_flash_attention_tpu_sharded`)
+    shards attention *heads* and keeps the full token sequence on every
+    device, this shards the *sequence* between blocks (cutting the large
+    per-token activations -- Wan2.2's per-token AdaLN modulation tensors in
+    particular -- by `sp_axis_name`'s size) and only reshuffles to a
+    head-sharded view of the *full* sequence for the duration of self-
+    attention itself, via two `all_to_all`s: each device already holds every
+    head for its local sequence chunk (having just computed q/k/v locally);
+    the first all_to_all redistributes that into every device holding every
+    sequence position for its local head chunk (a pure data reshuffle, no
+    device recomputes another's tokens), local (non-distributed) flash
+    attention runs on that, and the second all_to_all reshuffles back.
+
+    Args:
+        q, k, v: Shape (B, L_local, num_heads, head_dim) -- this device's
+            local sequence chunk, full heads.
+        sp_axis_name: Name of the mesh axis to reshuffle across.
+        scale: Optional override for the softmax scale (default 1/sqrt(head_dim)).
+
+    Returns:
+        (B, L_local, num_heads, head_dim), same shape as the inputs.
+    """
+    head_dim = q.shape[-1]
+    sm_scale = head_dim ** -0.5 if scale is None else scale
+
+    q = jax.lax.all_to_all(q, sp_axis_name, split_axis=2, concat_axis=1, tiled=True)
+    k = jax.lax.all_to_all(k, sp_axis_name, split_axis=2, concat_axis=1, tiled=True)
+    v = jax.lax.all_to_all(v, sp_axis_name, split_axis=2, concat_axis=1, tiled=True)
+
+    if jax.devices()[0].platform == "tpu":
+        out = _flash_attention_tpu(q, k, v, None, sm_scale)
+    else:
+        out = jax.nn.dot_product_attention(q, k, v, scale=sm_scale)
+
+    return jax.lax.all_to_all(out, sp_axis_name, split_axis=1, concat_axis=2, tiled=True)
+
+
 def dot_product_attention(
     q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray,
     bias: Optional[jnp.ndarray] = None,
@@ -127,6 +197,11 @@ def dot_product_attention(
     or `mask` is given (the flash kernel only takes an additive bias, and in
     practice only T5's small, fixed-length self-attention uses one, which
     doesn't need flash attention's memory savings anyway).
+
+    This is the Megatron-style (head-sharded, full-sequence-per-device)
+    attention path; see `sequence_parallel_self_attention` for the
+    alternative (sequence-sharded) scheme Wan2.2's DiT uses instead, which
+    this function has no part in -- that path calls flash attention directly.
 
     Args:
         q, k, v: Shape (B, S, num_heads, head_dim). k/v may have a different

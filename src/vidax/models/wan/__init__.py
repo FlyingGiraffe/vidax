@@ -1,9 +1,15 @@
-from .dit import WanDiT
-from .vae import WanVAEDecoder, WanVAEEncoder
-from .t5 import T5Encoder, Umt5Tokenizer
-from .clip_vision import ClipVisionTransformer, preprocess_image_for_clip
+# Wan model family: one subpackage per released architecture version
+# (`wan2_1`, `wan2_2`, ...), since each version's DiT/VAE differ enough to
+# need their own modules -- see `common/` for the building blocks (T5 text
+# encoder, shared attention/VAE layers) that are byte-for-byte identical
+# across versions and so live once.
+from .common import T5Encoder, Umt5Tokenizer
+from .wan2_1 import (
+    WanDiT, WanVAEDecoder, WanVAEEncoder, ClipVisionTransformer, preprocess_image_for_clip,
+)
 
 __all__ = [
-    "WanDiT", "WanVAEDecoder", "WanVAEEncoder", "T5Encoder", "Umt5Tokenizer",
+    "T5Encoder", "Umt5Tokenizer",
+    "WanDiT", "WanVAEDecoder", "WanVAEEncoder",
     "ClipVisionTransformer", "preprocess_image_for_clip",
 ]

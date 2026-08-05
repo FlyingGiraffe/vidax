@@ -36,8 +36,8 @@ tpu = [
     "jax[tpu]>=0.4.30",
 ]
 
-# Required to load `.pth`/`.pt` checkpoints (e.g. the released Wan2.1 VAE and
-# T5 text encoder weights ship this way, unlike the DiT's .safetensors).
+# Required to load `.pth`/`.pt` checkpoints (e.g. the released Wan2.1/2.2 VAE
+# and T5 text encoder weights ship this way, unlike the DiT's .safetensors).
 torch = [
     "torch>=2.0.0",
 ]

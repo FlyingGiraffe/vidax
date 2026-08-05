@@ -1,7 +1,6 @@
 from typing import Union
 import ml_dtypes
 import numpy as np
-import jax.numpy as jnp
 
 
 def pt_tensor_to_numpy(pt_array: Union[np.ndarray, "torch.Tensor"]) -> np.ndarray:
@@ -26,7 +25,7 @@ def pt_tensor_to_numpy(pt_array: Union[np.ndarray, "torch.Tensor"]) -> np.ndarra
 def convert_pt_tensor_to_jax(
     key: str,
     pt_array: Union[np.ndarray, "torch.Tensor"],
-) -> jnp.ndarray:
+) -> np.ndarray:
     """Converts a single PyTorch state_dict tensor to its Flax-layout equivalent.
 
     Args:
@@ -34,7 +33,16 @@ def convert_pt_tensor_to_jax(
         pt_array: A torch.Tensor or numpy array.
 
     Returns:
-        A JAX array with the layout Flax modules expect.
+        A numpy array with the layout Flax modules expect (deliberately
+        *not* a `jax.Array`: `jnp.array(...)` would place it, unsharded, on
+        a single default device -- for a multi-GB checkpoint, converting the
+        whole param tree this way piles the entire thing onto one device's
+        HBM before `jax.device_put(..., sharding)` ever runs, which is what
+        was OOM-ing checkpoint loading for the 5B+ Wan2.2 DiT/T5 even though
+        the sharded result comfortably fits across a v4-8's 4 chips. Numpy
+        arrays live in host RAM instead, so `jax.device_put(param_tree,
+        sharding_tree)` is the only point a device-resident copy is ever
+        created, and it creates it already correctly sharded.
     """
     arr = pt_tensor_to_numpy(pt_array)
 
@@ -42,11 +50,11 @@ def convert_pt_tensor_to_jax(
     # trailing singleton dims for channel-first layout, e.g. (dim, 1, 1) or
     # (dim, 1, 1, 1). Flax's RMSNorm scale is a flat (dim,) vector.
     if key.endswith(".gamma"):
-        return jnp.array(arr.reshape(-1))
+        return arr.reshape(-1)
 
     # AdaLN modulation tensors, shape (1, 6, dim) or (1, 2, dim): no transpose.
     if "modulation" in key:
-        return jnp.array(arr)
+        return arr
 
     if arr.ndim == 5:
         # PyTorch Conv3d: (Out, In, T, H, W) -> Flax Conv: (T, H, W, In, Out)
@@ -59,4 +67,4 @@ def convert_pt_tensor_to_jax(
         arr = arr.T
 
     # 1D biases and norm scales are already in the right (and only) layout.
-    return jnp.array(arr)
+    return arr

@@ -1,10 +1,11 @@
 # End-to-end image-to-video inference script for Wan2.1 on TPU.
 #
 # I2V only ships as a 14B model (no 1.3B variant), and additionally needs a
-# CLIP vision encoder checkpoint for image conditioning. See README.md for
-# where to get both. Otherwise this mirrors generate_wan2_1.py closely --
-# see its module docstring for the tensor-parallel/flash-attention/loop-
-# unrolling rationale, which all applies unchanged here.
+# CLIP vision encoder checkpoint for image conditioning. See
+# docs/models/wan.md for where to get both. Otherwise this mirrors
+# generate_wan2_1_t2v.py closely -- see its module docstring for the
+# tensor-parallel/flash-attention/loop-unrolling rationale, which all
+# applies unchanged here.
 
 import argparse
 from functools import partial

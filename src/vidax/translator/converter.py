@@ -53,7 +53,12 @@ def convert_pt_tensor_to_jax(
         return arr.reshape(-1)
 
     # AdaLN modulation tensors, shape (1, 6, dim) or (1, 2, dim): no transpose.
-    if "modulation" in key:
+    # Exact-suffix match (not substring) -- Wan's raw `nn.Parameter`s are
+    # named exactly "modulation"/"head.modulation" with no further suffix,
+    # unlike Cosmos's `adaln_modulation_*.{1,2}.weight` Linear weights,
+    # which *do* need the ordinary 2D transpose below despite also
+    # containing "modulation" in their key.
+    if key == "modulation" or key.endswith(".modulation"):
         return arr
 
     if arr.ndim == 5:

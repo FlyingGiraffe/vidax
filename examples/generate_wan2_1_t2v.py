@@ -268,12 +268,20 @@ def main(args):
         t_val = scheduler.timesteps[step_index]
         t_vec = jnp.full((b_size,), t_val, dtype=jnp.float32)
 
-        # Classifier-free guidance: two forward passes (conditional and
-        # unconditional/negative-prompt), amplifying their difference. This
-        # is not optional in the reference pipeline -- see the comment above
-        # `negative_prompts` in main().
-        v_cond = dit_apply(params, current_latents, t_vec, freqs, prompt_embeds)
-        v_uncond = dit_apply(params, current_latents, t_vec, freqs, negative_embeds)
+        # Classifier-free guidance needs two forward passes (conditional and
+        # unconditional/negative-prompt) that are identical except for
+        # `context` -- batched into *one* `dit_apply` call over a `2*B`
+        # batch (latents/timesteps duplicated, contexts concatenated) rather
+        # than two separate dispatches, halving per-step dispatch/collective
+        # overhead (`freqs` needs no duplication: its leading dim is
+        # already 1 and broadcasts against any batch size). Not optional in
+        # the reference pipeline -- see the comment above `negative_prompts`
+        # in main().
+        latents_2b = jnp.concatenate([current_latents, current_latents], axis=0)
+        t_vec_2b = jnp.concatenate([t_vec, t_vec], axis=0)
+        context_2b = jnp.concatenate([prompt_embeds, negative_embeds], axis=0)
+        v_2b = dit_apply(params, latents_2b, t_vec_2b, freqs, context_2b)
+        v_cond, v_uncond = v_2b[:b_size], v_2b[b_size:]
         velocity = v_uncond + guide_scale * (v_cond - v_uncond)
         return scheduler.step(velocity, step_index, current_latents)
 

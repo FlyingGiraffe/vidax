@@ -14,6 +14,8 @@ from typing import Dict
 import safetensors.numpy
 
 from .common import map_wan_dit_keys, map_wan_t5_keys
+from .cosmos2_5 import map_cosmos2_5_dit_keys
+from .reason1 import map_reason1_text_encoder_keys
 from .wan2_1 import map_wan2_1_clip_keys, map_wan2_1_dit_keys, map_wan2_1_vae_keys
 from .wan2_2 import map_wan2_2_vae_keys
 
@@ -25,6 +27,8 @@ __all__ = [
     "map_wan2_1_vae_keys",
     "map_wan2_1_clip_keys",
     "map_wan2_2_vae_keys",
+    "map_cosmos2_5_dit_keys",
+    "map_reason1_text_encoder_keys",
 ]
 
 
@@ -75,6 +79,8 @@ def load_torch_checkpoint_to_jax(checkpoint_path: str, model_type: str = "wan2.1
 
     if model_type in ("wan_dit", "wan2.1_dit", "wan2.2_dit"):
         return map_wan_dit_keys(pt_state_dict)
+    elif model_type == "cosmos2.5_dit":
+        return map_cosmos2_5_dit_keys(pt_state_dict)
     elif model_type == "wan2.1_vae":
         return map_wan2_1_vae_keys(pt_state_dict)
     elif model_type == "wan2.1_clip":
@@ -83,5 +89,16 @@ def load_torch_checkpoint_to_jax(checkpoint_path: str, model_type: str = "wan2.1
         return map_wan2_2_vae_keys(pt_state_dict)
     elif model_type == "wan_t5":
         return map_wan_t5_keys(pt_state_dict)
+    elif model_type == "reason1_text_encoder":
+        # Cosmos-Predict2.5-2B's text encoder (Reason1-finetuned
+        # Qwen2.5-VL-7B-Instruct, text tower only -- see
+        # vidax.models.cosmos.common.reason1). Ships as its own separate
+        # HuggingFace-format repo (nvidia/Cosmos-Reason1-7B), sharded
+        # `model-NNNNN-of-NNNNN.safetensors` + a `model.safetensors.index.json`
+        # manifest -- pass the `.json` manifest's path as `checkpoint_path`
+        # (handled by the ordinary `.json`-sharded branch above, same as
+        # Wan2.2's DiT). Confirmed against the real checkpoint: exact 1:1
+        # parameter-tree match against `Qwen2TextModel`'s init'd params.
+        return map_reason1_text_encoder_keys(pt_state_dict)
     else:
         raise NotImplementedError(f"Model type '{model_type}' is not supported.")

@@ -286,8 +286,18 @@ def main(args):
         t_val = scheduler.timesteps[step_index]
         t_vec = jnp.full((b_size,), t_val, dtype=jnp.float32)
 
-        v_cond = dit_apply(params, current_latents, t_vec, freqs, prompt_embeds, y, clip_fea)
-        v_uncond = dit_apply(params, current_latents, t_vec, freqs, negative_embeds, y, clip_fea)
+        # CFG batched into one `2*B`-batch `dit_apply` call instead of two
+        # separate dispatches -- see `generate_wan2_1_t2v.py`'s identical
+        # comment. `y`/`clip_fea` (the image conditioning) don't vary with
+        # the text prompt, so they're just duplicated alongside everything
+        # else, not meaningfully recomputed.
+        latents_2b = jnp.concatenate([current_latents, current_latents], axis=0)
+        t_vec_2b = jnp.concatenate([t_vec, t_vec], axis=0)
+        context_2b = jnp.concatenate([prompt_embeds, negative_embeds], axis=0)
+        y_2b = jnp.concatenate([y, y], axis=0)
+        clip_fea_2b = jnp.concatenate([clip_fea, clip_fea], axis=0)
+        v_2b = dit_apply(params, latents_2b, t_vec_2b, freqs, context_2b, y_2b, clip_fea_2b)
+        v_cond, v_uncond = v_2b[:b_size], v_2b[b_size:]
         velocity = v_uncond + guide_scale * (v_cond - v_uncond)
         return scheduler.step(velocity, step_index, current_latents)
 

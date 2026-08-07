@@ -1,6 +1,6 @@
 """TPU device mesh construction and Megatron-style 1D tensor-parallel sharding.
 
-Sharding strategy for Wan2.1's DiT and T5 encoder: the residual/hidden
+Sharding strategy for Wan's DiT/T5 encoder and Cosmos-Predict2.5's DiT: the residual/hidden
 stream (`dim`) is always kept replicated across the 'tp' axis (needed for
 correct RMSNorm/LayerNorm, which reduce over the full feature dimension).
 Only the attention QKV projections and FFN up-projection are *column*-
@@ -26,20 +26,51 @@ import numpy as np
 
 # Dense-layer names (the parent key one level above "kernel"/"bias" in a
 # flax param tree) that are column-parallel (shard the output/last axis) vs.
-# row-parallel (shard the input/first axis). Covers both WanDiT's and
-# T5Encoder's naming conventions.
+# row-parallel (shard the input/first axis). Covers WanDiT's, T5Encoder's,
+# CosmosDiT's, and Reason1's (`vidax.models.cosmos.common.reason1`)
+# naming conventions. Cosmos's per-head QK-RMSNorm (`self_attn_q_norm`/
+# `_k_norm`, shape `(head_dim,)`, shared identically across every head)
+# needs no entry here at all: unlike Wan's QK-RMSNorm (over the *full*,
+# TP-split `dim`), it's already local to whichever heads a device owns, so
+# it falls through to the default (replicated) case correctly with no
+# special-casing.
+#
+# Reason1's bare `q_proj`/`k_proj`/`v_proj`/`o_proj`/`gate_proj`/`up_proj`/
+# `down_proj` names (standard HF Qwen2/Llama-family submodule names, not
+# namespaced with a `self_attn_`/`mlp_` prefix the way Cosmos's own DiT
+# names are) only need weight-sharding here -- unlike Cosmos's attention,
+# Reason1's always passes an explicit causal `mask` to
+# `vidax.core.attention.dot_product_attention`, which for that reason
+# *never* takes the Pallas-flash-attention/mesh-sharded path regardless
+# (see that function's docstring) and always falls back to plain
+# `jax.nn.dot_product_attention`, which GSPMD auto-partitions correctly
+# given TP-sharded weights with no `shard_map`/mesh-threading needed in
+# `reason1.py` itself -- exactly the same situation T5's own
+# (bias-carrying, so also always-fallback-path) attention already relies
+# on. These generic names are a real (if currently harmless) collision
+# risk for any future model reusing them with different sharding needs --
+# noted, not fixed, since nothing in this repo does yet.
 COLUMN_PARALLEL_NAMES = frozenset([
     "self_attn_q", "self_attn_k", "self_attn_v",
     "cross_attn_q", "cross_attn_k", "cross_attn_v",
     "ffn_0",                        # WanDiT FFN up-projection
     "attn_q", "attn_k", "attn_v",   # T5 self-attention
     "ffn_gate_0", "ffn_fc1",        # T5 FFN up-projection
+    "self_attn_q_proj", "self_attn_k_proj", "self_attn_v_proj",      # CosmosDiT
+    "cross_attn_q_proj", "cross_attn_k_proj", "cross_attn_v_proj",   # CosmosDiT
+    "mlp_layer1",                   # CosmosDiT FFN up-projection
+    "q_proj", "k_proj", "v_proj",   # Reason1 self-attention
+    "gate_proj", "up_proj",         # Reason1 FFN up-projection (SwiGLU)
 ])
 ROW_PARALLEL_NAMES = frozenset([
     "self_attn_o", "cross_attn_o",
     "ffn_2",        # WanDiT FFN down-projection
     "attn_o",       # T5 attention output
     "ffn_fc2",      # T5 FFN down-projection
+    "self_attn_output_proj", "cross_attn_output_proj",  # CosmosDiT
+    "mlp_layer2",   # CosmosDiT FFN down-projection
+    "o_proj",       # Reason1 attention output
+    "down_proj",    # Reason1 FFN down-projection
 ])
 
 
@@ -74,8 +105,12 @@ def get_batch_sharding(mesh: Mesh, ndim: int) -> NamedSharding:
 
 
 def shard_wan_params(params: dict, mesh: Mesh) -> dict:
-    """Assigns a tensor-parallel `NamedSharding` to every leaf of a WanDiT or
-    T5Encoder parameter pytree (see module docstring for the layout).
+    """Assigns a tensor-parallel `NamedSharding` to every leaf of a WanDiT,
+    T5Encoder, or CosmosDiT parameter pytree (see module docstring for the
+    layout) -- name kept for backward compatibility even though it now
+    covers more than Wan; the dispatch is entirely name-pattern-driven
+    (`COLUMN_PARALLEL_NAMES`/`ROW_PARALLEL_NAMES` above), not tied to any
+    one architecture.
 
     Returns a pytree of `NamedSharding` with the same structure as `params`,
     suitable for `jax.device_put(params, shardings)`.

@@ -9,6 +9,23 @@ from jax.sharding import Mesh, PartitionSpec as P
 _FLASH_BLOCK = 128  # Fixed tile size of jax's TPU Pallas flash-attention kernel.
 
 
+def chunk_by_rank(x: jnp.ndarray, axis: int, sp_size: int, rank: jnp.ndarray) -> jnp.ndarray:
+    """Slices out this device's contiguous `1/sp_size` share of `x` along
+    `axis`, indexed by a *traced* `rank` (e.g. `jax.lax.axis_index(...)`
+    inside `shard_map`) -- `sp_size` must be a static Python int (chunk size
+    has to be known at trace time), so this only supports even splits.
+
+    Model-family-agnostic: shared by every sequence-parallel DiT in this
+    repo (Wan2.1/2.2 via `vidax.models.wan.common.dit_layers`, which
+    re-exports this rather than defining its own copy; Cosmos-Predict2.5 via
+    `vidax.models.cosmos.cosmos2_5.dit`) for chunking the token sequence
+    (and, where it also varies per token/frame, the timestep-modulation
+    state) before the block loop.
+    """
+    size = x.shape[axis] // sp_size
+    return jax.lax.dynamic_slice_in_dim(x, rank * size, size, axis=axis)
+
+
 class RMSNorm(nn.Module):
     """RMSNorm matching Wan2.1's ``WanRMSNorm``: normalized in float32, cast back."""
     dim: int

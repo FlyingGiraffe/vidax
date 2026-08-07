@@ -11,28 +11,19 @@ import math
 from typing import Optional, Tuple
 
 import flax.linen as nn
-import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from vidax.core.attention import (
-    RMSNorm, dot_product_attention, local_attention, sequence_parallel_self_attention,
+    RMSNorm, chunk_by_rank, dot_product_attention, local_attention, sequence_parallel_self_attention,
 )
 from vidax.core.rope3d import apply_rope3d
 
-
-def chunk_by_rank(x: jnp.ndarray, axis: int, sp_size: int, rank: jnp.ndarray) -> jnp.ndarray:
-    """Slices out this device's contiguous `1/sp_size` share of `x` along
-    `axis`, indexed by a *traced* `rank` (e.g. `jax.lax.axis_index(...)`
-    inside `shard_map`) -- `sp_size` must be a static Python int (chunk size
-    has to be known at trace time), so this only supports even splits.
-
-    Shared by every Wan version's sequence-parallel DiT (`wan2_1.dit`,
-    `wan2_2.dit`) for chunking the token sequence (and, where it also varies
-    per token, the timestep-modulation state) before the block loop.
-    """
-    size = x.shape[axis] // sp_size
-    return jax.lax.dynamic_slice_in_dim(x, rank * size, size, axis=axis)
+# Re-exported for backward compatibility -- every caller in this repo
+# imports `chunk_by_rank` from here (or from `vidax.models.cosmos.cosmos2_5
+# .dit`, which imports the same underlying function directly from
+# `vidax.core.attention`, its natural model-family-agnostic home).
+__all__ = ["chunk_by_rank", "attend", "WanHead"]
 
 
 def attend(

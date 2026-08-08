@@ -138,6 +138,10 @@ class FlowUniPCMultistepScheduler:
         solver_type: str = "bh2",
         lower_order_final: bool = True,
         disable_corrector: Sequence[int] = (),
+        use_karras_sigmas: bool = False,
+        karras_sigma_min: float = 0.147,
+        karras_sigma_max: float = 200.0,
+        karras_rho: float = 7.0,
     ):
         if solver_type != "bh2":
             # bh1 is supported by the reference too, but Cosmos2.5 (and every
@@ -152,15 +156,31 @@ class FlowUniPCMultistepScheduler:
         self.lower_order_final = lower_order_final
         self.disable_corrector = tuple(disable_corrector)
 
-        # Same style as RectifiedFlowScheduler (flow_match.py): linear sigma
-        # grid warped once by `shift`. Starts at `1 - 1/num_train_timesteps`
-        # rather than exactly `1.0` -- see module docstring; this is load
-        # bearing for UniPC (unlike for Euler), not just cosmetic.
-        sigma_max = 1.0 - 1.0 / num_train_timesteps
-        sigmas = jnp.linspace(sigma_max, 0.0, num_steps + 1)
-        if shift != 1.0:
-            sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
-        self.sigmas = sigmas.astype(jnp.float32)  # (num_steps + 1,): 1.0 -> 0.0, warped.
+        if use_karras_sigmas:
+            # Cosmos3-Nano's actual default (`scheduler_config.json`: `use_karras_sigmas:
+            # true`, `use_flow_sigmas: true`, `sigma_min: 0.147`, `sigma_max: 200.0`) --
+            # a genuinely different schedule from Cosmos-Predict2.5's linear-sigma/`shift`
+            # warp above, not just a different `shift` value. Matches diffusers'
+            # `UniPCMultistepScheduler._convert_to_karras` (elucidating-diffusion-models
+            # power-law ramp) followed by its `use_flow_sigmas` branch's `sigma / (sigma +
+            # 1)` remap into this scheduler's own `alpha = 1 - sigma` convention --
+            # `shift`/`shift != 1.0` above plays no part in this path.
+            ramp = jnp.linspace(0.0, 1.0, num_steps)
+            min_inv_rho = karras_sigma_min ** (1.0 / karras_rho)
+            max_inv_rho = karras_sigma_max ** (1.0 / karras_rho)
+            karras_sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** karras_rho
+            flow_sigmas = karras_sigmas / (karras_sigmas + 1.0)
+            sigmas = jnp.concatenate([flow_sigmas, jnp.zeros((1,))])
+        else:
+            # Same style as RectifiedFlowScheduler (flow_match.py): linear sigma
+            # grid warped once by `shift`. Starts at `1 - 1/num_train_timesteps`
+            # rather than exactly `1.0` -- see module docstring; this is load
+            # bearing for UniPC (unlike for Euler), not just cosmetic.
+            sigma_max = 1.0 - 1.0 / num_train_timesteps
+            sigmas = jnp.linspace(sigma_max, 0.0, num_steps + 1)
+            if shift != 1.0:
+                sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
+        self.sigmas = sigmas.astype(jnp.float32)  # (num_steps + 1,): sigma_max -> 0.0.
         self.timesteps = self.sigmas * num_train_timesteps  # for model conditioning only.
 
     def init_state(self) -> UniPCState:

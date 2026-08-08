@@ -13,7 +13,6 @@ checkpoints/
 # Output generated videos / evaluation runs
 *.mp4
 *.gif
-*.png
 
 # Caching & Virtual Environments
 .venv/

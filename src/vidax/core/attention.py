@@ -210,10 +210,15 @@ def dot_product_attention(
     fully materializes the (B, num_heads, S_q, S_k) attention matrix -- for
     DiT self-attention over tens of thousands of video patches, that
     materialized matrix alone can exceed a chip's HBM. Falls back to
-    `jax.nn.dot_product_attention` elsewhere (CPU/GPU), or whenever `bias`
-    or `mask` is given (the flash kernel only takes an additive bias, and in
-    practice only T5's small, fixed-length self-attention uses one, which
-    doesn't need flash attention's memory savings anyway).
+    `jax.nn.dot_product_attention` elsewhere (CPU/GPU), whenever a boolean
+    `mask` is given (the flash kernel has no boolean-mask input), or when
+    both `bias` and multi-device sharding are given at once (the sharded
+    flash path doesn't thread `bias` through yet). An additive `bias` alone
+    on a single device *does* still take the flash path -- needed for
+    Cosmos3's dual-pathway generation attention, which cross-attends over a
+    padded text segment and must mask out the padding via `bias`, at a
+    sequence length large enough (tens of thousands of video patches) that
+    the materializing fallback isn't viable.
 
     This is the Megatron-style (head-sharded, full-sequence-per-device)
     attention path; see `sequence_parallel_self_attention` for the
@@ -237,13 +242,21 @@ def dot_product_attention(
         Attention output, shape (B, S_q, num_heads, head_dim).
     """
     multi_device = jax.device_count() > 1
-    if bias is None and mask is None and jax.devices()[0].platform == "tpu" and (
-            not multi_device or mesh is not None):
+    # The flash kernel itself takes an additive `bias` (see `_flash_attention_tpu`'s
+    # `ab` argument) -- only a boolean `mask` forces the slower path, since the
+    # kernel has no boolean-mask input of its own. Only the single-device flash
+    # path is extended to carry `bias` through for now (`_flash_attention_tpu_sharded`
+    # still forces `bias=None`); multi-device + bias falls back to the correct,
+    # if slower, XLA path below rather than silently dropping the bias.
+    can_use_flash = (
+        mask is None and jax.devices()[0].platform == "tpu"
+        and (not multi_device or (mesh is not None and bias is None)))
+    if can_use_flash:
         head_dim = q.shape[-1]
         sm_scale = head_dim ** -0.5 if scale is None else scale
         if multi_device:
             return _flash_attention_tpu_sharded(q, k, v, sm_scale, mesh)
-        return _flash_attention_tpu(q, k, v, None, sm_scale)
+        return _flash_attention_tpu(q, k, v, bias, sm_scale)
     # Multi-device with no mesh given (e.g. WanVAEDecoder, which isn't
     # tensor-parallel sharded): Mosaic kernels can't run un-sharded across
     # multiple devices at all ("cannot be automatically partitioned" is a

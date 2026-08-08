@@ -60,7 +60,9 @@ COLUMN_PARALLEL_NAMES = frozenset([
     "cross_attn_q_proj", "cross_attn_k_proj", "cross_attn_v_proj",   # CosmosDiT
     "mlp_layer1",                   # CosmosDiT FFN up-projection
     "q_proj", "k_proj", "v_proj",   # Reason1 self-attention
-    "gate_proj", "up_proj",         # Reason1 FFN up-projection (SwiGLU)
+    "gate_proj", "up_proj",         # Reason1 FFN up-projection (SwiGLU); also Cosmos3's MLP (same names)
+    "to_q", "to_k", "to_v",                    # Cosmos3 "und" (text/causal) self-attention
+    "add_q_proj", "add_k_proj", "add_v_proj",  # Cosmos3 "gen" (vision/diffusion) attention
 ])
 ROW_PARALLEL_NAMES = frozenset([
     "self_attn_o", "cross_attn_o",
@@ -70,7 +72,9 @@ ROW_PARALLEL_NAMES = frozenset([
     "self_attn_output_proj", "cross_attn_output_proj",  # CosmosDiT
     "mlp_layer2",   # CosmosDiT FFN down-projection
     "o_proj",       # Reason1 attention output
-    "down_proj",    # Reason1 FFN down-projection
+    "down_proj",    # Reason1 FFN down-projection; also Cosmos3's MLP (same name)
+    "to_out",       # Cosmos3 "und" attention output
+    "to_add_out",   # Cosmos3 "gen" attention output
 ])
 
 

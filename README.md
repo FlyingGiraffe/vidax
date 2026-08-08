@@ -2,11 +2,13 @@
 
 **`vidax`** is a lightweight, hardware-agnostic JAX/Flax inference engine and
 PyTorch-to-JAX weight translator for modern Video Diffusion Transformers
-(DiTs). Built for **Google Cloud TPUs (v4, v5e, v6e)**, it eliminates
-framework overhead with clean, explicit PyTree architectures and native
-multi-chip parallelism (Megatron tensor parallelism and DeepSpeed-Ulysses
-sequence parallelism) for models like **Wan 2.1/2.2** and **Cosmos-Predict2.5**,
-with **Cosmos 3** planned next.
+(DiTs) and beyond. Built for **Google Cloud TPUs (v4, v5e, v6e)**, it
+eliminates framework overhead with clean, explicit PyTree architectures and
+native multi-chip parallelism (Megatron tensor parallelism and
+DeepSpeed-Ulysses sequence parallelism) for models like **Wan 2.1/2.2**,
+**Cosmos-Predict2.5**, and **Cosmos 3** (Nano, T2V/I2V) — the last of these
+architecturally unrelated to the first two (an omnimodal
+Mixture-of-Transformers, not a DiT continuation).
 
 ## 🔑 Key Features
 
@@ -29,12 +31,20 @@ with **Cosmos 3** planned next.
   Cosmos-Predict2.5's (2B, per-frame timestep + conditioning-mask channel,
   supporting both single-frame image2world and multi-frame video2world) —
   three genuinely different conditioning mechanisms.
-- **🌊 Flow Matching Engine:** Rectified Flow Euler sampler.
+- **🌊 Flow Matching Engine:** Rectified Flow Euler sampler (Wan) and a
+  from-scratch UniPC multistep predictor-corrector port (Cosmos-Predict2.5,
+  Cosmos 3 — including Cosmos 3's Karras-sigma schedule variant).
+- **🧩 Omnimodal Mixture-of-Transformers (Cosmos 3):** a dual-pathway
+  (causal "understanding" + full-attention "generation") transformer with
+  interleaved 3D mRoPE — architecturally unrelated to the DiT family above,
+  ported against a fixed-shape `(B, seq_len, hidden)` packing instead of
+  the reference's ragged multi-item batching.
 
-See [`docs/models/wan.md`](docs/models/wan.md) / [`docs/models/cosmos.md`](docs/models/cosmos.md)
-for full usage and [`docs/hardware_and_sharding.md`](docs/hardware_and_sharding.md)
-for the engineering reasoning (and debugging history) behind the
-sharding/JIT/dtype choices above.
+See [`docs/models/wan.md`](docs/models/wan.md) / [`docs/models/cosmos.md`](docs/models/cosmos.md) /
+[`docs/models/cosmos3.md`](docs/models/cosmos3.md) for full usage and
+[`docs/hardware_and_sharding.md`](docs/hardware_and_sharding.md) for the
+engineering reasoning (and debugging history) behind the sharding/JIT/dtype
+choices above.
 
 ## 🎲 Model Support
 
@@ -45,13 +55,16 @@ sharding/JIT/dtype choices above.
 | Wan 2.2 | 5B | T2V | ✅ | ✅ | ❌ | Verified end-to-end on real checkpoint (4-way sequence parallelism). |
 | Wan 2.2 | 5B | I2V | ✅ | ✅ | ❌ | Verified end-to-end on real checkpoint, incl. bundled example image. |
 | Wan 2.2 | 14B (A14B) | T2V/I2V | ❌ | ❌ | ❌ | Not yet implemented (two-expert MoE variant). |
-| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅ | ✅ | ❌ | Pipeline wiring fully verified (exact 1:1 param match for DiT/Reason1, clean shapes/NaN-free runs, TP + sequence-parallel all working) but output quality is **under active debugging**: fixed 3 real bugs (unpatchify channel order, per-step DiT recompilation, a missing EDM preconditioning wrapper — the last one dominant, removed a rigid scrambled-grid artifact), output is now organic-looking texture but not yet a clearly recognizable scene even at native resolution. See [`docs/models/cosmos.md`](docs/models/cosmos.md#status). |
-| Cosmos 3 | — | — | ❌ | ❌ | ❌ | Planned next model family. |
+| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅ | ✅ | ❌ | Verified end-to-end on real weights: coherent, prompt-matching output. Took 4 real bugs to get there (unpatchify channel order, per-step DiT recompilation, a missing DiT-internal `timestep_scale`, and — the dominant one, found last — an EDM preconditioning wrapper that didn't belong on this checkpoint's model class at all). See [`docs/models/cosmos.md`](docs/models/cosmos.md#status). |
+| Cosmos 3 | Nano (16B) | T2V/I2V | ✅ | ✅ | ❌ | Verified end-to-end on real weights, coherent prompt-matching output on the *first* successful full run — the Cosmos-Predict2.5 lessons (verify pieces in isolation first; no EDM preconditioning wrapper) were applied proactively. Architecturally unrelated to the DiTs above (omnimodal Mixture-of-Transformers). Scoped to T2V/I2V only (no video2video/action/sound/Reasoner). See [`docs/models/cosmos3.md`](docs/models/cosmos3.md#status). |
+| Cosmos 3 | Super (64B) / Edge (4B) | — | ❌ | ❌ | ❌ | Not yet implemented. |
 
 Full per-model details (checkpoint sources, CLI flags, verification
-methodology) live in [`docs/models/wan.md`](docs/models/wan.md) and
-[`docs/models/cosmos.md`](docs/models/cosmos.md). Benchmarking numbers will
-land in [`docs/benchmarking.md`](docs/benchmarking.md) once that harness exists.
+methodology) live in [`docs/models/wan.md`](docs/models/wan.md),
+[`docs/models/cosmos.md`](docs/models/cosmos.md), and
+[`docs/models/cosmos3.md`](docs/models/cosmos3.md). Benchmarking numbers
+will land in [`docs/benchmarking.md`](docs/benchmarking.md) once that
+harness exists.
 
 ## 🚀 Quickstart
 
@@ -83,7 +96,12 @@ assumed) — e.g. Wan's UMT5-XXL text encoder and causal-VAE/DiT-attention
 primitives, or Cosmos's Reason1 text encoder and DiT attention block.
 Cosmos-Predict2.5 additionally reuses Wan2.1's VAE directly (no
 `models/cosmos/*/vae.py` — see [`docs/models/cosmos.md`](docs/models/cosmos.md)).
-`translator/mappings/` mirrors this split one-for-one.
+`models/cosmos3/` is a separate top-level package, not nested under
+`models/cosmos/` — Cosmos 3 is architecturally unrelated to
+Cosmos-Predict2.5 (an omnimodal Mixture-of-Transformers, not a DiT
+continuation) and reuses Wan2.2's VAE directly (see
+[`docs/models/cosmos3.md`](docs/models/cosmos3.md)). `translator/mappings/`
+mirrors this split one-for-one.
 
 ```text
 vidax/                          # Repository Root
@@ -92,14 +110,16 @@ vidax/                          # Repository Root
 ├── docs/
 │   ├── models/
 │   │   ├── wan.md              # Full CLI reference & usage for all Wan scripts
-│   │   └── cosmos.md           # Full CLI reference & usage for all Cosmos scripts
+│   │   ├── cosmos.md           # Full CLI reference & usage for Cosmos-Predict2.5
+│   │   └── cosmos3.md          # Full CLI reference & usage for Cosmos 3 (Nano)
 │   ├── hardware_and_sharding.md # Sharding/JIT/dtype engineering notes + debugging history
 │   └── benchmarking.md         # JAX vs PyTorch performance (placeholder)
 ├── examples/
 │   ├── generate_wan2_1_t2v.py     # Wan2.1 t2v (1.3B)
 │   ├── generate_wan2_1_i2v.py     # Wan2.1 i2v (14B only)
 │   ├── generate_wan2_2_ti2v.py    # Wan2.2 TI2V-5B, t2v + i2v
-│   └── generate_cosmos2_5.py      # Cosmos-Predict2.5 2B, text2world/image2world/video2world
+│   ├── generate_cosmos2_5.py      # Cosmos-Predict2.5 2B, text2world/image2world/video2world
+│   └── generate_cosmos3_nano.py   # Cosmos3-Nano 16B, text2video + image2video
 └── src/
     └── vidax/                  # Core Python Package
         ├── __init__.py
@@ -120,25 +140,33 @@ vidax/                          # Repository Root
         │   │   └── wan2_2/
         │   │       ├── dit.py           # Wan2.2 DiT, per-token timestep, sequence-parallel-capable
         │   │       └── vae.py           # Wan2.2 VAE (AvgDown3D/DupUp3D/patchify), jit-per-chunk
-        │   └── cosmos/
-        │       ├── common/           # Building blocks shared by every Cosmos version
-        │       │   ├── reason1.py        # Qwen2.5-VL-7B text tower + embedding-extraction pipeline
-        │       │   ├── rope.py           # Cosmos's 3D RoPE (rotate-half convention, NTK extrapolation)
-        │       │   └── dit_layers.py     # Shared DiT attention block (per-head QK-RMSNorm)
-        │       └── cosmos2_5/
-        │           └── dit.py            # Cosmos-Predict2.5 2B DiT, AdaLN-LoRA, per-frame timestep, TP/sequence-parallel-capable
+        │   ├── cosmos/
+        │   │   ├── common/           # Building blocks shared by every Cosmos-Predict2.5 version
+        │   │   │   ├── reason1.py        # Qwen2.5-VL-7B text tower + embedding-extraction pipeline
+        │   │   │   ├── rope.py           # Cosmos's 3D RoPE (rotate-half convention, NTK extrapolation)
+        │   │   │   └── dit_layers.py     # Shared DiT attention block (per-head QK-RMSNorm)
+        │   │   └── cosmos2_5/
+        │   │       └── dit.py            # Cosmos-Predict2.5 2B DiT, AdaLN-LoRA, per-frame timestep, TP/sequence-parallel-capable
+        │   └── cosmos3/               # Cosmos 3 -- architecturally unrelated to models/cosmos/ above
+        │       ├── common/
+        │       │   ├── mrope.py          # Interleaved 3D mRoPE (distinct from both Wan's and Cosmos-Predict2.5's RoPE)
+        │       │   └── dit_layers.py     # Dual-pathway (causal "und" / full-attention "gen") attention + decoder layer
+        │       └── nano/
+        │           └── dit.py            # Cosmos3-Nano 16B DiT, no AdaLN, additive timestep injection, TP-capable
         ├── schedulers/
         │   ├── flow_match.py     # Euler / Rectified Flow Sampler (Wan)
-        │   └── unipc.py           # Flow-matching UniPC multistep solver (Cosmos-Predict2.5)
+        │   └── unipc.py           # Flow-matching UniPC multistep solver (Cosmos-Predict2.5, Cosmos 3)
         └── translator/            # PyTorch -> JAX Translation Bridge
             ├── converter.py       # Tensor layout conversion (host-side, numpy)
             └── mappings/          # Model-specific state-dict key mappings
-                ├── __init__.py       # load_torch_checkpoint_to_jax dispatch table
-                ├── common.py         # Mappers shared by every Wan version
-                ├── wan2_1.py         # Wan2.1-specific VAE/CLIP key mappings
-                ├── wan2_2.py         # Wan2.2-specific VAE key mappings
-                ├── cosmos2_5.py      # Cosmos-Predict2.5 DiT key mappings
-                └── reason1.py        # Reason1 (Qwen2.5-VL-7B) text-encoder key mappings
+                ├── __init__.py            # load_torch_checkpoint_to_jax dispatch table
+                ├── common.py              # Mappers shared by every Wan version
+                ├── wan2_1.py              # Wan2.1-specific VAE/CLIP key mappings
+                ├── wan2_2.py              # Wan2.2-specific VAE key mappings (original repo layout)
+                ├── wan2_2_diffusers.py    # Wan2.2 VAE key mappings, diffusers' AutoencoderKLWan layout (Cosmos3-Nano's VAE)
+                ├── cosmos2_5.py           # Cosmos-Predict2.5 DiT key mappings
+                ├── cosmos3.py             # Cosmos3-Nano DiT key mappings
+                └── reason1.py             # Reason1 (Qwen2.5-VL-7B) text-encoder key mappings
 ```
 
 
@@ -148,9 +176,11 @@ of vidax's own model implementations depend on `torch`/`transformers` —
 they're used solely to deserialize checkpoints and tokenize text.
 
 **→ For every other model variant (Wan2.1 I2V 14B, Wan2.2 TI2V-5B t2v/i2v,
-Cosmos-Predict2.5 2B), full CLI flag references, parallelism guidance, and
-verification status, see [`docs/models/wan.md`](docs/models/wan.md) and
-[`docs/models/cosmos.md`](docs/models/cosmos.md).**
+Cosmos-Predict2.5 2B, Cosmos3-Nano 16B), full CLI flag references,
+parallelism guidance, and verification status, see
+[`docs/models/wan.md`](docs/models/wan.md),
+[`docs/models/cosmos.md`](docs/models/cosmos.md), and
+[`docs/models/cosmos3.md`](docs/models/cosmos3.md).**
 
 ## 📚 Further Reading
 
@@ -158,6 +188,10 @@ verification status, see [`docs/models/wan.md`](docs/models/wan.md) and
   reference, and per-model verification status.
 - [`docs/models/cosmos.md`](docs/models/cosmos.md) — Cosmos-Predict2.5 usage
   guide, CLI reference, architecture notes, and verification status.
+- [`docs/models/cosmos3.md`](docs/models/cosmos3.md) — Cosmos 3 (Nano) usage
+  guide, CLI reference, architecture notes (the dual-pathway
+  Mixture-of-Transformers design, interleaved mRoPE, fixed-shape packed
+  sequence), and scope (T2V/I2V only, deliberately).
 - [`docs/hardware_and_sharding.md`](docs/hardware_and_sharding.md) — TPU/JAX
   engineering conventions (tensor layouts, Megatron vs. sequence
   parallelism, flash attention, JIT-compilation safety) and the debugging

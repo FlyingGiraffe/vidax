@@ -177,17 +177,14 @@ text prompt varies).
 
 ### Status
 
-**Pipeline runs end-to-end against all three real checkpoints (DiT, VAE,
-Reason1) on TPU (v4-8), and produces plausible-looking but not yet fully
-photorealistic/coherent output.** This is a meaningfully different (and more
-honest) claim than earlier revisions of this doc made — those were verified
-only for *wiring* (shapes, no NaNs/crashes, exact parameter-tree matches),
-not for whether the generated video actually looks right, since none of
-that verification decoded and visually inspected a frame. Once it was, the
-first real run's output was a rigid, perfectly regular grid of scrambled
-color blobs, not a video — a real, since-fixed bug, not a quality issue.
-See [`docs/hardware_and_sharding.md`](../hardware_and_sharding.md#7-cosmos-predict25-output-is-a-grid-of-random-colors-real-diffusion-bugs)
-for the full diagnostic writeup; summary:
+**Verified end-to-end on real weights, both text2world and image2world:
+output is coherent, prompt-matching video** (e.g. a recognizable red panda
+climbing a bamboo stalk for T2V; a stable, identity-preserving subject for
+I2V). Getting there took four real, sequentially-discovered bugs — the
+fourth (and dominant) one only surfaced after the first three were fixed and
+output was still texture, not a scene. Full diagnostic writeup in
+[`docs/hardware_and_sharding.md`](../hardware_and_sharding.md#7-cosmos-predict25-output-is-a-grid-of-random-colors-real-diffusion-bugs);
+summary:
 
 - **`unpatchify`'s channel order didn't match the reference's** (it isn't
   simply `patchify`'s inverse — the reference genuinely uses a different
@@ -197,33 +194,50 @@ for the full diagnostic writeup; summary:
   just the small piece of code that read it) — 30 low-resolution steps took
   16+ minutes wall-clock, almost entirely compile time. Fixed; the DiT
   forward pass now compiles once and is reused for every step.
-- **The dominant bug**: this repo's implementation never applied
-  Cosmos-Predict2.5's EDM-style preconditioning wrapper (`c_skip`/`c_out`/
-  `c_in`/`c_noise`, `RectifiedFlowScaling` in the reference) — the DiT
-  received the raw, unscaled noisy latent and a timestep off by roughly
-  **1000x** from what it was trained on, at every single sampling step.
-  Fixing this (implemented in `generate_cosmos2_5.py`'s `compute_velocity`,
-  not the DiT itself — sampling-loop orchestration, like Wan's own `y`/mask
-  construction) **completely removed the grid artifact**, replacing it with
-  a qualitatively different, spatially organic texture — strong evidence the
-  fix's direction and mechanism are correct.
+- **A missing `timestep_scale=0.001` rescale** inside the DiT itself
+  (`MinimalV1LVGDiT.forward` in the reference) — a second, DiT-internal
+  timestep rescale distinct from the sampling loop's own EDM `t` conversion.
+  Missing it left the network conditioned on a ~1000x out-of-distribution
+  noise level at every step. Fixed (`CosmosDiT.timestep_scale`).
+- **The dominant bug, found last**: `generate_cosmos2_5.py` wrapped every
+  DiT call in an EDM-style `c_in`/`c_skip`/`c_out`/`c_noise` preconditioning
+  transform (`RectifiedFlowScaling` in the reference) that turned out to
+  belong to a *different* reference model class entirely —
+  `RectifiedFlowScaling` is never imported by `Text2WorldModelRectifiedFlow`/
+  `Video2WorldModelRectifiedFlow` (the classes this checkpoint's own
+  rectified-flow training config actually uses). The real reference feeds
+  the raw noisy latent to the DiT unscaled and uses the DiT's raw output
+  directly as the velocity prediction, fed straight into the scheduler's own
+  `x0 = sample - sigma_t * model_output` — exactly what
+  `vidax.schedulers.unipc.FlowUniPCMultistepScheduler` was already written
+  to expect (its own docstring says as much). Removing the entire
+  preconditioning wrapper — not adjusting it — was the fix. A real-photo
+  low-noise denoising probe (encode a real image, add a *small* amount of
+  noise, one DiT forward pass, decode) was the diagnostic that found this:
+  it reconstructed the photo almost perfectly at low noise and degraded into
+  the same meaningless texture at high noise, isolating the bug to
+  *noise-level conditioning*, not the network itself.
 
-**Not yet resolved**: even after all three fixes, at the model's native
-704x1280 resolution with the reference's own 35-step/`guide_scale=7`
-defaults, output is organic-looking texture, not yet a clearly recognizable
-scene. Ablations so far (guidance scale, resolution, step count) haven't
-identified a further specific bug, and the architecture-level verification
-in [Architecture notes](#architecture-notes) (RoPE, `Attention`, timestep
-embedding, block modulation formula, `GPT2FeedForward`'s exact GELU variant)
-has been checked line-by-line against the actual reference source this
-round, not just the earlier research notes' paraphrase of it, and matches.
-Whether the remaining gap is a subtler bug still to find, a
-`bfloat16`-precision issue, or something about testing with only a handful
-of frames/steps is open. Treat this model as **under active debugging, not
-yet producing verified-correct output** — the exact 1:1 DiT/Reason1
-parameter-tree matches and clean, NaN-free, exactly-correct-shaped script
-runs described below are still true and still valuable signal, just not
-sufficient on their own to certify output quality.
+Two more real bugs surfaced and were fixed during the same investigation,
+lower severity than the four above but worth noting since they're the kind
+that silently corrupt output without ever erroring:
+- A **swapped mask-channel concatenation order** at the DiT's input
+  (`[latents, condition_video_mask, padding_mask]`, not the order this port
+  originally used) — the two mask channels carry opposite-meaning constants
+  for plain text2world, so the swap fed the trained embedding weights
+  inverted per-channel semantics.
+- **Attention-entropy/gate diagnostics** (checking whether cross-attention
+  meaningfully discriminates among text tokens, and how much its AdaLN gate
+  contributes relative to self-attention's) that, in isolation, initially
+  looked like a smoking gun for a text-conditioning bug — ultimately a red
+  herring once the real (preconditioning) bug was found and fixed; kept as
+  a documented dead end since the diagnostic methodology itself (real-weight
+  entropy/gate measurement, not just architecture re-reading) is reusable.
+
+See [`docs/hardware_and_sharding.md`](../hardware_and_sharding.md#7-cosmos-predict25-output-is-a-grid-of-random-colors-real-diffusion-bugs)
+for the full narrative, including the ablations that ruled out other
+hypotheses (VAE round-trip fidelity, RoPE relative-position invariants,
+weight-loading exact-match checks) before the real bug was found.
 
 - DiT: loading `model_ema_bf16.pt` through the translator mapping and
   comparing every leaf against `CosmosDiT`'s initialized parameter tree
@@ -335,23 +349,28 @@ from a full quality judgment, which still needs the native resolution.
   order/step count). See its module docstring for the JAX-specific state
   threading (`UniPCState`, since JAX prefers explicit immutable state over
   the reference's in-place-mutated scheduler object).
-- **EDM-style preconditioning wrapper** (`generate_cosmos2_5.py`'s
-  `compute_velocity`, not the DiT itself — sampling-loop orchestration):
-  the DiT is never called with the raw noisy latent/sigma directly. Given
-  `t = sigma / (1 + sigma)` (note: *not* `sigma` itself), the DiT's actual
-  input is `xt * (1 - t)` and its timestep is `t` (`[0, 1)`, not scaled to
-  `[0, 1000]`); its raw output is combined back into an x0 prediction via
-  `(1 - t) * xt - t * net_output`, *not* used directly. This was originally
-  missing entirely (see `docs/hardware_and_sharding.md`'s Cosmos section,
-  Bug 3) — the single largest correctness bug found in this model's port so
-  far, and the reason output looked like scrambled noise rather than a
-  video regardless of resolution, step count, or guidance scale.
+- **No preconditioning wrapper — the DiT's raw output is the velocity,
+  used directly** (`generate_cosmos2_5.py`'s `compute_velocity`, not the DiT
+  itself — sampling-loop orchestration). The noisy latent is passed to the
+  DiT unscaled; the timestep passed in is `sigma * num_train_timesteps`
+  (the DiT's own `timestep_scale=0.001` divides this back down internally —
+  see the checkpoint-loading note above); the DiT's raw output (after CFG
+  combination) is fed straight into `FlowUniPCMultistepScheduler.step` as
+  `model_output`, which internally computes `x0 = sample - sigma_t *
+  model_output` — no `c_skip`/`c_out`/`c_in` reconstruction anywhere. An
+  earlier revision of this port wrapped every DiT call in exactly that kind
+  of EDM-style preconditioning transform, borrowed from a reference class
+  (`RectifiedFlowScaling`) that turns out not to apply to this checkpoint at
+  all — see [Status](#status) for the full story. That was, by a wide
+  margin, the largest correctness bug found in this model's port.
 
 ## Coming later
 
 - **Cosmos-Predict2.5 non-2B variants**, if released.
-- **Cosmos 3** — reference code already present under `refs/cosmos-main`,
-  not yet ported.
+
+**Cosmos 3** is a separate, architecturally unrelated model family (a
+Mixture-of-Transformers, not a DiT continuation of Cosmos-Predict2.5) — see
+[`docs/models/cosmos3.md`](cosmos3.md), now implemented (T2V/I2V).
 
 See the [parity matrix in the root README](../../README.md#model-support--parity-matrix)
 for the up-to-date status across all variants.

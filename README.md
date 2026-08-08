@@ -1,6 +1,6 @@
 # vidax 🎬⚡
 
-**`vidax`** is a lightweight, hardware-agnostic JAX/Flax inference engine and
+**`vidax`** is a lightweight JAX/Flax inference engine and
 PyTorch-to-JAX weight translator for modern Video Diffusion Transformers
 (DiTs) and beyond. Built for **Google Cloud TPUs (v4, v5e, v6e)**, it
 eliminates framework overhead with clean, explicit PyTree architectures and
@@ -12,60 +12,51 @@ Mixture-of-Transformers, not a DiT continuation).
 
 ## 🔑 Key Features
 
-- **🚀 Native TPU Performance:** `jax.sharding` device meshes + a real Pallas
-  TPU flash-attention kernel (not `jax.nn`'s materializing default).
-- **🔄 Universal Weight Translator:** Converts PyTorch `.safetensors`/`.pth`
-  checkpoints on the fly — key mappings and layout transpositions
-  (`NCHW`/`NDHWC` → `NHWC`/`T_H_W_In_Out`) handled automatically, verified
-  against every model via exact 1:1 parameter-tree matches.
+- **🚀 Native TPU performance:** `jax.sharding` device meshes and a real
+  Pallas flash-attention kernel, not `jax.nn`'s materializing default.
+- **🔄 Universal weight translator:** loads PyTorch `.safetensors`/`.pth`
+  checkpoints straight into Flax pytrees — key mappings and layout
+  transpositions handled automatically, verified against every model via
+  exact 1:1 parameter-tree matches.
 - **🧵 Two parallelism strategies:** Megatron-style tensor parallelism and
-  DeepSpeed-Ulysses sequence parallelism, since which one actually helps
-  depends on whether *weight* or *per-token activation* memory is the
-  bottleneck for a given model/resolution — see
+  DeepSpeed-Ulysses sequence parallelism, picked per model/resolution
+  depending on whether weight or activation memory is the bottleneck — see
   [`docs/hardware_and_sharding.md`](docs/hardware_and_sharding.md).
-- **⚡ 3D Causal VAE + 3D RoPE + UMT5-XXL text encoder:** full JAX ports,
-  matching the reference's frame-chunked causal decoding and per-layer
-  relative-position bias exactly.
-- **🖼️ Image/Video-to-Video:** Wan2.1's (14B, CLIP cross-attention + extra
-  latent channel), Wan2.2's (5B, per-token-timestep latent substitution), and
-  Cosmos-Predict2.5's (2B, per-frame timestep + conditioning-mask channel,
-  supporting both single-frame image2world and multi-frame video2world) —
-  three genuinely different conditioning mechanisms.
-- **🌊 Flow Matching Engine:** Rectified Flow Euler sampler (Wan) and a
-  from-scratch UniPC multistep predictor-corrector port (Cosmos-Predict2.5,
-  Cosmos 3 — including Cosmos 3's Karras-sigma schedule variant).
-- **🧩 Omnimodal Mixture-of-Transformers (Cosmos 3):** a dual-pathway
-  (causal "understanding" + full-attention "generation") transformer with
-  interleaved 3D mRoPE — architecturally unrelated to the DiT family above,
-  ported against a fixed-shape `(B, seq_len, hidden)` packing instead of
-  the reference's ragged multi-item batching. One shared, config-driven
-  implementation covers both Nano (16B) and Edge (4B).
-
-See [`docs/models/wan.md`](docs/models/wan.md) / [`docs/models/cosmos.md`](docs/models/cosmos.md) /
-[`docs/models/cosmos3.md`](docs/models/cosmos3.md) for full usage and
-[`docs/hardware_and_sharding.md`](docs/hardware_and_sharding.md) for the
-engineering reasoning (and debugging history) behind the sharding/JIT/dtype
-choices above.
+- **🌊 Flow matching engine:** a Rectified Flow Euler sampler and a
+  from-scratch UniPC multistep predictor-corrector port, covering every
+  supported model's native scheduler (including Cosmos 3's Karras-sigma
+  variant).
+- **🖼️ Faithful image/video conditioning:** each model family's own
+  conditioning mechanism ported exactly, not approximated — CLIP
+  cross-attention, per-token/per-frame latent substitution, and
+  conditioning-mask channels all show up where the reference actually uses
+  them.
+- **🧩 Broad, growing model coverage:** DiTs (Wan 2.1/2.2, Cosmos-Predict2.5)
+  and beyond — Cosmos 3's omnimodal Mixture-of-Transformers, a genuinely
+  different architecture, ported with the same care and verification bar.
 
 ## 🎲 Model Support
 
-| Model Family | Variant | Task | Implemented | Tested (TPU) | Benchmarked (JAX vs PyTorch) | Status / Notes |
-| --- | --- | --- | --- | --- | --- | --- |
-| Wan 2.1 | 1.3B | T2V | ✅ | ✅ | ❌ | Verified end-to-end on real checkpoint, output visually confirmed correct. |
-| Wan 2.1 | 14B | T2V | ✅ | ✅ | ❌ | Verified end-to-end on real checkpoint (4-way tensor parallelism). Shares `WanDiT` with the 1.3B model via a config preset. |
-| Wan 2.1 | 14B | I2V | ✅ | ✅ | ❌ | Verified end-to-end on real checkpoint. Found and fixed two pre-existing bugs specific to the image-conditioning path (never exercised against real weights before): a `WanVAEEncoder.pre_process` call that doesn't exist for Wan2.1's VAE, and a wrong `temperal_downsample` default. See [`docs/models/wan.md`](docs/models/wan.md#wan21-i2v-14b--generate_wan2_1_i2vpy). |
-| Wan 2.2 | 5B | T2V | ✅ | ✅ | ❌ | Verified end-to-end on real checkpoint (4-way sequence parallelism). |
-| Wan 2.2 | 5B | I2V | ✅ | ✅ | ❌ | Verified end-to-end on real checkpoint, incl. bundled example image. |
-| Wan 2.2 | 14B (A14B) | T2V/I2V | ❌ | ❌ | ❌ | Not yet implemented (two-expert MoE variant). |
-| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅ | ✅ | ❌ | Verified end-to-end on real weights: coherent, prompt-matching output. Took 4 real bugs to get there (unpatchify channel order, per-step DiT recompilation, a missing DiT-internal `timestep_scale`, and — the dominant one, found last — an EDM preconditioning wrapper that didn't belong on this checkpoint's model class at all). See [`docs/models/cosmos.md`](docs/models/cosmos.md#status). |
-| Cosmos 3 | Nano (16B) | T2V/I2V | ✅ | ✅ | ❌ | Verified end-to-end on real weights, coherent prompt-matching output on the *first* successful full run — the Cosmos-Predict2.5 lessons (verify pieces in isolation first; no EDM preconditioning wrapper) were applied proactively. Architecturally unrelated to the DiTs above (omnimodal Mixture-of-Transformers). Scoped to T2V/I2V only (no video2video/action/sound/Reasoner). See [`docs/models/cosmos3.md`](docs/models/cosmos3.md#status). |
-| Cosmos 3 | Edge (4B) | T2V/I2V | ✅ | ✅ | ❌ | Verified end-to-end on real weights, both tasks. Shares Nano's DiT code via config toggles (`hidden_act="relu2"` squared-ReLU MLP, no `und` q/k RMSNorm, an extra `k_norm_und_for_gen` norm) rather than a parallel implementation. See [`docs/models/cosmos3.md`](docs/models/cosmos3.md#status). |
-| Cosmos 3 | Super (64B) | — | ❌ | ❌ | ❌ | Not yet implemented. |
+Rows are merged across tasks when one script/checkpoint handles all of them
+(e.g. Wan2.2 TI2V-5B, Cosmos-Predict2.5); kept separate when the reference
+ships them as genuinely distinct checkpoints/pipelines (e.g. Wan2.1's T2V vs.
+I2V, Wan2.2's A14B).
 
-Full per-model details (checkpoint sources, CLI flags, verification
-methodology) live in [`docs/models/wan.md`](docs/models/wan.md),
-[`docs/models/cosmos.md`](docs/models/cosmos.md), and
-[`docs/models/cosmos3.md`](docs/models/cosmos3.md). Benchmarking numbers
+| Model Family | Variant | Task | Implemented | Tested (TPU) | Benchmarked | Guide | Weights |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Cosmos 3 | Nano (16B) | T2V/I2V | ✅ | ✅ | ❌ | [cosmos3.md](docs/models/cosmos3.md) | [🤗 Huggingface]() |
+| Cosmos 3 | Edge (4B) | T2V/I2V | ✅ | ✅ | ❌ | [cosmos3.md](docs/models/cosmos3.md) | [🤗 Huggingface]() |
+| Cosmos-Predict2.5 | 14B | — | ❌ | ❌ | ❌ | [cosmos.md](docs/models/cosmos.md) | [🤗 Huggingface]() |
+| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅ | ✅ | ❌ | [cosmos.md](docs/models/cosmos.md) | [🤗 Huggingface]() |
+| Wan 2.2 | A14B | T2V | ❌ | ❌ | ❌ | [wan.md](docs/models/wan.md) | [🤗 Huggingface]() |
+| Wan 2.2 | A14B | I2V | ❌ | ❌ | ❌ | [wan.md](docs/models/wan.md) | [🤗 Huggingface]() |
+| Wan 2.2 | 5B | T2V/I2V | ✅ | ✅ | ❌ | [wan.md](docs/models/wan.md) | [🤗 Huggingface]() |
+| Wan 2.1 | 14B | T2V | ✅ | ✅ | ❌ | [wan.md](docs/models/wan.md) | [🤗 Huggingface]() |
+| Wan 2.1 | 14B | I2V | ✅ | ✅ | ❌ | [wan.md](docs/models/wan.md) | [🤗 Huggingface]() |
+| Wan 2.1 | 1.3B | T2V | ✅ | ✅ | ❌ | [wan.md](docs/models/wan.md) | [🤗 Huggingface]() |
+
+Per-model checkpoint sources, CLI flags, architecture notes, and
+verification status live in each **Guide** link above. Benchmarking numbers
 will land in [`docs/benchmarking.md`](docs/benchmarking.md) once that
 harness exists.
 
@@ -89,27 +80,15 @@ python examples/generate_wan2_1_t2v.py \
 
 ## 🛠 Directory Layout
 
-`vidax` strictly adheres to the standard Python `src`-layout. `models/wan/`
-and `models/cosmos/` each hold one subpackage per released architecture
-version (`wan2_1/`, `wan2_2/`, `cosmos2_5/`, ...), since each version's
-DiT/VAE differ enough to need their own modules, plus a `common/` package
-per family for building blocks that are byte-for-byte identical across that
-family's versions (verified against the reference PyTorch source, not
-assumed) — e.g. Wan's UMT5-XXL text encoder and causal-VAE/DiT-attention
-primitives, or Cosmos's Reason1 text encoder and DiT attention block.
-Cosmos-Predict2.5 additionally reuses Wan2.1's VAE directly (no
-`models/cosmos/*/vae.py` — see [`docs/models/cosmos.md`](docs/models/cosmos.md)).
-`models/cosmos3/` is a separate top-level package, not nested under
-`models/cosmos/` — Cosmos 3 is architecturally unrelated to
-Cosmos-Predict2.5 (an omnimodal Mixture-of-Transformers, not a DiT
-continuation) and reuses Wan2.2's VAE directly (see
-[`docs/models/cosmos3.md`](docs/models/cosmos3.md)). Unlike `models/wan/`
-and `models/cosmos/`, `models/cosmos3/` has no version subpackages: Nano and
-Edge are the same architecture at different sizes (like Wan2.1's 1.3B/14B),
-not different architecture versions, so one flat `dit.py`/`dit_layers.py`
-plus a `configs.py` of named hyperparameter presets covers both — the same
-config-preset pattern `models/wan/wan2_1/configs.py` uses for Wan2.1's own
-size variants. `translator/mappings/` mirrors the family split one-for-one.
+`vidax` follows the standard Python `src`-layout. `models/` holds one
+subpackage per model family; within `models/wan/` and `models/cosmos/`, each
+released *architecture version* (`wan2_1/`, `wan2_2/`, `cosmos2_5/`) gets its
+own subpackage, plus a `common/` package for building blocks shared across
+that family's versions. `models/cosmos3/` is flat instead (no version
+subpackages): Nano and Edge are the same architecture at different sizes,
+not different versions, so one `dit.py` plus a `configs.py` of named
+hyperparameter presets covers both. `translator/mappings/` mirrors this
+layout one-for-one.
 
 ```text
 vidax/                          # Repository Root
@@ -177,34 +156,5 @@ vidax/                          # Repository Root
                 └── reason1.py             # Reason1 (Qwen2.5-VL-7B) text-encoder key mappings
 ```
 
-
-Checkpoints come from the official Wan repos on HuggingFace (e.g.
-[Wan2.1-T2V-1.3B](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B)). Neither
-of vidax's own model implementations depend on `torch`/`transformers` —
-they're used solely to deserialize checkpoints and tokenize text.
-
-**→ For every other model variant (Wan2.1 T2V 14B, Wan2.1 I2V 14B, Wan2.2
-TI2V-5B t2v/i2v, Cosmos-Predict2.5 2B, Cosmos3-Nano 16B, Cosmos3-Edge 4B),
-full CLI flag references, parallelism guidance, and verification status, see
-[`docs/models/wan.md`](docs/models/wan.md),
-[`docs/models/cosmos.md`](docs/models/cosmos.md), and
-[`docs/models/cosmos3.md`](docs/models/cosmos3.md).**
-
-## 📚 Further Reading
-
-- [`docs/models/wan.md`](docs/models/wan.md) — Wan2.1/2.2 usage guide, CLI
-  reference, and per-model verification status.
-- [`docs/models/cosmos.md`](docs/models/cosmos.md) — Cosmos-Predict2.5 usage
-  guide, CLI reference, architecture notes, and verification status.
-- [`docs/models/cosmos3.md`](docs/models/cosmos3.md) — Cosmos 3 (Nano/Edge)
-  usage guide, CLI reference, architecture notes (the dual-pathway
-  Mixture-of-Transformers design, interleaved mRoPE, fixed-shape packed
-  sequence, the config toggles that separate Nano from Edge), and scope
-  (T2V/I2V only, deliberately).
-- [`docs/hardware_and_sharding.md`](docs/hardware_and_sharding.md) — TPU/JAX
-  engineering conventions (tensor layouts, Megatron vs. sequence
-  parallelism, flash attention, JIT-compilation safety) and the debugging
-  history behind them (OOM investigations, a compile-time "hang", a couple
-  of subtle correctness bugs and how they were found).
-- [`docs/benchmarking.md`](docs/benchmarking.md) — JAX vs. PyTorch
-  performance comparisons (placeholder, not yet populated).
+Neither of vidax's own model implementations depend on `torch`/`transformers`
+— they're used solely to deserialize checkpoints and tokenize text.

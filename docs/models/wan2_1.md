@@ -1,21 +1,18 @@
-# Wan (2.1 / 2.2) — Usage Guide
+# Wan2.1 — Usage Guide
 
-Three standalone TPU inference scripts live in `examples/`, one per model
-variant. They share the same building blocks (`vidax.core`, `vidax.schedulers`,
-`vidax.translator`) but differ in checkpoint format, resolution defaults, and
-parallelism strategy — see [`docs/hardware_and_sharding.md`](../hardware_and_sharding.md)
-for the engineering reasoning behind those differences (Megatron vs. sequence
-parallelism, flash attention, JIT-safety, the dtype-casting/decode-speed bugs
-found getting Wan2.2 working).
+Two standalone TPU inference scripts live in `examples/`, one per task. They
+share the same building blocks (`vidax.core`, `vidax.schedulers`,
+`vidax.translator`) — see [`docs/hardware_and_sharding.md`](../hardware_and_sharding.md)
+for the engineering reasoning behind the parallelism strategy (Megatron
+tensor parallelism, flash attention, JIT-safety).
 
-| Script | Model | Params | Task | Checkpoint dir example |
-| --- | --- | --- | --- | --- |
-| `generate_wan2_1_t2v.py --model_size 1.3B` | Wan2.1 | 1.3B | Text-to-Video | `Wan2.1-T2V-1.3B` |
-| `generate_wan2_1_t2v.py --model_size 14B` | Wan2.1 | 14B | Text-to-Video | `Wan2.1-T2V-14B` |
-| `generate_wan2_1_i2v.py` | Wan2.1 | 14B | Image-to-Video | `Wan2.1-I2V-14B-480P`/`720P` |
-| `generate_wan2_2_ti2v.py` | Wan2.2 | 5B | Text-to-Video **and** Image-to-Video | `Wan2.2-TI2V-5B` |
+| Script | Params | Task | Checkpoint dir example |
+| --- | --- | --- | --- |
+| `generate_wan2_1_t2v.py --model_size 1.3B` | 1.3B | Text-to-Video | `Wan2.1-T2V-1.3B` |
+| `generate_wan2_1_t2v.py --model_size 14B` | 14B | Text-to-Video | `Wan2.1-T2V-14B` |
+| `generate_wan2_1_i2v.py` | 14B | Image-to-Video | `Wan2.1-I2V-14B-480P`/`720P` |
 
-Both Wan2.1 T2V sizes share the same architecture and script
+Both T2V sizes share the same architecture and script
 (`vidax.models.wan.wan2_1.dit.WanDiT`, fully config-driven); `--model_size`
 just selects which hyperparameter preset
 (`vidax.models.wan.wan2_1.configs.T2V_1_3B_CONFIG`/`T2V_14B_CONFIG`) to
@@ -23,20 +20,20 @@ build it with. I2V only ships as 14B (no 1.3B I2V checkpoint exists), so its
 script has no `--model_size` flag — it always builds
 `vidax.models.wan.wan2_1.configs.I2V_14B_CONFIG`.
 
-All three require the `torch` extra (to deserialize `.pth`/`.safetensors`
+Both require the `torch` extra (to deserialize `.pth`/`.safetensors`
 checkpoints) and the `text` extra (tokenization):
 
 ```bash
 pip install -e ".[tpu,torch,text]"
 ```
 
-`--tokenizer_path` defaults to `<t5_checkpoint_dir>/google/umt5-xxl` for every
-script, matching the official HuggingFace repo layouts; pass it explicitly if
+`--tokenizer_path` defaults to `<t5_checkpoint_dir>/google/umt5-xxl` for both
+scripts, matching the official HuggingFace repo layout; pass it explicitly if
 yours differs.
 
 ---
 
-## Wan2.1 T2V (1.3B / 14B) — `generate_wan2_1_t2v.py`
+## T2V (1.3B / 14B) — `generate_wan2_1_t2v.py`
 
 Checkpoints (DiT `.safetensors`, VAE `.pth`, T5 `.pth` + its
 `google/umt5-xxl` tokenizer folder) come from the official
@@ -60,8 +57,7 @@ python examples/generate_wan2_1_t2v.py \
 ### 14B generation
 
 The 14B DiT ships sharded across multiple `.safetensors` files with a
-`.safetensors.index.json` manifest — pass that manifest's path, same as
-Wan2.2's DiT:
+`.safetensors.index.json` manifest — pass that manifest's path:
 
 ```bash
 python examples/generate_wan2_1_t2v.py \
@@ -130,11 +126,11 @@ PyTorch reference's model code) — it's just that the reference pipeline's
 `generate()` never uses it.
 
 **Status:** fully verified end-to-end against real checkpoints for both
-1.3B and 14B, output confirmed coherent (see the [parity matrix](../../README.md#model-support--parity-matrix)).
+1.3B and 14B, output confirmed coherent (see the [parity matrix](../../README.md#-model-support)).
 
 ---
 
-## Wan2.1 I2V (14B) — `generate_wan2_1_i2v.py`
+## I2V (14B) — `generate_wan2_1_i2v.py`
 
 I2V only ships as a **14B** model (`Wan2.1-I2V-14B-480P`/`720P` on
 [HuggingFace](https://huggingface.co/Wan-AI) — there is no 1.3B I2V
@@ -201,106 +197,9 @@ path was actually exercised.
 
 ---
 
-## Wan2.2 TI2V (5B) — `generate_wan2_2_ti2v.py`
+See [`docs/models/wan2_2.md`](wan2_2.md) for Wan2.2 (TI2V-5B, A14B),
+[`docs/models/cosmos.md`](cosmos.md) for Cosmos-Predict2.5, and
+[`docs/models/cosmos3.md`](cosmos3.md) for Cosmos 3.
 
-Wan2.2's TI2V-5B is a single checkpoint that supports **both** text-to-video
-and image-conditioned generation in the same script: pass `--image_path` for
-i2v, omit it for t2v. Architecturally the two use the model quite
-differently — image conditioning works by substituting the known
-conditioning frame's latent back into `x` between sampling steps (driven by
-a per-token timestep of 0 for that frame's tokens, re-applied after every
-step), not by any extra model input the way Wan2.1's i2v does. See
-`vidax.models.wan.wan2_2.dit`'s module docstring for the architecture side,
-and the reference's `WanTI2V.i2v` (`masks_like`'s frame-0 mask) for the
-sampling-loop mechanics this mirrors.
-
-### Text-to-video
-
-```bash
-python examples/generate_wan2_2_ti2v.py \
-  --dit_checkpoint_path "./checkpoints/Wan2.2-TI2V-5B/diffusion_pytorch_model.safetensors.index.json" \
-  --vae_checkpoint_path "./checkpoints/Wan2.2-TI2V-5B/Wan2.2_VAE.pth" \
-  --t5_checkpoint_path "./checkpoints/Wan2.2-TI2V-5B/models_t5_umt5-xxl-enc-bf16.pth" \
-  --prompt "A majestic red panda climbing a bamboo tree in the snow, 4k" \
-  --tensor_parallel_size 4 \
-  --output_path "out/output_ti2v.mp4"
-```
-
-### Image-to-video
-
-```bash
-python examples/generate_wan2_2_ti2v.py \
-  --dit_checkpoint_path "./checkpoints/Wan2.2-TI2V-5B/diffusion_pytorch_model.safetensors.index.json" \
-  --vae_checkpoint_path "./checkpoints/Wan2.2-TI2V-5B/Wan2.2_VAE.pth" \
-  --t5_checkpoint_path "./checkpoints/Wan2.2-TI2V-5B/models_t5_umt5-xxl-enc-bf16.pth" \
-  --image_path "./checkpoints/Wan2.2-TI2V-5B/examples/i2v_input.JPG" \
-  --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside." \
-  --tensor_parallel_size 4 \
-  --output_path "out/output_ti2v_i2v.mp4"
-```
-
-### CLI reference
-
-| Flag | Default | Notes |
-| --- | --- | --- |
-| `--dit_checkpoint_path` | *required* | Points at the `.safetensors.index.json` manifest, not a single `.safetensors` file: the 5B (and 14B) DiT ships sharded across multiple files. `load_torch_checkpoint_to_jax` resolves and merges every shard automatically; a single non-sharded `.safetensors` still works too. |
-| `--vae_checkpoint_path` | *required* | `Wan2.2_VAE.pth` — a different file *and architecture* from Wan2.1's `Wan2.1_VAE.pth` (48-channel latent space, 2x2 pixel-patchify wrapping, 16x spatial / 4x temporal compression). See `vidax.models.wan.wan2_2.vae`'s module docstring. |
-| `--t5_checkpoint_path` | *required* | Same file format (and even filename) as Wan2.1 — the text encoder is byte-identical across versions (`map_wan_t5_keys`). |
-| `--tokenizer_path` | `<t5_dir>/google/umt5-xxl` | Tokenizer directory. |
-| `--image_path` | `None` | Conditioning image; omit for t2v. When given, output resolution is derived from the image's aspect ratio + `--max_area` instead of `--height`/`--width` (which are then ignored) — matches the reference's `WanTI2V.i2v`, which has no fixed `size` the way `.t2v` does. |
-| `--max_area` | `704*1280` | i2v only: target output pixel area; actual (height, width) derived via `best_output_size` (ported directly from the reference). |
-| `--prompt` | *required*, 1+ values | Same broadcast semantics as Wan2.1 t2v. |
-| `--negative_prompt` | reference's `sample_neg_prompt` | Negative prompt for CFG. |
-| `--guide_scale` | `5.0` | CFG scale. |
-| `--tensor_parallel_size` | `1` | **Means something different here than in the Wan2.1 scripts** — see below. |
-| `--dtype` | `bfloat16` | Same choices/caveats as Wan2.1. |
-| `--seed` | `0` | Initial noise seed. |
-| `--num_steps` | reference per-mode default | `None` resolves to the reference's own default per mode: 50 for t2v, 40 for i2v (`WanTI2V.generate`/`.i2v`). |
-| `--shift` | `5.0` | Reference default for TI2V-5B. |
-| `--height` | `704` | Ignored if `--image_path` is given. Must be a multiple of 16 (VAE spatial stride). |
-| `--width` | `1280` | Ignored if `--image_path` is given. Must be a multiple of 16. |
-| `--num_frames` | `121` | Reference default for TI2V-5B (vs. 81 for Wan2.1). |
-| `--fps` | `24` | Reference `sample_fps` for TI2V-5B (vs. 16 for Wan2.1). |
-| `--output_path` | `output_video.mp4` | With multiple prompts, each saved as `<output_path>_<i>.mp4`. |
-
-**`--tensor_parallel_size` note:** at TI2V-5B's only supported resolution
-(704x1280, 121 frames), the patch-token sequence is ~27k long, and Wan2.2's
-per-token AdaLN modulation tensors scale with that directly — Megatron-style
-tensor parallelism (what the Wan2.1 scripts use) keeps the *full* sequence on
-every device and doesn't shrink those, so it doesn't fit a 4-chip v4 slice's
-HBM even after quartering weight memory. This script therefore **always**
-uses `WanDiT(sequence_parallel=True)` internally when `--tensor_parallel_size
-> 1`, sharding the token sequence itself between blocks instead (DeepSpeed-
-Ulysses — see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)).
-`--tensor_parallel_size` sets both the DiT's sequence-parallel size and T5's
-ordinary Megatron tensor-parallel size (T5's sequence length, 512, was never
-the bottleneck) — it must divide both `num_heads` (24 for the DiT, 64 for T5)
-and the DiT's patch token count. This is true by construction at the default
-704x1280x121 resolution for 1/2/4/5/8-way splits; for i2v's image-derived
-resolution it isn't guaranteed, so the script grows the derived width in
-32px steps (up to `tensor_parallel_size - 1` times — guaranteed to find a
-divisible value) and logs when it does, rather than failing outright.
-
-**Status:** verified end-to-end on the real TI2V-5B checkpoint for **both**
-t2v and i2v, on a v4-8 (4 chips), `--tensor_parallel_size 4` (3 sampling
-steps, to keep smoke-test compile time reasonable — output at 3 steps is a
-coherent but heavily under-denoised blur, as expected that far from
-convergence; that confirms the pipeline runs correctly end-to-end, not final
-output quality, which needs the full step count to judge). See the
-[hardware doc](../hardware_and_sharding.md) for the bugs found and fixed
-getting this far (dtype-casting OOM, VAE decode compile time, i2v
-resolution-divisibility, host-transfer for decoded chunks).
-
----
-
-## Coming later
-
-- **Wan2.2 A14B (14B MoE, T2V/I2V)** — not yet implemented; will need its
-  own DiT variant support (two-expert high/low-noise split) once checkpoints
-  are available.
-
-See [`docs/models/cosmos.md`](cosmos.md) and [`docs/models/cosmos3.md`](cosmos3.md)
-for the Cosmos-Predict2.5 and Cosmos 3 model families.
-
-See the [parity matrix in the root README](../../README.md#model-support--parity-matrix)
+See the [Model Support table in the root README](../../README.md#-model-support)
 for the up-to-date status across all variants.

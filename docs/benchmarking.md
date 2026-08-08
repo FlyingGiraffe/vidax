@@ -9,10 +9,11 @@ harnesses exist.
 
 - Wan2.1 T2V 1.3B (JAX/TPU vs. PyTorch/GPU)
 - Wan2.1 I2V 14B
-- Wan2.2 TI2V 5B (t2v and i2v)
+- Wan2.2 TI2V 5B (t2v and i2v), A14B (t2v and i2v)
 - Per-device and multi-device (tensor-parallel / sequence-parallel) scaling
 
-Nothing here yet — see [`docs/models/wan.md`](models/wan.md) for current
+Nothing here yet — see [`docs/models/wan2_1.md`](models/wan2_1.md)/
+[`docs/models/wan2_2.md`](models/wan2_2.md) for current
 functional status per model, and
 [`docs/hardware_and_sharding.md`](hardware_and_sharding.md) for the
 TPU/JAX-specific engineering this repo already relies on.

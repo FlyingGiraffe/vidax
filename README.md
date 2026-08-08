@@ -48,12 +48,12 @@ I2V, Wan2.2's A14B).
 | Cosmos 3 | Edge (4B) | T2V/I2V | ✅ | ✅ | ❌ | [cosmos3.md](docs/models/cosmos3.md) | [🤗 Huggingface]() |
 | Cosmos-Predict2.5 | 14B | — | ❌ | ❌ | ❌ | [cosmos.md](docs/models/cosmos.md) | [🤗 Huggingface]() |
 | Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅ | ✅ | ❌ | [cosmos.md](docs/models/cosmos.md) | [🤗 Huggingface]() |
-| Wan 2.2 | A14B | T2V | ❌ | ❌ | ❌ | [wan.md](docs/models/wan.md) | [🤗 Huggingface]() |
-| Wan 2.2 | A14B | I2V | ❌ | ❌ | ❌ | [wan.md](docs/models/wan.md) | [🤗 Huggingface]() |
-| Wan 2.2 | 5B | T2V/I2V | ✅ | ✅ | ❌ | [wan.md](docs/models/wan.md) | [🤗 Huggingface]() |
-| Wan 2.1 | 14B | T2V | ✅ | ✅ | ❌ | [wan.md](docs/models/wan.md) | [🤗 Huggingface]() |
-| Wan 2.1 | 14B | I2V | ✅ | ✅ | ❌ | [wan.md](docs/models/wan.md) | [🤗 Huggingface]() |
-| Wan 2.1 | 1.3B | T2V | ✅ | ✅ | ❌ | [wan.md](docs/models/wan.md) | [🤗 Huggingface]() |
+| Wan 2.2 | A14B | T2V | ✅ | ✅ | ❌ | [wan2_2.md](docs/models/wan2_2.md) | [🤗 Huggingface]() |
+| Wan 2.2 | A14B | I2V | ✅ | ✅ | ❌ | [wan2_2.md](docs/models/wan2_2.md) | [🤗 Huggingface]() |
+| Wan 2.2 | 5B | T2V/I2V | ✅ | ✅ | ❌ | [wan2_2.md](docs/models/wan2_2.md) | [🤗 Huggingface]() |
+| Wan 2.1 | 14B | T2V | ✅ | ✅ | ❌ | [wan2_1.md](docs/models/wan2_1.md) | [🤗 Huggingface]() |
+| Wan 2.1 | 14B | I2V | ✅ | ✅ | ❌ | [wan2_1.md](docs/models/wan2_1.md) | [🤗 Huggingface]() |
+| Wan 2.1 | 1.3B | T2V | ✅ | ✅ | ❌ | [wan2_1.md](docs/models/wan2_1.md) | [🤗 Huggingface]() |
 
 Per-model checkpoint sources, CLI flags, architecture notes, and
 verification status live in each **Guide** link above. Benchmarking numbers
@@ -96,7 +96,8 @@ vidax/                          # Repository Root
 ├── README.md                   # This file — concise landing page
 ├── docs/
 │   ├── models/
-│   │   ├── wan.md              # Full CLI reference & usage for all Wan scripts
+│   │   ├── wan2_1.md           # Full CLI reference & usage for Wan2.1 scripts
+│   │   ├── wan2_2.md           # Full CLI reference & usage for Wan2.2 scripts
 │   │   ├── cosmos.md           # Full CLI reference & usage for Cosmos-Predict2.5
 │   │   └── cosmos3.md          # Full CLI reference & usage for Cosmos 3 (Nano/Edge)
 │   ├── hardware_and_sharding.md # Sharding/JIT/dtype engineering notes + debugging history
@@ -105,6 +106,8 @@ vidax/                          # Repository Root
 │   ├── generate_wan2_1_t2v.py     # Wan2.1 t2v, --model_size {1.3B,14B}
 │   ├── generate_wan2_1_i2v.py     # Wan2.1 i2v (14B only)
 │   ├── generate_wan2_2_ti2v.py    # Wan2.2 TI2V-5B, t2v + i2v
+│   ├── generate_wan2_2_t2v_a14b.py # Wan2.2 A14B t2v (two-expert MoE)
+│   ├── generate_wan2_2_i2v_a14b.py # Wan2.2 A14B i2v (two-expert MoE)
 │   ├── generate_cosmos2_5.py      # Cosmos-Predict2.5 2B, text2world/image2world/video2world
 │   └── generate_cosmos3.py        # Cosmos3 Nano/Edge, --model_size {nano,edge}, text2video + image2video
 └── src/
@@ -126,6 +129,7 @@ vidax/                          # Repository Root
         │   │   │   ├── vae.py           # Wan2.1 VAE, encoder + decoder, jit-per-chunk
         │   │   │   └── clip_vision.py   # CLIP ViT-H/14, for i2v image conditioning
         │   │   └── wan2_2/
+        │   │       ├── configs.py       # Named hyperparameter presets: TI2V_5B/T2V_A14B/I2V_A14B
         │   │       ├── dit.py           # Wan2.2 DiT, per-token timestep, sequence-parallel-capable
         │   │       └── vae.py           # Wan2.2 VAE (AvgDown3D/DupUp3D/patchify), jit-per-chunk
         │   ├── cosmos/

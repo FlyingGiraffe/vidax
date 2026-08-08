@@ -46,6 +46,7 @@ from vidax.core.sharding import (
     build_tpu_mesh, shard_wan_params, get_replicated_sharding, get_batch_sharding,
 )
 from vidax.core.rope3d import create_rope3d_freqs
+from vidax.models.wan.wan2_2.configs import TI2V_5B_CONFIG
 from vidax.models.wan.wan2_2.dit import WanDiT
 from vidax.models.wan.wan2_2.vae import (
     WanVAEDecoder, WanVAEEncoder, Decoder3d, Encoder3d,
@@ -223,7 +224,8 @@ def main(args):
     # `vidax.models.wan.wan2_2.dit`'s module docstring) requires every
     # `WanDiT.apply(...)` call to run inside `shard_map(..., mesh=mesh)` --
     # done below via `dit_apply`, not by calling `dit_model.apply` directly.
-    dit_model = WanDiT(mesh=mesh, sequence_parallel=sequence_parallel, sp_axis_name="tp")
+    dit_model = WanDiT(
+        mesh=mesh, sequence_parallel=sequence_parallel, sp_axis_name="tp", **TI2V_5B_CONFIG)
     vae_decoder = WanVAEDecoder()
     vae_encoder = WanVAEEncoder() if has_image else None
     t5_model = T5Encoder()

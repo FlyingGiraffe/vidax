@@ -1,11 +1,18 @@
-# End-to-end image-to-video inference script for Wan2.1 on TPU.
+# End-to-end image-to-video inference script for Wan2.2 A14B on TPU.
 #
-# I2V only ships as a 14B model (no 1.3B variant), and additionally needs a
-# CLIP vision encoder checkpoint for image conditioning. See
-# docs/models/wan2_1.md for where to get both. Otherwise this mirrors
-# generate_wan2_1_t2v.py closely -- see its module docstring for the
-# tensor-parallel/flash-attention/loop-unrolling rationale, which all
-# applies unchanged here.
+# Like generate_wan2_2_t2v_a14b.py, A14B is a two-expert (high_noise_model /
+# low_noise_model) Mixture-of-Experts model switched per sampling step by
+# timestep vs. `--boundary` -- see that script's header comment for the full
+# mechanism, unchanged here.
+#
+# Unlike Wan2.1's I2V-14B, A14B has no CLIP vision cross-attention branch at
+# all (Wan2.2's WanDiT never had one -- see `vidax.models.wan.wan2_2.dit`'s
+# module docstring). Image conditioning here instead concatenates a
+# mask+VAE-latent `y` (built exactly like Wan2.1 I2V's, from Wan2.1's causal
+# VAE) directly onto the noisy latent's channel axis *before* the DiT call --
+# matches the reference `WanModel.forward`'s `x = cat([x, y], dim=channel)`,
+# and is why `configs.I2V_A14B_CONFIG` sets `in_dim=36` (16 noise channels +
+# 20 conditioning channels) instead of Wan2.1 I2V's separate-argument `y`.
 
 import argparse
 from functools import partial
@@ -19,20 +26,19 @@ import jax.numpy as jnp
 import numpy as np
 from PIL import Image
 from jax.experimental.shard_map import shard_map
-from jax.sharding import PartitionSpec as P, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from vidax.core.sharding import (
     build_tpu_mesh, shard_wan_params, get_replicated_sharding, get_batch_sharding,
 )
 from vidax.core.rope3d import create_rope3d_freqs
-from vidax.models.wan.wan2_1.configs import I2V_14B_CONFIG
-from vidax.models.wan.wan2_1.dit import WanDiT
+from vidax.models.wan.wan2_2.configs import I2V_A14B_CONFIG
+from vidax.models.wan.wan2_2.dit import WanDiT
 from vidax.models.wan.wan2_1.vae import (
     WanVAEDecoder, WanVAEEncoder, Decoder3d, Encoder3d, _count_causal_convs,
     _count_causal_convs_encoder,
 )
 from vidax.models.wan.common.t5 import T5Encoder, Umt5Tokenizer
-from vidax.models.wan.wan2_1.clip_vision import ClipVisionTransformer, preprocess_image_for_clip
 from vidax.schedulers.flow_match import RectifiedFlowScheduler
 from vidax.translator.mappings import load_torch_checkpoint_to_jax
 
@@ -40,10 +46,8 @@ logging.basicConfig(level=logging.INFO)
 
 DTYPES = {"float32": jnp.float32, "float16": jnp.float16, "bfloat16": jnp.bfloat16}
 
-# Wan2.1's default I2V negative prompt: the shared t2v one with a "camera
-# shake" exclusion prepended (Wan2.1-main/wan/configs/wan_i2v_14B.py).
 DEFAULT_NEGATIVE_PROMPT = (
-    "镜头晃动，色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
+    "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
     "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，"
     "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，"
     "杂乱的背景，三条腿，背景人很多，倒着走"
@@ -60,10 +64,7 @@ def save_video(frames: np.ndarray, output_path: str, fps: int = 16):
 
 
 def cast_to_dtype(tree, dtype):
-    """Casts every floating-point leaf of a pytree to `dtype` (int/bool, and
-    leaves already in `dtype`, are left untouched -- avoids a transient
-    duplicate allocation for a no-op cast).
-    """
+    """Casts every floating-point leaf of a pytree to `dtype`."""
     def cast_leaf(x):
         if jnp.issubdtype(x.dtype, jnp.floating) and x.dtype != dtype:
             return x.astype(dtype)
@@ -73,9 +74,7 @@ def cast_to_dtype(tree, dtype):
 
 def encode_prompts(prompts: list, t5_model: T5Encoder, t5_params, tokenizer: Umt5Tokenizer,
                     dtype) -> jnp.ndarray:
-    """Tokenizes and T5-encodes one prompt per batch element (see
-    generate_wan2_1.py's copy of this function for why the zero-fill matters).
-    """
+    """Tokenizes and T5-encodes one prompt per batch element."""
     ids, mask = tokenizer(prompts)
     ids, mask = jnp.asarray(ids), jnp.asarray(mask)
     context = t5_model.apply(t5_params, ids, mask)
@@ -87,12 +86,8 @@ def encode_prompts(prompts: list, t5_model: T5Encoder, t5_params, tokenizer: Umt
 
 def compute_latent_grid(image_h: int, image_w: int, max_area: int,
                          vae_stride: tuple, patch_size: tuple) -> tuple:
-    """Reference's aspect-ratio-preserving resolution selection
-    (`WanI2V.generate`): picks the largest (lat_h, lat_w) grid, aligned to
-    both the VAE's spatial stride and the DiT's patch size, whose pixel-area
-    is close to `max_area` while preserving the input image's aspect ratio.
-
-    Returns (pixel_h, pixel_w, lat_h, lat_w).
+    """Reference's aspect-ratio-preserving resolution selection, identical
+    to generate_wan2_1_i2v.py's copy (same VAE stride, same DiT patch size).
     """
     aspect_ratio = image_h / image_w
     lat_h = round(
@@ -104,12 +99,11 @@ def compute_latent_grid(image_h: int, image_w: int, max_area: int,
 
 def build_i2v_conditioning(image: np.ndarray, num_frames: int, pixel_h: int, pixel_w: int,
                             latent_t: int, vae_model: WanVAEEncoder, vae_params, dtype):
-    """Builds `y` (mask + VAE-encoded conditioning frame): matches the
-    reference's `msk`/`y` construction in `WanI2V.generate`.
-
-    The reference's mask (`msk`) ends up, after its reshape/transpose dance,
-    equal to 1 for every channel at the first latent frame and 0 everywhere
-    else -- constructed directly here rather than reproducing that dance.
+    """Builds `y` (mask + VAE-encoded conditioning frame): identical
+    construction to generate_wan2_1_i2v.py's copy of this function (same
+    Wan2.1 causal VAE) -- the only difference from that script is *how* the
+    caller uses the result (concatenated onto the noisy latent here, instead
+    of passed as a separate model argument), which happens in main() below.
     """
     img = jnp.asarray(image, dtype=jnp.float32) / 127.5 - 1.0  # [0,255] -> [-1, 1]
     img = jax.image.resize(img, (pixel_h, pixel_w, 3), method="bicubic")
@@ -118,12 +112,6 @@ def build_i2v_conditioning(image: np.ndarray, num_frames: int, pixel_h: int, pix
     video = video.at[0].set(img)
     video = video[None].astype(dtype)
 
-    # Encodes the *full* (num_frames-long, mostly-zero) video, not just the
-    # one real frame -- the causal chunked encoder's output position/shape
-    # depends on how many frames precede it, so this is what actually
-    # produces correctly-shaped latents. `encode_chunk` (jit-wrapped here)
-    # takes raw RGB pixels directly (Wan2.1's VAE has no pixel-unshuffle
-    # pre-process step, unlike Wan2.2's).
     x_full = video
     encode_chunk_jit = jax.jit(
         lambda params, x_chunk, cache_list: vae_model.apply(
@@ -164,18 +152,17 @@ def main(args):
     sequence_parallel = args.sequence_parallel
 
     # --- Initialize models and scheduler ---
-    # See `generate_wan2_1_t2v.py`'s identical comment on `sequence_parallel`
-    # for what this does and why it's opt-in (off by default) here.
-    dit_model = WanDiT(mesh=mesh, sequence_parallel=sequence_parallel, sp_axis_name="tp", **I2V_14B_CONFIG)
+    dit_model = WanDiT(
+        mesh=mesh, sequence_parallel=sequence_parallel, sp_axis_name="tp", **I2V_A14B_CONFIG)
     vae_decoder = WanVAEDecoder()
     vae_encoder = WanVAEEncoder()
     t5_model = T5Encoder()
-    clip_model = ClipVisionTransformer()
     scheduler = RectifiedFlowScheduler(num_steps=args.num_steps, shift=args.shift)
+    boundary_val = args.boundary * scheduler.num_train_timesteps
 
     assert dit_model.num_heads % tp_size == 0, (
         f"WanDiT.num_heads ({dit_model.num_heads}) must be divisible by "
-        f"--tensor_parallel_size ({tp_size}); e.g. tp in {{1,2,4,5,8,10,20,40}} for the 14B model.")
+        f"--tensor_parallel_size ({tp_size}); e.g. tp in {{1,2,4,5,8,10,20,40}}.")
     assert t5_model.num_heads % tp_size == 0, (
         f"T5Encoder.num_heads ({t5_model.num_heads}) must be divisible by "
         f"--tensor_parallel_size ({tp_size}).")
@@ -184,33 +171,34 @@ def main(args):
         os.path.dirname(args.t5_checkpoint_path), "google", "umt5-xxl")
     tokenizer = Umt5Tokenizer(tokenizer_path, seq_len=dit_model.text_len)
 
-    # --- Load weights (DiT, VAE, T5, and CLIP ship as separate checkpoints) ---
-    logging.info(f"Loading DiT weights from {args.dit_checkpoint_path}...")
-    dit_params = load_torch_checkpoint_to_jax(args.dit_checkpoint_path, model_type="wan2.1_dit")
+    # --- Load weights (both DiT experts, VAE, and T5 ship as separate checkpoints) ---
+    logging.info(f"Loading high-noise DiT weights from {args.high_noise_dit_checkpoint_path}...")
+    high_dit_params = load_torch_checkpoint_to_jax(
+        args.high_noise_dit_checkpoint_path, model_type="wan2.2_dit")
+    logging.info(f"Loading low-noise DiT weights from {args.low_noise_dit_checkpoint_path}...")
+    low_dit_params = load_torch_checkpoint_to_jax(
+        args.low_noise_dit_checkpoint_path, model_type="wan2.2_dit")
     logging.info(f"Loading VAE weights from {args.vae_checkpoint_path}...")
-    vae_params = load_torch_checkpoint_to_jax(args.vae_checkpoint_path, model_type="wan2.1_vae")
+    vae_params = load_torch_checkpoint_to_jax(
+        args.vae_checkpoint_path, model_type="wan2.1_vae")
     logging.info(f"Loading T5 weights from {args.t5_checkpoint_path}...")
-    t5_params = load_torch_checkpoint_to_jax(args.t5_checkpoint_path, model_type="wan_t5")
-    logging.info(f"Loading CLIP weights from {args.clip_checkpoint_path}...")
-    clip_params = load_torch_checkpoint_to_jax(args.clip_checkpoint_path, model_type="wan2.1_clip")
+    t5_params = load_torch_checkpoint_to_jax(
+        args.t5_checkpoint_path, model_type="wan_t5")
 
-    # Cast on the host (numpy) before device_put -- see
-    # `vidax.translator.converter.convert_pt_tensor_to_jax`'s docstring.
-    dit_params = cast_to_dtype(dit_params, dtype)
+    # Unlike every other script, the two DiT experts are *not* both put on
+    # device here -- see generate_wan2_2_t2v_a14b.py's identical comment for
+    # why (single-resident-expert swapping instead of both at once, since
+    # this repo's 4-chip TP=4 target doesn't have headroom for both).
+    replicated = get_replicated_sharding(mesh)
+    high_dit_params = cast_to_dtype(high_dit_params, dtype)
+    low_dit_params = cast_to_dtype(low_dit_params, dtype)
     vae_params = cast_to_dtype(vae_params, dtype)
     t5_params = cast_to_dtype(t5_params, dtype)
-    clip_params = cast_to_dtype(clip_params, dtype)
 
-    # DiT weights are Megatron-sharded unless `sequence_parallel`, in which
-    # case they're left fully replicated instead (see
-    # `generate_wan2_1_t2v.py`'s identical comment).
-    replicated = get_replicated_sharding(mesh)
-    dit_params = jax.device_put(
-        dit_params, replicated if sequence_parallel else shard_wan_params(dit_params, mesh))
+    dit_sharding_spec = replicated if sequence_parallel else shard_wan_params(high_dit_params, mesh)
     t5_params = jax.device_put(t5_params, shard_wan_params(t5_params, mesh))
     vae_params = jax.device_put(vae_params, replicated)
-    clip_params = jax.device_put(clip_params, replicated)
-    logging.info("Weights loaded, cast, and sharded across devices.")
+    logging.info("Weights loaded and cast (DiT experts stay on host until needed).")
 
     # --- Prepare inputs ---
     image = np.array(Image.open(args.image_path).convert("RGB"))
@@ -222,20 +210,18 @@ def main(args):
         f"Input image {image.shape[1]}x{image.shape[0]} -> "
         f"output {pixel_w}x{pixel_h}, {args.num_frames} frames.")
 
-    logging.info("Encoding conditioning image (VAE + CLIP)...")
+    logging.info("Encoding conditioning image (VAE)...")
     y = build_i2v_conditioning(
         image, args.num_frames, pixel_h, pixel_w, latent_t, vae_encoder, vae_params, dtype)
     y = jax.device_put(jnp.broadcast_to(y, (dp_size,) + y.shape[1:]), get_batch_sharding(mesh, y.ndim))
 
-    clip_input = preprocess_image_for_clip(image).astype(dtype)
-    clip_fea = clip_model.apply(clip_params, clip_input)  # (1, 257, image_dim)
-    clip_fea = jax.device_put(
-        jnp.broadcast_to(clip_fea, (dp_size,) + clip_fea.shape[1:]), get_batch_sharding(mesh, clip_fea.ndim))
-
-    latents_shape = (dp_size, latent_t, lat_h, lat_w, dit_model.in_dim)
+    # 16 noise channels + 20 conditioning channels (mask + VAE latent) = the
+    # DiT's in_dim=36 -- concatenated here, not passed as a separate
+    # argument, unlike Wan2.1's I2V (see this script's header comment).
+    noise_shape = (dp_size, latent_t, lat_h, lat_w, 16)
     latents_rng, rng = jax.random.split(rng)
-    latents = jax.random.normal(latents_rng, latents_shape, dtype=dtype)
-    latents = jax.device_put(latents, get_batch_sharding(mesh, latents.ndim))
+    noise = jax.random.normal(latents_rng, noise_shape, dtype=dtype)
+    noise = jax.device_put(noise, get_batch_sharding(mesh, noise.ndim))
 
     logging.info(f"Encoding prompt with T5: '{args.prompt}'")
     prompt_embeds = encode_prompts([args.prompt] * dp_size, t5_model, t5_params, tokenizer, dtype)
@@ -250,62 +236,58 @@ def main(args):
         t=latent_t // pt, h=lat_h // ph, w=lat_w // pw, head_dim=head_dim)
     freqs = jax.device_put(freqs, replicated)
 
-    # See `generate_wan2_1_t2v.py`'s identical comment on why
-    # `sequence_parallel` needs `shard_map`, not just `jax.jit`. `y`/
-    # `clip_fea` are batch-sharded on 'dp' (replicated on 'tp'), matching
-    # the `get_batch_sharding` calls already applied to them above.
-    def _dit_apply(params, latents, t, freqs, context, y, clip_fea):
-        return dit_model.apply(
-            params, latents=latents, t=t, freqs=freqs, context=context, y=y, clip_fea=clip_fea)
+    def _dit_apply(params, latents, t, freqs, context):
+        return dit_model.apply(params, latents=latents, t=t, freqs=freqs, context=context)
 
     if sequence_parallel:
         dit_apply = shard_map(
             _dit_apply, mesh=mesh,
-            in_specs=(P(), P('dp', None, None, None, None), P('dp'), (P(), P()), P('dp', None, None),
-                      P('dp', None, None, None, None), P('dp', None, None)),
+            in_specs=(P(), P('dp', None, None, None, None), P('dp'), (P(), P()), P('dp', None, None)),
             out_specs=P('dp', None, None, None, None),
             check_rep=False,
         )
     else:
         dit_apply = _dit_apply
 
-    # --- Euler sampling loop (see generate_wan2_1.py for why this isn't one big jax.jit) ---
+    # --- Euler sampling loop ---
     @partial(jax.jit, donate_argnums=(0,))
-    def single_step(current_latents, step_index, prompt_embeds, negative_embeds, y, clip_fea,
-                     freqs, params, guide_scale):
-        b_size = current_latents.shape[0]
+    def single_step(current_noise, step_index, prompt_embeds, negative_embeds, y, freqs, params, guide_scale):
+        b_size = current_noise.shape[0]
         t_val = scheduler.timesteps[step_index]
         t_vec = jnp.full((b_size,), t_val, dtype=jnp.float32)
 
-        # CFG batched into one `2*B`-batch `dit_apply` call instead of two
-        # separate dispatches -- see `generate_wan2_1_t2v.py`'s identical
-        # comment. `y`/`clip_fea` (the image conditioning) don't vary with
-        # the text prompt, so they're just duplicated alongside everything
-        # else, not meaningfully recomputed.
-        latents_2b = jnp.concatenate([current_latents, current_latents], axis=0)
+        # Channel-concat the (step-invariant) conditioning `y` onto the
+        # noisy latent before every DiT call -- matches the reference's
+        # `x = cat([x, y], dim=channel)` in `WanModel.forward`.
+        latents_with_y = jnp.concatenate([current_noise, y], axis=-1)
+
+        latents_2b = jnp.concatenate([latents_with_y, latents_with_y], axis=0)
         t_vec_2b = jnp.concatenate([t_vec, t_vec], axis=0)
         context_2b = jnp.concatenate([prompt_embeds, negative_embeds], axis=0)
-        y_2b = jnp.concatenate([y, y], axis=0)
-        clip_fea_2b = jnp.concatenate([clip_fea, clip_fea], axis=0)
-        v_2b = dit_apply(params, latents_2b, t_vec_2b, freqs, context_2b, y_2b, clip_fea_2b)
+        v_2b = dit_apply(params, latents_2b, t_vec_2b, freqs, context_2b)
         v_cond, v_uncond = v_2b[:b_size], v_2b[b_size:]
         velocity = v_uncond + guide_scale * (v_cond - v_uncond)
-        return scheduler.step(velocity, step_index, current_latents)
+        return scheduler.step(velocity, step_index, current_noise)
 
     logging.info(
         f"Running sampling for {args.num_steps} steps "
-        f"(shift={args.shift}, guide_scale={args.guide_scale})...")
+        f"(shift={args.shift}, boundary={args.boundary}, guide_scale={args.guide_scale})...")
+    device_params, active_expert = None, None
     for step_index in range(scheduler.num_steps):
-        latents = single_step(
-            latents, step_index, prompt_embeds, negative_embeds, y, clip_fea, freqs,
-            dit_params, args.guide_scale)
+        t_val = scheduler.timesteps[step_index]
+        expert = "high_noise" if t_val >= boundary_val else "low_noise"
+        if expert != active_expert:
+            device_params = None
+            host_params = high_dit_params if expert == "high_noise" else low_dit_params
+            device_params = jax.device_put(host_params, dit_sharding_spec)
+            active_expert = expert
+            logging.info(f"  step {step_index}: switched to {expert}_model (t={t_val:.1f})")
+        noise = single_step(
+            noise, step_index, prompt_embeds, negative_embeds, y, freqs, device_params, args.guide_scale)
 
     # --- Decode latents to video frames ---
     logging.info("Decoding final latents into video frames...")
-    # Uses `WanVAEDecoder.decode_chunk` (jit-wrapped per frame) rather than a
-    # single `vae_decoder.apply(vae_params, latents)` call -- see
-    # `generate_wan2_1_t2v.py`'s identical decode section for why.
-    x_full = vae_decoder.apply(vae_params, latents.astype(dtype), method=vae_decoder.pre_process)
+    x_full = vae_decoder.apply(vae_params, noise.astype(dtype), method=vae_decoder.pre_process)
     decode_chunk_jit = jax.jit(
         lambda params, x_chunk, cache_list: vae_decoder.apply(
             params, x_chunk, cache_list, method=vae_decoder.decode_chunk))
@@ -330,25 +312,26 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="End-to-end image-to-video generation with Wan 2.1 on TPU.")
-    parser.add_argument("--dit_checkpoint_path", type=str, required=True, help="Path to the I2V-14B DiT .safetensors checkpoint.")
-    parser.add_argument("--vae_checkpoint_path", type=str, required=True, help="Path to the VAE .pth checkpoint.")
+    parser = argparse.ArgumentParser(description="End-to-end image-to-video generation with Wan2.2 A14B on TPU.")
+    parser.add_argument("--high_noise_dit_checkpoint_path", type=str, required=True, help="Path to the high_noise_model DiT .safetensors checkpoint (or .safetensors.index.json manifest, sharded).")
+    parser.add_argument("--low_noise_dit_checkpoint_path", type=str, required=True, help="Path to the low_noise_model DiT .safetensors checkpoint (or .safetensors.index.json manifest, sharded).")
+    parser.add_argument("--vae_checkpoint_path", type=str, required=True, help="Path to the Wan2.1_VAE.pth checkpoint (A14B reuses Wan2.1's causal VAE, not Wan2.2's own).")
     parser.add_argument("--t5_checkpoint_path", type=str, required=True, help="Path to the T5 (umt5-xxl encoder) .pth checkpoint.")
-    parser.add_argument("--clip_checkpoint_path", type=str, required=True, help="Path to the CLIP (models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth) checkpoint.")
     parser.add_argument("--tokenizer_path", type=str, default=None, help="Path to the umt5-xxl HuggingFace tokenizer directory. Defaults to '<t5_checkpoint_dir>/google/umt5-xxl'.")
     parser.add_argument("--image_path", type=str, required=True, help="Path to the conditioning image.")
     parser.add_argument("--prompt", type=str, required=True, help="Text prompt for video generation.")
-    parser.add_argument("--negative_prompt", type=str, default=DEFAULT_NEGATIVE_PROMPT, help="Negative prompt for classifier-free guidance. Defaults to the reference's i2v `sample_neg_prompt`.")
-    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to shard each model's attention heads / FFN channels across. Must divide num_devices and num_heads (40 for the 14B DiT, 64 for the T5 encoder).")
-    parser.add_argument("--sequence_parallel", action="store_true", help="Shard the DiT's token sequence itself across --tensor_parallel_size devices (DeepSpeed-Ulysses) instead of Megatron-style tensor parallelism. See generate_wan2_1_t2v.py's identical flag for the full reasoning. Also requires the DiT's patch token count to be evenly divisible by --tensor_parallel_size.")
-    parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the DiT, VAE, T5, and CLIP. Note: TPU's XLA backend does not implement float16 matmuls -- float16 will fail at runtime on TPU.")
+    parser.add_argument("--negative_prompt", type=str, default=DEFAULT_NEGATIVE_PROMPT, help="Negative prompt for classifier-free guidance.")
+    parser.add_argument("--guide_scale", type=float, default=5.0, help="Classifier-free guidance scale: velocity = uncond + guide_scale * (cond - uncond).")
+    parser.add_argument("--boundary", type=float, default=0.900, help="Fraction of num_train_timesteps (1000) above which the high_noise_model expert is used instead of low_noise_model. Reference default for I2V is 0.900 (0.875 for T2V).")
+    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to shard each model's attention heads / FFN channels across. Must divide num_heads (40 for each DiT expert, 64 for T5) and num_devices.")
+    parser.add_argument("--sequence_parallel", action="store_true", help="Shard the DiT's token sequence itself across --tensor_parallel_size devices (DeepSpeed-Ulysses) instead of Megatron-style tensor parallelism. See generate_wan2_1_t2v.py's identical flag for the full reasoning.")
+    parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for both DiT experts, VAE, and T5. Note: TPU's XLA backend does not implement float16 matmuls -- float16 will fail at runtime on TPU.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=40, help="Number of sampling steps. The reference's i2v default is 40 (vs 50 for t2v).")
-    parser.add_argument("--shift", type=float, default=5.0, help="Flow-matching noise-schedule shift. The reference recommends 3.0 for 480p output, 5.0 otherwise.")
-    parser.add_argument("--guide_scale", type=float, default=5.0, help="Classifier-free guidance scale: velocity = uncond + guide_scale * (cond - uncond).")
-    parser.add_argument("--max_area", type=int, default=720 * 1280, help="Target output resolution's pixel area; actual (height, width) are derived from this and the input image's aspect ratio (see compute_latent_grid).")
+    parser.add_argument("--shift", type=float, default=5.0, help="Flow-matching noise-schedule shift. Reference default for A14B I2V is 5.0 (12.0 for T2V).")
+    parser.add_argument("--max_area", type=int, default=720 * 1280, help="Target output resolution's pixel area; actual (height, width) are derived from this and the input image's aspect ratio.")
     parser.add_argument("--num_frames", type=int, default=81, help="Number of frames in the output video.")
-    parser.add_argument("--output_path", type=str, default="output_video.mp4", help="Path to save the output MP4 video(s). With --tensor_parallel_size < num_devices (i.e. dp_size > 1), each data-parallel replica's independent sample is saved as '<output_path>_<i>.mp4'.")
+    parser.add_argument("--output_path", type=str, default="output_video.mp4", help="Path to save the output MP4 video(s). With --tensor_parallel_size < num_devices (dp_size > 1), each replica's sample is saved as '<output_path>_<i>.mp4'.")
 
     args = parser.parse_args()
     main(args)

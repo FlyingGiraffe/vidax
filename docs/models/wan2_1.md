@@ -146,7 +146,7 @@ python examples/generate_wan2_1_i2v.py \
   --clip_checkpoint_path "./checkpoints/Wan2.1-I2V-14B-480P/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth" \
   --image_path "./checkpoints/Wan2.1-I2V-14B-480P/examples/i2v_input.JPG" \
   --prompt "A red panda in the snow" \
-  --tensor_parallel_size 8 \
+  --tensor_parallel_size 4 \
   --output_path "out/output_i2v.mp4"
 ```
 
@@ -170,7 +170,7 @@ projection (`WanDiT`'s `model_type="i2v"` path).
 | `--image_path` | *required* | Conditioning image. Output resolution is derived from it, not set directly. |
 | `--prompt` | *required* | Text prompt (single string, not a list — unlike the t2v script). |
 | `--negative_prompt` | reference's i2v `sample_neg_prompt` | Negative prompt for CFG. |
-| `--tensor_parallel_size` | `1` | Must divide `num_devices` and `num_heads` (40 for the 14B DiT, 64 for T5). Since the 14B DiT is much larger than the 1.3B t2v model, `--tensor_parallel_size 8` (full 8-way on a v4-8) is a more typical starting point than the 4 used for 1.3B t2v. |
+| `--tensor_parallel_size` | `1` | Must divide `num_devices` and `num_heads` (40 for the 14B DiT, 64 for T5). `--tensor_parallel_size 4` (full width on this repo's v4-8, i.e. 4 chips — see [hardware doc](../hardware_and_sharding.md#2-sharding--tpu-topology-megatron-style-tensor-parallelism)) is the typical starting point for the 14B model, same as t2v. |
 | `--sequence_parallel` | off | Same DeepSpeed-Ulysses flag as the t2v script — the one to reach for once actually running this 14B model at higher resolution, where self-attention activation memory is the more likely bottleneck than at 1.3B scale. Verified to work correctly with the CLIP image cross-attention branch too (see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)). |
 | `--dtype` | `bfloat16` | Same choices/caveats as t2v. |
 | `--seed` | `0` | Initial noise seed. |

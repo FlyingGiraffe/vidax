@@ -30,6 +30,14 @@ that doesn't know the history.
 
 ## 2. Sharding & TPU Topology (Megatron-style tensor parallelism)
 
+- **`vN-M` names TensorCores, not chips.** A v4 chip has 2 TensorCores, so
+  `v4-8` is a 4-*chip* slice (`jax.device_count() == 4`), not 8 — this repo
+  currently runs on a v4-8. `--tensor_parallel_size`/`--sequence_parallel`
+  values throughout this repo's docs are chip counts (what
+  `jax.device_count()` reports and what `tensor_parallel_size` must divide
+  into), so "full width on a v4-8" means 4, not 8. v5e and v6e chips have 1
+  TensorCore each, so `vN-M` there *does* equal chip count — don't assume
+  the /2 rule carries over once those are benchmarked.
 - `vidax.core.sharding.build_tpu_mesh` builds a 2D `(dp, tp)` device mesh:
   `dp` (data-parallel) shards the batch, `tp` (tensor-parallel) shards
   attention heads and FFN channels within each DiT/T5 layer, Megatron-1D

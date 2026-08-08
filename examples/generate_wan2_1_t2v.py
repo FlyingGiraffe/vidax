@@ -23,6 +23,7 @@ from vidax.core.sharding import (
     build_tpu_mesh, shard_wan_params, get_replicated_sharding, get_batch_sharding,
 )
 from vidax.core.rope3d import create_rope3d_freqs
+from vidax.models.wan.wan2_1.configs import T2V_1_3B_CONFIG, T2V_14B_CONFIG
 from vidax.models.wan.wan2_1.dit import WanDiT
 from vidax.models.wan.wan2_1.vae import WanVAEDecoder, Decoder3d, _count_causal_convs
 from vidax.models.wan.common.t5 import T5Encoder, Umt5Tokenizer
@@ -32,6 +33,7 @@ from vidax.translator.mappings import load_torch_checkpoint_to_jax
 logging.basicConfig(level=logging.INFO)
 
 DTYPES = {"float32": jnp.float32, "float16": jnp.float16, "bfloat16": jnp.bfloat16}
+MODEL_SIZE_CONFIGS = {"1.3B": T2V_1_3B_CONFIG, "14B": T2V_14B_CONFIG}
 
 # Wan2.1's default negative prompt (Wan2.1-main/wan/configs/shared_config.py,
 # `sample_neg_prompt`), used for classifier-free guidance.
@@ -129,14 +131,17 @@ def main(args):
     # contribute to that specific problem, but the attention-activation
     # memory a big-enough DiT needs still doesn't shrink under Megatron TP
     # alone the way it does under sequence parallelism).
-    dit_model = WanDiT(mesh=mesh, sequence_parallel=sequence_parallel, sp_axis_name="tp")
+    dit_model = WanDiT(
+        mesh=mesh, sequence_parallel=sequence_parallel, sp_axis_name="tp",
+        **MODEL_SIZE_CONFIGS[args.model_size])
     vae_model = WanVAEDecoder()
     t5_model = T5Encoder()
     scheduler = RectifiedFlowScheduler(num_steps=args.num_steps, shift=args.shift)
 
     assert dit_model.num_heads % tp_size == 0, (
         f"WanDiT.num_heads ({dit_model.num_heads}) must be divisible by "
-        f"--tensor_parallel_size ({tp_size}); e.g. tp in {{1,2,3,4,6,12}} for the 1.3B model.")
+        f"--tensor_parallel_size ({tp_size}); e.g. tp in {{1,2,3,4,6,12}} for the 1.3B model, "
+        f"{{1,2,4,5,8,10,20,40}} for the 14B model.")
     assert t5_model.num_heads % tp_size == 0, (
         f"T5Encoder.num_heads ({t5_model.num_heads}) must be divisible by "
         f"--tensor_parallel_size ({tp_size}).")
@@ -335,6 +340,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="End-to-end video generation with Wan 2.1 on TPU.")
+    parser.add_argument("--model_size", type=str, default="1.3B", choices=list(MODEL_SIZE_CONFIGS.keys()), help="Which released Wan2.1 T2V config to build (must match --dit_checkpoint_path's actual size).")
     parser.add_argument("--dit_checkpoint_path", type=str, required=True, help="Path to the DiT .safetensors checkpoint.")
     parser.add_argument("--vae_checkpoint_path", type=str, required=True, help="Path to the VAE .pth checkpoint.")
     parser.add_argument("--t5_checkpoint_path", type=str, required=True, help="Path to the T5 (umt5-xxl encoder) .pth checkpoint.")
@@ -342,8 +348,8 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, required=True, nargs="+", help="One text prompt (broadcast to every data-parallel replica) or exactly `num_devices // tensor_parallel_size` prompts, one per replica.")
     parser.add_argument("--negative_prompt", type=str, default=DEFAULT_NEGATIVE_PROMPT, help="Negative prompt for classifier-free guidance. Defaults to the reference's `sample_neg_prompt`.")
     parser.add_argument("--guide_scale", type=float, default=5.0, help="Classifier-free guidance scale: velocity = uncond + guide_scale * (cond - uncond). The reference's default is 5.0; skipping CFG (there is no flag to do so here, matching the reference always running it) produces washed-out, low-contrast output.")
-    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to shard each model's attention heads / FFN channels across. Must divide num_heads (12 for the 1.3B DiT, 64 for the T5 encoder) and num_devices. Increase this if you hit HBM OOM at high resolution.")
-    parser.add_argument("--sequence_parallel", action="store_true", help="Shard the DiT's token sequence itself across --tensor_parallel_size devices (DeepSpeed-Ulysses) instead of Megatron-style tensor parallelism. Off by default since Megatron TP already fits the 1.3B model fine at typical resolutions; intended for the much larger 14B models, where it's expected to be necessary the way it was for Wan2.2's 5B model (see WanDiT's module docstring). Also requires the DiT's patch token count to be evenly divisible by --tensor_parallel_size.")
+    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to shard each model's attention heads / FFN channels across. Must divide num_heads (12 for the 1.3B DiT, 40 for the 14B DiT, 64 for the T5 encoder) and num_devices. Increase this if you hit HBM OOM at high resolution.")
+    parser.add_argument("--sequence_parallel", action="store_true", help="Shard the DiT's token sequence itself across --tensor_parallel_size devices (DeepSpeed-Ulysses) instead of Megatron-style tensor parallelism. Off by default since Megatron TP already fits the 1.3B model fine at typical resolutions; intended for the much larger 14B model, where it's expected to be necessary the way it was for Wan2.2's 5B model (see WanDiT's module docstring). Also requires the DiT's patch token count to be evenly divisible by --tensor_parallel_size.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the DiT, VAE, and T5 (and cast target for their loaded checkpoints). The reference uses bfloat16 for the DiT/T5 and float32 for the VAE; vidax uses one unified dtype for simplicity. Note: TPU's XLA backend does not implement float16 matmuls (a hardware/compiler limitation, not a vidax one) -- float16 will fail at runtime on TPU.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=50, help="Number of sampling steps for the scheduler.")

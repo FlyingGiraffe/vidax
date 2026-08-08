@@ -1,8 +1,9 @@
-"""PyTorch state_dict -> Flax parameter tree key mapping for Cosmos3-Nano's
-DiT (`vidax.models.cosmos3.nano.dit.Cosmos3Transformer`).
+"""PyTorch state_dict -> Flax parameter tree key mapping for Cosmos3's DiT
+(`vidax.models.cosmos3.dit.Cosmos3Transformer`), shared by both Cosmos3-Nano
+and Cosmos3-Edge checkpoints.
 
-The released checkpoint (`transformer/diffusion_pytorch_model.safetensors.index.json`)
-is already a *flat* layout (`layers.N.self_attn.to_q.weight`, no leading
+The released checkpoints (`transformer/diffusion_pytorch_model.safetensors.index.json`)
+are already a *flat* layout (`layers.N.self_attn.to_q.weight`, no leading
 `model.`/`net.` prefix to strip -- unlike Cosmos-Predict2.5's `net.blocks.N...`).
 Keys with no analogue in this T2V/I2V-only port are silently skipped:
   - `lm_head.weight` -- next-token prediction head, never used for generation.
@@ -10,7 +11,11 @@ Keys with no analogue in this T2V/I2V-only port are silently skipped:
     only consumed by `lm_head`; `gen`'s cross-attention reads `und`'s
     per-layer keys/values directly, never this final normed output.
   - `action_*`/`audio_*` -- action- and sound-generation heads, out of scope
-    (T2V/I2V only, see the port plan).
+    (T2V/I2V only).
+Keys present only for some checkpoints (e.g. `self_attn.norm_q`/`norm_k`,
+absent when `qk_norm_for_text=False`; `self_attn.k_norm_und_for_gen`, present
+only when `use_und_k_norm_for_gen=True`) map normally when present and are
+simply never encountered in state_dicts that don't have them.
 """
 import re
 from typing import Any, Dict
@@ -21,7 +26,7 @@ from .common import _leaf_name, _set_nested_dict
 # self_attn submodule attribute -> (jax name, is a per-head RMSNorm scale).
 _ATTN_LEAF_NAMES = (
     "to_q", "to_k", "to_v", "to_out", "add_q_proj", "add_k_proj", "add_v_proj", "to_add_out",
-    "norm_q", "norm_k", "norm_added_q", "norm_added_k",
+    "norm_q", "norm_k", "norm_added_q", "norm_added_k", "k_norm_und_for_gen",
 )
 
 _SKIP_PREFIXES = ("lm_head.", "action_", "audio_")

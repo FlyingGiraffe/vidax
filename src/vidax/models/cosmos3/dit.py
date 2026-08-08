@@ -1,23 +1,24 @@
-"""Cosmos3-Nano's diffusion transformer (`Cosmos3OmniTransformer` in the
+"""Cosmos3's diffusion transformer (`Cosmos3OmniTransformer` in the
 reference, refs/diffusers-cosmos3/transformer_cosmos3.py), T2V/I2V-only:
-the `embed_tokens` + 36 dual-pathway decoder layers + vision patchify/
+the `embed_tokens` + N dual-pathway decoder layers + vision patchify/
 unpatchify path, with `lm_head` and all `action_*`/`audio_*` submodules
-dropped (this port never needs a next-token/action/sound head).
+dropped (this port never needs a next-token/action/sound head). Shared by
+both Cosmos3-Nano and Cosmos3-Edge -- see `vidax.models.cosmos3.configs` for
+their respective hyperparameters.
 
 No AdaLN modulation anywhere in this architecture (unlike Wan/Cosmos-Predict
 2.5's DiTs) -- the diffusion timestep is injected exactly once, additively,
 directly into the noisy vision tokens themselves (`_inject_timestep_embed`,
 matching the reference's `_apply_timestep_embeds_to_noisy_tokens`), and then
 flows through ordinary pre-norm transformer blocks with no further
-timestep-conditioned scale/shift. `Cosmos3VLTextMoTDecoderLayer.forward` in
-the reference takes no timestep-derived argument at all, confirming this.
+timestep-conditioned scale/shift.
 
 Ported against a fixed-shape `(B, seq_len, hidden)` packed sequence (see
-`vidax.models.cosmos3.common.dit_layers`'s module docstring) rather than the
+`vidax.models.cosmos3.dit_layers`'s module docstring) rather than the
 reference's ragged flat-buffer-with-global-indices design: callers build and
 pass `und_position_ids`/`gen_position_ids` (mRoPE ids, from
-`vidax.models.cosmos3.common.mrope`) directly, keeping this module itself
-agnostic to how the caller derived them (prompt length, image conditioning,
+`vidax.models.cosmos3.mrope`) directly, keeping this module itself agnostic
+to how the caller derived them (prompt length, image conditioning,
 resolution, etc. -- all pipeline-level concerns, not part of the DiT).
 """
 from typing import Optional, Tuple
@@ -28,27 +29,29 @@ from jax.sharding import Mesh
 
 from vidax.core.attention import RMSNorm
 from vidax.core.rope3d import sinusoidal_embedding_1d
-from vidax.models.cosmos3.common.dit_layers import Cosmos3VLTextMoTDecoderLayer
-from vidax.models.cosmos3.common.mrope import compute_cosmos3_mrope_cos_sin
+from vidax.models.cosmos3.dit_layers import Cosmos3VLTextMoTDecoderLayer
+from vidax.models.cosmos3.mrope import compute_cosmos3_mrope_cos_sin
 
 
 class Cosmos3Transformer(nn.Module):
-    """Cosmos3-Nano DiT, T2V/I2V.
+    """Cosmos3 DiT (Nano or Edge), T2V/I2V. Build via
+    `Cosmos3Transformer(**vidax.models.cosmos3.configs.NANO_CONFIG)` or
+    `..EDGE_CONFIG`.
 
-    Args (see class docstring for the reference class this ports):
+    Args (see module docstring for the reference class this ports):
         vocab_size, hidden_size, intermediate_size, num_hidden_layers,
             num_attention_heads, num_key_value_heads, head_dim, rms_norm_eps:
             standard transformer config, matching `transformer/config.json`.
+        hidden_act, qk_norm_for_text, use_und_k_norm_for_gen: per-checkpoint
+            toggles, see `vidax.models.cosmos3.dit_layers`.
         latent_channel: VAE latent channel count (48, Wan2.2-TI2V's VAE).
         latent_patch_size: spatial patch size for vision tokens (2x2).
         rope_theta, rope_axes_dim: interleaved 3D mRoPE config
-            (`vidax.models.cosmos3.common.mrope`).
+            (`vidax.models.cosmos3.mrope`).
         timestep_scale: DiT-internal sigma rescale before the sinusoidal
-            embedding (0.001 for this checkpoint) -- same mechanism as
-            Cosmos-Predict2.5's `MinimalV1LVGDiT.timestep_scale`, and the
-            same lesson applies: this must be applied, or the network is
-            conditioned on a ~1000x out-of-distribution noise level at
-            every sampling step.
+            embedding -- must be applied, or the network is conditioned on
+            an out-of-distribution noise level at every sampling step (same
+            mechanism as Cosmos-Predict2.5's `MinimalV1LVGDiT.timestep_scale`).
         mesh: TPU mesh for the attention dispatch (see `dit_layers.py`).
     """
     vocab_size: int = 151936
@@ -59,6 +62,9 @@ class Cosmos3Transformer(nn.Module):
     num_key_value_heads: int = 8
     head_dim: int = 128
     rms_norm_eps: float = 1e-6
+    hidden_act: str = "silu"
+    qk_norm_for_text: bool = True
+    use_und_k_norm_for_gen: bool = False
     latent_channel: int = 48
     latent_patch_size: int = 2
     rope_theta: float = 5_000_000.0
@@ -151,6 +157,8 @@ class Cosmos3Transformer(nn.Module):
                 num_attention_heads=self.num_attention_heads,
                 num_key_value_heads=self.num_key_value_heads,
                 intermediate_size=self.intermediate_size, eps=self.rms_norm_eps,
+                hidden_act=self.hidden_act, qk_norm_for_text=self.qk_norm_for_text,
+                use_und_k_norm_for_gen=self.use_und_k_norm_for_gen,
                 mesh=self.mesh, name=f"layers_{i}",
             )(und_seq, gen_seq, rotary_emb, causal_mask, und_valid_mask)
 

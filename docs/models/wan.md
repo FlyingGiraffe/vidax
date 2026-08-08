@@ -10,9 +10,18 @@ found getting Wan2.2 working).
 
 | Script | Model | Params | Task | Checkpoint dir example |
 | --- | --- | --- | --- | --- |
-| `generate_wan2_1_t2v.py` | Wan2.1 | 1.3B | Text-to-Video | `Wan2.1-T2V-1.3B` |
+| `generate_wan2_1_t2v.py --model_size 1.3B` | Wan2.1 | 1.3B | Text-to-Video | `Wan2.1-T2V-1.3B` |
+| `generate_wan2_1_t2v.py --model_size 14B` | Wan2.1 | 14B | Text-to-Video | `Wan2.1-T2V-14B` |
 | `generate_wan2_1_i2v.py` | Wan2.1 | 14B | Image-to-Video | `Wan2.1-I2V-14B-480P`/`720P` |
 | `generate_wan2_2_ti2v.py` | Wan2.2 | 5B | Text-to-Video **and** Image-to-Video | `Wan2.2-TI2V-5B` |
+
+Both Wan2.1 T2V sizes share the same architecture and script
+(`vidax.models.wan.wan2_1.dit.WanDiT`, fully config-driven); `--model_size`
+just selects which hyperparameter preset
+(`vidax.models.wan.wan2_1.configs.T2V_1_3B_CONFIG`/`T2V_14B_CONFIG`) to
+build it with. I2V only ships as 14B (no 1.3B I2V checkpoint exists), so its
+script has no `--model_size` flag — it always builds
+`vidax.models.wan.wan2_1.configs.I2V_14B_CONFIG`.
 
 All three require the `torch` extra (to deserialize `.pth`/`.safetensors`
 checkpoints) and the `text` extra (tokenization):
@@ -27,22 +36,43 @@ yours differs.
 
 ---
 
-## Wan2.1 T2V (1.3B) — `generate_wan2_1_t2v.py`
+## Wan2.1 T2V (1.3B / 14B) — `generate_wan2_1_t2v.py`
 
 Checkpoints (DiT `.safetensors`, VAE `.pth`, T5 `.pth` + its
-`google/umt5-xxl` tokenizer folder) come from the
-[official Wan2.1-T2V-1.3B repo](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B).
+`google/umt5-xxl` tokenizer folder) come from the official
+[Wan2.1-T2V-1.3B](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) or
+[Wan2.1-T2V-14B](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B) repos —
+pass `--model_size` to match whichever you downloaded.
 
-### Basic generation
+### Basic generation (1.3B)
 
 ```bash
 python examples/generate_wan2_1_t2v.py \
+  --model_size 1.3B \
   --dit_checkpoint_path "./checkpoints/Wan2.1-T2V-1.3B/diffusion_pytorch_model.safetensors" \
   --vae_checkpoint_path "./checkpoints/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth" \
   --t5_checkpoint_path "./checkpoints/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth" \
   --prompt "A majestic red panda climbing a bamboo tree in the snow, 4k" \
   --num_steps 50 \
   --output_path "out/output.mp4"
+```
+
+### 14B generation
+
+The 14B DiT ships sharded across multiple `.safetensors` files with a
+`.safetensors.index.json` manifest — pass that manifest's path, same as
+Wan2.2's DiT:
+
+```bash
+python examples/generate_wan2_1_t2v.py \
+  --model_size 14B \
+  --dit_checkpoint_path "./checkpoints/Wan2.1-T2V-14B/diffusion_pytorch_model.safetensors.index.json" \
+  --vae_checkpoint_path "./checkpoints/Wan2.1-T2V-14B/Wan2.1_VAE.pth" \
+  --t5_checkpoint_path "./checkpoints/Wan2.1-T2V-14B/models_t5_umt5-xxl-enc-bf16.pth" \
+  --prompt "A majestic red panda climbing a bamboo tree in the snow, 4k" \
+  --tensor_parallel_size 4 \
+  --num_steps 50 \
+  --output_path "out/output_14b.mp4"
 ```
 
 `--shift` (noise-schedule shift, default 5.0) and classifier-free guidance
@@ -72,15 +102,16 @@ python examples/generate_wan2_1_t2v.py \
 
 | Flag | Default | Notes |
 | --- | --- | --- |
-| `--dit_checkpoint_path` | *required* | DiT `.safetensors` checkpoint. |
+| `--model_size` | `1.3B` | `1.3B` or `14B` — selects `T2V_1_3B_CONFIG`/`T2V_14B_CONFIG` from `vidax.models.wan.wan2_1.configs`. Must match `--dit_checkpoint_path`'s actual checkpoint. |
+| `--dit_checkpoint_path` | *required* | DiT `.safetensors` checkpoint (1.3B) or `.safetensors.index.json` manifest (14B, sharded). |
 | `--vae_checkpoint_path` | *required* | VAE `.pth` checkpoint. |
 | `--t5_checkpoint_path` | *required* | T5 (umt5-xxl encoder) `.pth` checkpoint. |
 | `--tokenizer_path` | `<t5_dir>/google/umt5-xxl` | umt5-xxl HuggingFace tokenizer directory. |
 | `--prompt` | *required*, 1+ values | One prompt (broadcast to every data-parallel replica) or exactly `num_devices // tensor_parallel_size` prompts, one per replica. |
 | `--negative_prompt` | reference's `sample_neg_prompt` | Negative prompt for CFG. |
 | `--guide_scale` | `5.0` | CFG scale: `velocity = uncond + guide_scale * (cond - uncond)`. |
-| `--tensor_parallel_size` | `1` | Devices to Megatron-shard attention heads / FFN channels across (see [hardware doc](../hardware_and_sharding.md)). Must divide `num_devices` and `num_heads` (12 for the 1.3B DiT, 64 for T5). `--tensor_parallel_size 4` (4-way TP × 2-way DP) is a reasonable start on a v4-8 at full 1280×720; raise it if you hit HBM OOM. |
-| `--sequence_parallel` | off | Shard the DiT's token sequence itself (DeepSpeed-Ulysses) instead of Megatron TP. Not needed at 1.3B scale — there for the 14B models; see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses). |
+| `--tensor_parallel_size` | `1` | Devices to Megatron-shard attention heads / FFN channels across (see [hardware doc](../hardware_and_sharding.md)). Must divide `num_devices` and `num_heads` (12 for the 1.3B DiT, 40 for the 14B DiT, 64 for T5). `--tensor_parallel_size 4` (4-way TP × 2-way DP) is a reasonable start on a v4-8 at full 1280×720 for 1.3B; the 14B model was verified with `--tensor_parallel_size 4` on a v4-8. Raise it if you hit HBM OOM. |
+| `--sequence_parallel` | off | Shard the DiT's token sequence itself (DeepSpeed-Ulysses) instead of Megatron TP. Not needed at 1.3B scale; may help the 14B model at higher resolutions — see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses). |
 | `--dtype` | `bfloat16` | `float32` \| `float16` \| `bfloat16`. Matches the reference's `bfloat16` T5/DiT, `float32` VAE, unified here for simplicity. `float16` will fail at runtime — TPU's XLA backend doesn't implement `float16` matmuls. |
 | `--seed` | `0` | Initial noise seed. |
 | `--num_steps` | `50` | Sampling steps. |
@@ -98,8 +129,8 @@ independent noise, giving that many samples of one prompt "for free"; exactly
 PyTorch reference's model code) — it's just that the reference pipeline's
 `generate()` never uses it.
 
-**Status:** fully verified end-to-end against the real checkpoint, output
-visually confirmed correct (see the [parity matrix](../../README.md#model-support--parity-matrix)).
+**Status:** fully verified end-to-end against real checkpoints for both
+1.3B and 14B, output confirmed coherent (see the [parity matrix](../../README.md#model-support--parity-matrix)).
 
 ---
 
@@ -154,12 +185,19 @@ projection (`WanDiT`'s `model_type="i2v"` path).
 | `--num_frames` | `81` | Output frame count. |
 | `--output_path` | `output_video.mp4` | With `dp_size > 1`, each replica's sample is saved as `<output_path>_<i>.mp4`. |
 
-**Status:** architecture, converter mappings, and full pipeline wiring are
-verified against synthetic PyTorch-shaped weights (exact 1:1 parameter-tree
-matches, same methodology as every other component in this repo), but **not
-yet run against the real I2V-14B/CLIP checkpoints** (much larger downloads
-than t2v needed). Treat it as needing the same real-checkpoint verification
-pass the t2v path has already been through.
+**Status:** verified end-to-end against the real I2V-14B/VAE/T5/CLIP
+checkpoints, output confirmed coherent. Fixed two bugs found during that
+first real run, both pre-existing and specific to the image-conditioning
+path (never exercised against real weights before): `build_i2v_conditioning`
+called a `pre_process` method that doesn't exist on Wan2.1's `WanVAEEncoder`
+(that's a Wan2.2-only pixel-unshuffle step — Wan2.1's `encode_chunk` takes
+raw RGB pixels directly); and `Encoder3d`/`WanVAEEncoder`'s
+`temperal_downsample` default was `(True, True, False)` (the class's own
+default) instead of the released checkpoint's actual `(False, True, True)`
+(confirmed against the reference's `_video_vae` config and the checkpoint's
+own weight keys) — the decoder-side `temperal_upsample` default happened to
+already be correct, which is why this went undetected until the encoder
+path was actually exercised.
 
 ---
 
@@ -260,7 +298,9 @@ resolution-divisibility, host-transfer for decoded chunks).
 - **Wan2.2 A14B (14B MoE, T2V/I2V)** — not yet implemented; will need its
   own DiT variant support (two-expert high/low-noise split) once checkpoints
   are available.
-- **Cosmos** — planned next model family, not yet started.
+
+See [`docs/models/cosmos.md`](cosmos.md) and [`docs/models/cosmos3.md`](cosmos3.md)
+for the Cosmos-Predict2.5 and Cosmos 3 model families.
 
 See the [parity matrix in the root README](../../README.md#model-support--parity-matrix)
 for the up-to-date status across all variants.

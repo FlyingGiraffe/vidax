@@ -226,7 +226,7 @@ class Encoder3d(nn.Module):
     dim_mult: Sequence[int] = (1, 2, 4, 4)
     num_res_blocks: int = 2
     attn_scales: Sequence[float] = ()
-    temperal_downsample: Sequence[bool] = (True, True, False)
+    temperal_downsample: Sequence[bool] = (False, True, True)
     eps: float = 1e-6
 
     @nn.compact
@@ -300,7 +300,7 @@ class WanVAEEncoder(nn.Module):
     dim_mult: Sequence[int] = (1, 2, 4, 4)
     num_res_blocks: int = 2
     attn_scales: Sequence[float] = ()
-    temperal_downsample: Sequence[bool] = (True, True, False)
+    temperal_downsample: Sequence[bool] = (False, True, True)
     eps: float = 1e-6
 
     def setup(self):

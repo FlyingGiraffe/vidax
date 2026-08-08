@@ -376,53 +376,26 @@ def main(args):
 
     # --- Timestep conditioning, no input/output preconditioning ---
     #
-    # A previous version of this script wrapped every DiT call in an
-    # EDM-style `RectifiedFlowScaling` preconditioning transform (`c_in`
-    # scaling the input latent, `c_skip`/`c_out` reconstructing x0 from the
-    # DiT's raw output). That was based on the wrong reference class:
-    # `RectifiedFlowScaling` (cosmos_predict2/_src/imaginaire/modules/
-    # denoiser_scaling.py) is never imported or used by
-    # `Text2WorldModelRectifiedFlow`/`Video2WorldModelRectifiedFlow` (the
-    # classes this checkpoint's "..._rectified_flow_only" experiment config
-    # actually trains) -- confirmed by grepping both files for
-    # "RectifiedFlowScaling"/"denoiser_scaling", zero hits.
-    #
-    # The real reference inference loop (`generate_samples_from_batch`,
-    # text2world_model_rectified_flow.py:493-583) does neither of those
-    # things:
-    #   - The raw noisy latent `xt` is passed to the DiT *unscaled*
-    #     (`self.net(x_B_C_T_H_W=xt_B_C_T_H_W, ...)`, no `c_in`).
-    #   - The DiT's raw output is used directly as `velocity_pred`
-    #     (`velocity_pred = uncond_v + guidance * (cond_v - uncond_v)`,
-    #     `cond_v`/`uncond_v` being `self.net(...)`'s output verbatim) and
-    #     fed straight into `self.sample_scheduler.step(velocity_pred, t,
-    #     latents, ...)` -- no reconstruction step at all.
+    # No EDM-style `c_in`/`c_skip`/`c_out` preconditioning here -- the
+    # reference's actual inference loop (`generate_samples_from_batch`,
+    # text2world_model_rectified_flow.py:493-583) passes the raw noisy
+    # latent `xt` to the DiT unscaled and uses the DiT's raw output directly
+    # as `velocity_pred`, fed straight into `self.sample_scheduler.step(...)`
+    # -- no reconstruction step. (`RectifiedFlowScaling`, an EDM-style
+    # preconditioning transform, belongs to a different reference model
+    # class the rectified-flow checkpoint this script targets never uses.)
     #   - The timestep passed to both the DiT and the scheduler's own
     #     `.step()` is the *same* value, `self.sample_scheduler.timesteps`
     #     (i.e. `sigma * num_train_timesteps`, this module's own
     #     `scheduler.timesteps` attribute) -- matching `MinimalV1LVGDiT.
     #     forward`'s `timesteps_B_T * self.timestep_scale` (0.001): the
     #     `*1000` (schedule) and `*0.001` (DiT-internal) cancel, so the DiT
-    #     ends up conditioned on plain, unscaled `sigma` -- not `sigma /
-    #     (sigma + 1)` as the abandoned EDM-precondition version assumed.
+    #     ends up conditioned on plain, unscaled `sigma`.
     # This lines up exactly with `FlowUniPCMultistepScheduler.step`'s own
     # `convert_model_output` (`x0 = sample - sigma_t * model_output`,
     # docstring: "model_output: The predicted velocity (v_t) from the DiT")
-    # -- our scheduler was *already* written to consume the DiT's raw
-    # output directly as velocity; the EDM-precondition wrapper was
-    # unnecessary extra processing fighting against that, not filling a gap
-    # in it. It was also *wrong* independent of that: `t = sigma/(sigma+1)`
-    # only agrees with plain `sigma` near `sigma=0`, and diverges further as
-    # sigma grows -- e.g. at this schedule's actual `sigma_max=0.9998`,
-    # `t = 0.9998/1.9998 = 0.500`, telling the DiT "half-noised" for an
-    # input that's actually ~100% noise. A real-photo low-noise probe
-    # confirmed this exact signature: denoising a lightly-noised real image
-    # (sigma=0.05) reconstructed it almost perfectly, but the same DiT
-    # given sigma=0.5-0.9998 (still with the old code) produced the same
-    # meaningless texture seen from full sampling -- the DiT itself works,
-    # it was being told the wrong noise level at every step past the first
-    # few, which corrupts the whole trajectory before it ever reaches the
-    # low-sigma steps where correct conditioning would show.
+    # -- the scheduler already consumes the DiT's raw output directly as
+    # velocity, so no extra reconstruction step is needed on this side either.
 
     # Only the DiT forward pass (`compute_velocity`) is jitted, and its
     # signature has *no* static/step-dependent argument at all -- `sigma_vec`
@@ -432,25 +405,20 @@ def main(args):
     # scripts already rely on for their own per-step jit.
     #
     # `scheduler.step(...)` (UniPC's predictor/corrector) is deliberately
-    # called *eagerly*, outside any `jax.jit`, from the Python loop below --
-    # NOT fused into a jitted `single_step` the way an earlier version of
-    # this script did. UniPC's `step()` has genuine Python-level branching
-    # on `step_index`'s concrete value (`if step_index > 0`, the
-    # `lower_order_final` ramp's `min(self.num_steps - step_index, ...)`),
-    # which requires `step_index` to be a *static* argument if this were
-    # jitted -- but marking an argument static forces JAX to retrace (and
-    # recompile) the *entire* enclosing jitted function every time that
-    # argument's value changes, not just the small piece of code that
-    # actually reads it. Fusing `compute_velocity`'s two full 28-block DiT
-    # forward passes into that same jitted function meant every one of
-    # `num_steps` steps triggered a full DiT recompile (`num_steps * 2`
-    # compiles of a 2B-parameter model, most of them wasted -- this was the
-    # actual cause of multi-minute-plus runs that should take script-level
-    # seconds once compiled, not a UniPC or DiT correctness issue). UniPC's
-    # own arithmetic (a handful of small einsums over `solver_order`-many
-    # cached model outputs) is cheap enough that running it eagerly, with
-    # ordinary per-op JAX dispatch overhead, costs nothing that matters
-    # next to a 2B-parameter forward pass.
+    # called *eagerly*, outside any `jax.jit`, from the Python loop below,
+    # not fused into `compute_velocity`'s jitted function. UniPC's `step()`
+    # has genuine Python-level branching on `step_index`'s concrete value
+    # (`if step_index > 0`, the `lower_order_final` ramp's
+    # `min(self.num_steps - step_index, ...)`), which requires `step_index`
+    # to be a *static* argument if this were jitted -- but marking an
+    # argument static forces JAX to retrace (and recompile) the *entire*
+    # enclosing jitted function every time that argument's value changes.
+    # Fusing `compute_velocity`'s two full DiT forward passes into that same
+    # jitted function would mean every one of `num_steps` steps triggers a
+    # full DiT recompile. UniPC's own arithmetic (a handful of small einsums
+    # over `solver_order`-many cached model outputs) is cheap enough that
+    # running it eagerly, with ordinary per-op JAX dispatch overhead, costs
+    # nothing that matters next to a 2B-parameter forward pass.
     # CFG needs two DiT forward passes (conditional and unconditional) that
     # are identical in every input except the text context -- rather than
     # two separate `dit_apply` calls (two dispatches, two sets of collective

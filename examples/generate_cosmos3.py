@@ -1,12 +1,13 @@
-# Text-to-video / image-to-video inference script for Cosmos3-Nano on TPU.
+# Text-to-video / image-to-video inference script for Cosmos3 (Nano or Edge)
+# on TPU.
 #
 # Cosmos3 is architecturally unrelated to Wan/Cosmos-Predict2.5: a
 # Mixture-of-Transformers combining a causal "understanding" (text) pathway
 # with a full-attention "generation" (diffusion) pathway inside one shared
-# 36-layer transformer, no AdaLN modulation anywhere (the timestep is
-# injected once, additively, directly into the noisy vision tokens). See
-# `vidax.models.cosmos3.nano.dit`'s module docstring and the port plan
-# (`refs/diffusers-cosmos3/`) for the full architecture summary.
+# transformer, no AdaLN modulation anywhere (the timestep is injected once,
+# additively, directly into the noisy vision tokens). See
+# `vidax.models.cosmos3.dit`'s module docstring for the full architecture
+# summary, and `vidax.models.cosmos3.configs` for the Nano/Edge presets.
 #
 # Ported against a fixed-shape `(B, seq_len, hidden)` packed sequence instead
 # of the reference's ragged flat-buffer-with-global-indices design (ragged
@@ -16,13 +17,10 @@
 # segment excludes padding positions; the vision (patchified video latent)
 # segment is always exactly `T*Hp*Wp` tokens, no padding needed there.
 #
-# Direct application of the Cosmos-Predict2.5 debugging session's dominant
-# lesson: the raw transformer output *is* the velocity prediction (`v =
-# noise - x0`), fed straight into the scheduler's `x0 = sample - sigma_t *
-# model_output` -- no EDM-style `c_in`/`c_skip`/`c_out` preconditioning
-# wrapper. Confirmed directly against `refs/diffusers-cosmos3/
-# pipeline_cosmos3_omni.py`'s own denoising loop before writing this, not
-# assumed from precedent.
+# The raw transformer output *is* the velocity prediction (`v = noise - x0`),
+# fed straight into the scheduler's `x0 = sample - sigma_t * model_output` --
+# no EDM-style `c_in`/`c_skip`/`c_out` preconditioning wrapper, matching
+# `refs/diffusers-cosmos3/pipeline_cosmos3_omni.py`'s own denoising loop.
 
 import argparse
 import logging
@@ -34,8 +32,9 @@ import numpy as np
 from PIL import Image
 
 from vidax.core.sharding import build_tpu_mesh, get_replicated_sharding, shard_wan_params
-from vidax.models.cosmos3.common.mrope import get_mrope_ids_text_tokens, get_mrope_ids_vision_tokens
-from vidax.models.cosmos3.nano.dit import Cosmos3Transformer
+from vidax.models.cosmos3.configs import EDGE_CONFIG, NANO_CONFIG
+from vidax.models.cosmos3.mrope import get_mrope_ids_text_tokens, get_mrope_ids_vision_tokens
+from vidax.models.cosmos3.dit import Cosmos3Transformer
 from vidax.models.wan.wan2_2.vae import (
     Decoder3d, Encoder3d, PATCH_SIZE, WanVAEDecoder, WanVAEEncoder,
     _count_causal_convs, _count_causal_convs_encoder, unpatchify,
@@ -46,11 +45,7 @@ from vidax.translator.mappings import load_torch_checkpoint_to_jax
 logging.basicConfig(level=logging.INFO)
 
 DTYPES = {"float32": jnp.float32, "float16": jnp.float16, "bfloat16": jnp.bfloat16}
-
-# Cosmos3OmniTransformer config (transformer/config.json) -- see the port
-# plan for how each was confirmed against the real checkpoint.
-ROPE_THETA = 5_000_000.0
-ROPE_AXES_DIM = (24, 20, 20)
+MODEL_SIZE_CONFIGS = {"nano": NANO_CONFIG, "edge": EDGE_CONFIG}
 BASE_FPS = 24.0
 TEMPORAL_COMPRESSION_FACTOR = 4  # Wan2.2 VAE's latent temporal downsample.
 TEMPORAL_MARGIN = 15000  # `unified_3d_mrope_temporal_modality_margin`, separates text/vision mRoPE ranges.
@@ -137,7 +132,7 @@ def main(args):
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
 
-    dit_model = Cosmos3Transformer(mesh=mesh)
+    dit_model = Cosmos3Transformer(mesh=mesh, **MODEL_SIZE_CONFIGS[args.model_size])
     vae_decoder = WanVAEDecoder()
     vae_encoder = WanVAEEncoder() if args.image_path else None
     scheduler = FlowUniPCMultistepScheduler(
@@ -196,12 +191,12 @@ def main(args):
         cache_list = [None] * _count_causal_convs_encoder(encoder_cfg)
         raw_out, cache_list = vae_encoder.apply(vae_params, x_pixels, cache_list, method=vae_encoder.encode_chunk)
         mu = vae_encoder.apply(vae_params, raw_out, method=vae_encoder.post_process)
-        z_cond = jnp.zeros((b, latent_t, latent_h, latent_w, 48), dtype=jnp.float32)
+        z_cond = jnp.zeros((b, latent_t, latent_h, latent_w, dit_model.latent_channel), dtype=jnp.float32)
         z_cond = z_cond.at[:, 0:1].set(mu.astype(jnp.float32))
         vision_condition_mask = vision_condition_mask.at[:, 0].set(1.0)
 
     key = jax.random.PRNGKey(args.seed)
-    noise = jax.random.normal(key, (b, latent_t, latent_h, latent_w, 48), dtype=jnp.float32)
+    noise = jax.random.normal(key, (b, latent_t, latent_h, latent_w, dit_model.latent_channel), dtype=jnp.float32)
     if z_cond is not None:
         cm = vision_condition_mask[:, :, None, None, None]
         latents = cm * z_cond + (1.0 - cm) * noise
@@ -265,14 +260,17 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Text2video / image2video generation with Cosmos3-Nano on TPU.")
+    parser = argparse.ArgumentParser(description="Text2video / image2video generation with Cosmos3 on TPU.")
+    parser.add_argument("--model_size", type=str, default="nano", choices=list(MODEL_SIZE_CONFIGS.keys()),
+                         help="Which released Cosmos3 config to build (must match --dit_checkpoint_path's "
+                              "actual checkpoint: Cosmos3-Nano or Cosmos3-Edge).")
     parser.add_argument("--dit_checkpoint_path", type=str, required=True,
                          help="Path to the DiT .safetensors.index.json manifest "
-                              "(checkpoints/Cosmos3-Nano/transformer/diffusion_pytorch_model.safetensors.index.json).")
+                              "(checkpoints/Cosmos3-<Nano|Edge>/transformer/diffusion_pytorch_model.safetensors.index.json).")
     parser.add_argument("--vae_checkpoint_path", type=str, required=True,
-                         help="Path to the VAE .safetensors (checkpoints/Cosmos3-Nano/vae/diffusion_pytorch_model.safetensors).")
+                         help="Path to the VAE .safetensors (checkpoints/Cosmos3-<Nano|Edge>/vae/diffusion_pytorch_model.safetensors).")
     parser.add_argument("--tokenizer_path", type=str, required=True,
-                         help="Path to the text tokenizer directory (checkpoints/Cosmos3-Nano/text_tokenizer).")
+                         help="Path to the text tokenizer directory (checkpoints/Cosmos3-<Nano|Edge>/text_tokenizer).")
     parser.add_argument("--image_path", type=str, default=None,
                          help="Optional conditioning image for image2video (anchors latent frame 0).")
     parser.add_argument("--prompt", type=str, required=True)
@@ -283,8 +281,8 @@ if __name__ == "__main__":
     parser.add_argument("--guide_scale", type=float, default=6.0)
     parser.add_argument("--tensor_parallel_size", type=int, default=1,
                          help="Number of devices to shard the DiT's attention heads/FFN channels "
-                              "(Megatron-style) across. Must divide num_devices, num_attention_heads (32), "
-                              "and num_key_value_heads (8).")
+                              "(Megatron-style) across. Must divide num_devices and num_attention_heads/"
+                              "num_key_value_heads (32/8 for Nano, 16/8 for Edge).")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_steps", type=int, default=35)
@@ -294,6 +292,6 @@ if __name__ == "__main__":
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--num_frames", type=int, default=93)
     parser.add_argument("--fps", type=float, default=24.0)
-    parser.add_argument("--output_path", type=str, default="output_cosmos3_nano.mp4")
+    parser.add_argument("--output_path", type=str, default="output_cosmos3.mp4")
     args = parser.parse_args()
     main(args)

@@ -25,6 +25,7 @@ from vidax.core.sharding import (
     build_tpu_mesh, shard_wan_params, get_replicated_sharding, get_batch_sharding,
 )
 from vidax.core.rope3d import create_rope3d_freqs
+from vidax.models.wan.wan2_1.configs import I2V_14B_CONFIG
 from vidax.models.wan.wan2_1.dit import WanDiT
 from vidax.models.wan.wan2_1.vae import (
     WanVAEDecoder, WanVAEEncoder, Decoder3d, Encoder3d, _count_causal_convs,
@@ -46,14 +47,6 @@ DEFAULT_NEGATIVE_PROMPT = (
     "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，"
     "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，"
     "杂乱的背景，三条腿，背景人很多，倒着走"
-)
-
-# Wan2.1-I2V-14B config (Wan2.1-main/wan/configs/wan_i2v_14B.py).
-I2V_14B_CONFIG = dict(
-    dim=5120, ffn_dim=13824, num_heads=40, num_layers=40,
-    freq_dim=256, text_dim=4096, text_len=512, in_dim=16, out_dim=16,
-    patch_size=(1, 2, 2), qk_norm=True, cross_attn_norm=True, eps=1e-6,
-    model_type="i2v", image_dim=1280,
 )
 
 
@@ -116,8 +109,7 @@ def build_i2v_conditioning(image: np.ndarray, num_frames: int, pixel_h: int, pix
 
     The reference's mask (`msk`) ends up, after its reshape/transpose dance,
     equal to 1 for every channel at the first latent frame and 0 everywhere
-    else -- see this function's git history / PR description for the
-    step-by-step derivation; it's simpler to just construct that directly.
+    else -- constructed directly here rather than reproducing that dance.
     """
     img = jnp.asarray(image, dtype=jnp.float32) / 127.5 - 1.0  # [0,255] -> [-1, 1]
     img = jax.image.resize(img, (pixel_h, pixel_w, 3), method="bicubic")
@@ -129,11 +121,10 @@ def build_i2v_conditioning(image: np.ndarray, num_frames: int, pixel_h: int, pix
     # Encodes the *full* (num_frames-long, mostly-zero) video, not just the
     # one real frame -- the causal chunked encoder's output position/shape
     # depends on how many frames precede it, so this is what actually
-    # produces correctly-shaped latents. That means the same ~20-chunk loop
-    # as `WanVAEDecoder.decode_chunk` (see its docstring): `encode_chunk`
-    # (jit-wrapped here) compiles the whole per-chunk computation as one
-    # fused program, twice total, rather than once per op per chunk.
-    x_full = vae_model.apply(vae_params, video, method=vae_model.pre_process)
+    # produces correctly-shaped latents. `encode_chunk` (jit-wrapped here)
+    # takes raw RGB pixels directly (Wan2.1's VAE has no pixel-unshuffle
+    # pre-process step, unlike Wan2.2's).
+    x_full = video
     encode_chunk_jit = jax.jit(
         lambda params, x_chunk, cache_list: vae_model.apply(
             params, x_chunk, cache_list, method=vae_model.encode_chunk))

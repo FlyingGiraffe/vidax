@@ -20,9 +20,13 @@ small, and GSPMD correctly and cheaply broadcasts replicated operands
 against tensor-parallel-sharded ones in elementwise ops (no communication
 needed), so there's no correctness or meaningful memory cost to leaving it be.
 """
+import os
+
 import jax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import numpy as np
+
+DEFAULT_JAX_CACHE_DIR = os.path.expanduser("~/.cache/vidax/jax")
 
 # Dense-layer names (the parent key one level above "kernel"/"bias" in a
 # flax param tree) that are column-parallel (shard the output/last axis) vs.
@@ -53,6 +57,14 @@ import numpy as np
 COLUMN_PARALLEL_NAMES = frozenset([
     "self_attn_q", "self_attn_k", "self_attn_v",
     "cross_attn_q", "cross_attn_k", "cross_attn_v",
+    "self_attn_norm_q", "self_attn_norm_k",     # WanDiT Q/K-RMSNorm's `scale`,
+    "cross_attn_norm_q", "cross_attn_norm_k",   # column-split to match Q/K's own
+                                                 # split -- only matters combined
+                                                 # with `sequence_parallel` (see
+                                                 # `vidax.core.attention
+                                                 # .TPShardedRMSNorm`); harmless
+                                                 # under plain Megatron TP, where
+                                                 # GSPMD reconciles it as usual.
     "ffn_0",                        # WanDiT FFN up-projection
     "attn_q", "attn_k", "attn_v",   # T5 self-attention
     "ffn_gate_0", "ffn_fc1",        # T5 FFN up-projection
@@ -78,21 +90,34 @@ ROW_PARALLEL_NAMES = frozenset([
 ])
 
 
-def build_tpu_mesh(data_parallel_size: int, tensor_parallel_size: int) -> Mesh:
+def build_tpu_mesh(
+    data_parallel_size: int, tensor_parallel_size: int, sequence_parallel_size: int = 1,
+) -> Mesh:
     """
     Creates a JAX Mesh for TPU v4/v5e/v6e.
 
     Args:
         data_parallel_size: Number of devices for data parallelism.
-        tensor_parallel_size: Number of devices for tensor parallelism.
+        tensor_parallel_size: Number of devices for Megatron-style weight
+            sharding ('tp' axis).
+        sequence_parallel_size: Number of devices for DeepSpeed-Ulysses
+            token-sequence sharding ('sp' axis, independent of 'tp' -- see
+            `docs/hardware_and_sharding.md`'s "Combining both" section for
+            how the two compose). Defaults to 1 (today's 2-axis behavior --
+            a size-1 axis is invisible to every `PartitionSpec` that doesn't
+            name it, so existing callers that never reference 'sp' are
+            unaffected).
     """
     devices = jax.devices()
     total_devices = len(devices)
-    assert total_devices == data_parallel_size * tensor_parallel_size, \
-        f"Mesh mismatch: {total_devices} devices vs {data_parallel_size}x{tensor_parallel_size}"
+    expected = data_parallel_size * tensor_parallel_size * sequence_parallel_size
+    assert total_devices == expected, (
+        f"Mesh mismatch: {total_devices} devices vs "
+        f"{data_parallel_size}x{tensor_parallel_size}x{sequence_parallel_size}")
 
-    device_mesh = np.array(devices).reshape(data_parallel_size, tensor_parallel_size)
-    return Mesh(device_mesh, axis_names=('dp', 'tp'))
+    device_mesh = np.array(devices).reshape(
+        data_parallel_size, tensor_parallel_size, sequence_parallel_size)
+    return Mesh(device_mesh, axis_names=('dp', 'tp', 'sp'))
 
 
 def get_replicated_sharding(mesh: Mesh) -> NamedSharding:
@@ -126,7 +151,7 @@ def shard_wan_params(params: dict, mesh: Mesh) -> dict:
         if parent in COLUMN_PARALLEL_NAMES and leaf.ndim >= 1:
             if leaf_name == "kernel" and leaf.ndim == 2:
                 return NamedSharding(mesh, P(None, 'tp'))
-            elif leaf_name == "bias" and leaf.ndim == 1:
+            elif leaf_name in ("bias", "scale") and leaf.ndim == 1:
                 return NamedSharding(mesh, P('tp'))
         elif parent in ROW_PARALLEL_NAMES and leaf.ndim >= 1:
             if leaf_name == "kernel" and leaf.ndim == 2:
@@ -137,3 +162,39 @@ def shard_wan_params(params: dict, mesh: Mesh) -> dict:
         return NamedSharding(mesh, P(*([None] * leaf.ndim)))
 
     return jax.tree_util.tree_map_with_path(spec_for_leaf, params)
+
+
+def to_partition_specs(shardings):
+    """Strips each leaf `NamedSharding` down to its bare `PartitionSpec`.
+
+    `jax.device_put(params, shard_wan_params(params, mesh))` wants the
+    `NamedSharding` pytree `shard_wan_params` already returns; `shard_map`'s
+    `in_specs` wants the same per-leaf partitioning as plain `PartitionSpec`s
+    instead. This converts one to the other, so a `sequence_parallel`-capable
+    script's weight sharding can be identical -- both real (weight-sharded)
+    and passed correctly into `shard_map` -- instead of falling back to a
+    blanket "fully replicated" `P()` for the whole params pytree just
+    because the call happens to run inside `shard_map`.
+    """
+    return jax.tree_util.tree_map(lambda s: s.spec, shardings)
+
+
+def configure_jax_cache(cache_dir: str = DEFAULT_JAX_CACHE_DIR) -> None:
+    """Enables JAX's persistent compilation cache, keyed on disk by program
+    hash so a second run at the same (shape, dtype, sharding, mesh, step
+    count) signature skips XLA compilation entirely instead of re-paying it.
+
+    Compile time for these model sizes is tens of seconds to minutes (see
+    `docs/benchmarking.md`'s Compile-time column) -- without this, every one
+    of this repo's example-script invocations pays that cost fresh, even
+    running the exact same command twice in a row. Call once, before
+    building any mesh/model, from every example script's `main()`.
+    """
+    jax.config.update("jax_compilation_cache_dir", cache_dir)
+    # JAX's own recommended pairing for this cache: cache every compiled
+    # program regardless of how small (-1 disables the size floor) and only
+    # bother once a compile actually took a little while (skips caching
+    # trivial/instant compiles, which would otherwise just add disk-read
+    # overhead to their next run for no real savings).
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 1)

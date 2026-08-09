@@ -44,7 +44,7 @@ class WanDiTBlock(nn.Module):
     eps: float = 1e-6
     mesh: Optional[Mesh] = None
     sequence_parallel: bool = False
-    sp_axis_name: str = "tp"
+    sp_axis_name: str = "sp"
 
     @nn.compact
     def __call__(
@@ -99,9 +99,22 @@ class WanDiTBlock(nn.Module):
             use_scale=False, use_bias=False, epsilon=self.eps,
             name="norm2")(x.astype(jnp.float32))
         norm_h = (norm_h * (1 + scale_mlp) + shift_mlp).astype(x.dtype)
-        h = nn.Dense(self.ffn_dim, name="ffn_0")(norm_h)
+        # `ffn_0` is column-parallel: under `sequence_parallel` (running
+        # inside `shard_map`), its declared output width must already be
+        # this device's local share -- see `vidax.models.wan.common
+        # .dit_layers.attend`'s identical comment for the full reasoning
+        # (GSPMD handles this automatically outside `shard_map`, but nothing
+        # does inside it). A no-op when 'tp' has size 1.
+        tp_size = self.mesh.shape["tp"] if (self.sequence_parallel and self.mesh is not None) else 1
+        h = nn.Dense(self.ffn_dim // tp_size, name="ffn_0")(norm_h)
         h = nn.gelu(h, approximate=True)
         h = nn.Dense(self.dim, name="ffn_2")(h)
+        # `ffn_2` is row-parallel -- see `vidax.models.wan.common.dit_layers
+        # .attend`'s identical comment for why this manual reduce is only
+        # needed under `sequence_parallel`, and why it's a safe no-op
+        # otherwise.
+        if self.sequence_parallel:
+            h = jax.lax.psum(h, "tp")
         x = (x.astype(jnp.float32) +
              h.astype(jnp.float32) * gate_mlp).astype(x.dtype)
         return x
@@ -130,18 +143,18 @@ class WanDiT(nn.Module):
     `num_heads`/`num_layers` explicitly -- there is no 1.3B i2v checkpoint.
 
     ``sequence_parallel``: shards the token sequence itself across
-    `sp_axis_name` between blocks (DeepSpeed-Ulysses, reshuffling to a
-    head-sharded full-sequence view only for the duration of self-attention
-    -- see `vidax.models.wan.wan2_2.dit`'s module docstring for the full
-    mechanism, which this reuses unchanged via `attend`). The one thing
-    genuinely simpler here than in Wan2.2: `e`/`e0` (the timestep
-    modulation) are per-*sample*, not per-token, so unlike Wan2.2 they never
-    need chunking -- only `x` and `freqs` do. Requires the whole
-    `WanDiT.apply(...)` call to run inside `shard_map(..., mesh=mesh)`, same
-    as Wan2.2; see `examples/generate_wan2_2_ti2v.py` for how that's wired
-    up (this file doesn't have its own i2v/t2v example script update yet,
-    since sequence parallelism is primarily needed for the 14B models, which
-    aren't tested against real checkpoints here yet either).
+    `sp_axis_name` (the mesh's `'sp'` axis) between blocks (DeepSpeed-
+    Ulysses, reshuffling to a head-sharded full-sequence view only for the
+    duration of self-attention -- see `vidax.models.wan.wan2_2.dit`'s module
+    docstring for the full mechanism, which this reuses unchanged via
+    `attend`, including composing with ordinary Megatron weight-sharding on
+    the independent `'tp'` axis). The one thing genuinely simpler here than
+    in Wan2.2: `e`/`e0` (the timestep modulation) are per-*sample*, not
+    per-token, so unlike Wan2.2 they never need chunking -- only `x` and
+    `freqs` do. Requires the whole `WanDiT.apply(...)` call to run inside
+    `shard_map(..., mesh=mesh)`, same as Wan2.2; see
+    `examples/generate_wan2_1_t2v.py`/`generate_wan2_1_i2v.py` for how
+    that's wired up.
     """
     dim: int = 1536
     ffn_dim: int = 8960
@@ -160,7 +173,7 @@ class WanDiT(nn.Module):
     model_type: str = "t2v"  # "t2v" or "i2v"
     image_dim: int = 1280  # CLIP ViT-H/14's vision_dim; only used if model_type == "i2v".
     sequence_parallel: bool = False
-    sp_axis_name: str = "tp"
+    sp_axis_name: str = "sp"
 
     @nn.compact
     def __call__(

@@ -28,7 +28,7 @@ generation time, rather than one blended end-to-end latency:
   count, and for projecting cost at a step count you haven't measured.
 - **Peak HBM / chip** — the highest per-device memory watermark during
   generation. Reported because it's the binding constraint for which
-  `--tensor_parallel_size`/`--sequence_parallel` combination a given model
+  `--tensor_parallel_size`/`--sequence_parallel_size` combination a given model
   and resolution actually needs (see
   [`docs/hardware_and_sharding.md`](hardware_and_sharding.md)) — not just a
   secondary detail, since several models in this repo (A14B in particular)
@@ -48,8 +48,6 @@ chip count.
 | Wan2.1 | 14B | I2V | v4-8 | 720x1280 | 81 | 40 | | | | |
 | Wan2.2 | 5B (TI2V) | T2V | v4-8 | 704x1280 | 121 | 50 | | | | |
 | Wan2.2 | 5B (TI2V) | I2V | v4-8 | 704x1280 | 121 | 40 | | | | |
-| Wan2.2 | A14B | T2V | v4-8 | 720x1280 | 81 | 50 | | | | |
-| Wan2.2 | A14B | I2V | v4-8 | 720x1280 | 81 | 40 | | | | |
 | Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | v4-8 | | | | | | | |
 | Cosmos 3 | Nano (16B) | T2V/I2V | v4-8 | | | | | | | |
 | Cosmos 3 | Edge (4B) | T2V/I2V | v4-8 | | | | | | | |

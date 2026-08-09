@@ -12,20 +12,21 @@
 # of this and the reference's `WanTI2V.i2v` for the sampling-loop mechanics
 # this mirrors (`masks_like`'s frame-0 mask, reapplied after every step).
 #
-# Unlike `generate_wan2_1_t2v.py`, the DiT here uses *sequence* parallelism
-# (`WanDiT(sequence_parallel=True)`), not Megatron-style tensor parallelism:
-# at TI2V-5B's only supported resolution (704x1280, 121 frames) the
-# patch-token sequence is ~27k long, and Wan2.2's per-token modulation
-# tensors scale with that directly -- sharding attention heads/FFN channels
-# alone doesn't shrink them, so that alone doesn't fit a 4-chip v4 slice's
-# HBM even after quartering weight memory. Sequence parallelism instead
-# shards the token sequence itself between blocks, which is what actually
-# cuts the memory that was overflowing; see
-# `vidax.models.wan.wan2_2.dit`'s module docstring for the full mechanism.
-# T5 (whose sequence length, 512, was never the bottleneck) keeps using the
-# ordinary Megatron tensor-parallel path from `generate_wan2_1_t2v.py`,
-# unchanged -- `--tensor_parallel_size` sets both, just with different
-# meanings per model.
+# Unlike `generate_wan2_1_t2v.py`'s default path, this script needs
+# *sequence* parallelism (`--sequence_parallel_size > 1`), not just
+# Megatron-style tensor parallelism: at TI2V-5B's only supported resolution
+# (704x1280, 121 frames) the patch-token sequence is ~27k long, and Wan2.2's
+# per-token modulation tensors scale with that directly -- sharding
+# attention heads/FFN channels alone (`--tensor_parallel_size`) doesn't
+# shrink them, so that alone doesn't fit a 4-chip v4 slice's HBM even after
+# quartering weight memory. Sequence parallelism instead shards the token
+# sequence itself between blocks, which is what actually cuts the memory
+# that was overflowing; see `vidax.models.wan.wan2_2.dit`'s module
+# docstring for the full mechanism, including how it composes with
+# `--tensor_parallel_size`'s weight-sharding (independent mesh axes -- see
+# `docs/hardware_and_sharding.md`'s "Combining both" section). T5 (whose
+# sequence length, 512, was never the bottleneck) always uses the ordinary
+# Megatron tensor-parallel path, driven by `--tensor_parallel_size` alone.
 
 import argparse
 from functools import partial
@@ -44,6 +45,7 @@ from jax.sharding import PartitionSpec as P
 
 from vidax.core.sharding import (
     build_tpu_mesh, shard_wan_params, get_replicated_sharding, get_batch_sharding,
+    to_partition_specs, configure_jax_cache,
 )
 from vidax.core.rope3d import create_rope3d_freqs
 from vidax.models.wan.wan2_2.configs import TI2V_5B_CONFIG
@@ -205,17 +207,24 @@ def build_i2v_conditioning(
 
 def main(args):
     """Main inference function."""
+    configure_jax_cache()
     num_devices = jax.device_count()
     tp_size = args.tensor_parallel_size
-    assert num_devices % tp_size == 0, (
-        f"num_devices ({num_devices}) must be divisible by --tensor_parallel_size ({tp_size})")
-    dp_size = num_devices // tp_size
-    mesh = build_tpu_mesh(data_parallel_size=dp_size, tensor_parallel_size=tp_size)
+    sp_size = args.sequence_parallel_size
+    assert num_devices % (tp_size * sp_size) == 0, (
+        f"num_devices ({num_devices}) must be divisible by "
+        f"--tensor_parallel_size * --sequence_parallel_size ({tp_size} * {sp_size})")
+    dp_size = num_devices // (tp_size * sp_size)
+    mesh = build_tpu_mesh(
+        data_parallel_size=dp_size, tensor_parallel_size=tp_size,
+        sequence_parallel_size=sp_size)
     rng = jax.random.PRNGKey(args.seed)
-    logging.info(f"Using {num_devices} devices: {dp_size}-way data // {tp_size}-way tensor parallel.")
+    logging.info(
+        f"Using {num_devices} devices: {dp_size}-way data // {tp_size}-way tensor // "
+        f"{sp_size}-way sequence parallel.")
 
     dtype = DTYPES[args.dtype]
-    sequence_parallel = tp_size > 1
+    sequence_parallel = sp_size > 1
     has_image = args.image_path is not None
     num_steps = args.num_steps if args.num_steps is not None else 50
 
@@ -224,19 +233,18 @@ def main(args):
     # `vidax.models.wan.wan2_2.dit`'s module docstring) requires every
     # `WanDiT.apply(...)` call to run inside `shard_map(..., mesh=mesh)` --
     # done below via `dit_apply`, not by calling `dit_model.apply` directly.
-    dit_model = WanDiT(
-        mesh=mesh, sequence_parallel=sequence_parallel, sp_axis_name="tp", **TI2V_5B_CONFIG)
+    dit_model = WanDiT(mesh=mesh, sequence_parallel=sequence_parallel, **TI2V_5B_CONFIG)
     vae_decoder = WanVAEDecoder()
     vae_encoder = WanVAEEncoder() if has_image else None
     t5_model = T5Encoder()
     scheduler = RectifiedFlowScheduler(num_steps=num_steps, shift=args.shift)
 
-    assert dit_model.num_heads % tp_size == 0, (
+    assert dit_model.num_heads % (tp_size * sp_size) == 0, (
         f"WanDiT.num_heads ({dit_model.num_heads}) must be divisible by "
-        f"--tensor_parallel_size ({tp_size}) -- DeepSpeed-Ulysses sequence "
-        f"parallelism reshuffles across attention heads, same divisibility "
-        f"requirement as Megatron head-sharding; e.g. tp in {{1,2,3,4,6,8,12,24}} "
-        f"for the 5B model's 24 heads.")
+        f"--tensor_parallel_size * --sequence_parallel_size ({tp_size} * {sp_size}) -- "
+        f"DeepSpeed-Ulysses sequence parallelism reshuffles across whatever "
+        f"heads Megatron weight-sharding already left each device with, so "
+        f"the *product* is the real divisibility constraint, not either alone.")
     assert t5_model.num_heads % tp_size == 0, (
         f"T5Encoder.num_heads ({t5_model.num_heads}) must be divisible by "
         f"--tensor_parallel_size ({tp_size}).")
@@ -260,28 +268,28 @@ def main(args):
         args.t5_checkpoint_path, model_type="wan_t5")
 
     # Cast to the target dtype *before* `device_put`, still on the host: the
-    # DiT ships as raw float32, and every device needs a full replicated
-    # copy of it under sequence parallelism (not a `1/tp_size` Megatron
-    # shard) -- casting after `device_put` would need the float32 (20GB)
-    # and bf16 (10GB) copies to coexist on-device for the cast, which is
-    # what was actually OOM-ing (the steady-state bf16 weights alone fit
+    # DiT ships as raw float32, and casting after `device_put` would need
+    # the float32 (20GB) and bf16 (10GB) copies to coexist on-device for the
+    # cast, which is what was actually OOM-ing (the steady-state bf16
+    # weights alone fit
     # fine). See `cast_numpy_tree_to_dtype`'s docstring.
     np_dtype = NUMPY_DTYPES[args.dtype]
     dit_params = cast_numpy_tree_to_dtype(dit_params, np_dtype)
     vae_params = cast_numpy_tree_to_dtype(vae_params, np_dtype)
     t5_params = cast_numpy_tree_to_dtype(t5_params, np_dtype)
 
-    # T5 is tensor-parallel sharded (attention heads / FFN channels split
-    # across the 'tp' axis), same as `generate_wan2_1_t2v.py`. The DiT's
-    # weights are instead left fully **replicated**: sequence parallelism
-    # shards *activations* along the token axis, not weights, so every
-    # device needs its own complete copy of every DiT weight (unlike
-    # Megatron sharding, which is precisely what would otherwise let each
-    # device hold only `1/tp_size` of them) -- see this file's header
-    # comment for why activation, not weight, memory was the actual
-    # bottleneck here. The VAE is comparatively small and stays replicated too.
+    # T5 and the DiT are both tensor-parallel sharded (attention heads / FFN
+    # channels split across the 'tp' axis), same as `generate_wan2_1_t2v.py`
+    # -- weight-sharding (`--tensor_parallel_size`) and token-sharding
+    # (`--sequence_parallel_size`) are independent mesh axes, so there's no
+    # more "replicate weights instead" special case: `shard_wan_params`
+    # degenerates to full replication on its own whenever 'tp' has size 1
+    # (this script's previous default, `--tensor_parallel_size 1`, behaves
+    # identically to before). The VAE is comparatively small and stays
+    # replicated regardless.
     replicated = get_replicated_sharding(mesh)
-    dit_params = jax.device_put(dit_params, replicated)
+    dit_shardings = shard_wan_params(dit_params, mesh)
+    dit_params = jax.device_put(dit_params, dit_shardings)
     t5_params = jax.device_put(t5_params, shard_wan_params(t5_params, mesh))
     vae_params = jax.device_put(vae_params, replicated)
     logging.info("Weights loaded, cast, and sharded across devices.")
@@ -309,25 +317,27 @@ def main(args):
         pixel_w, pixel_h = best_output_size(orig_w, orig_h, dw, dh, args.max_area)
 
         # Unlike t2v's fixed 704x1280 (chosen so its patch token count
-        # divides evenly by every --tensor_parallel_size this script
+        # divides evenly by every --sequence_parallel_size this script
         # supports), an *arbitrary* input image's aspect ratio gives no such
         # guarantee -- sequence_parallel needs the exact token count to
-        # divide evenly (no padding support, see `WanDiT`'s assertion).
-        # Growing the width by `dw` up to `tp_size - 1` times is guaranteed
-        # to hit a divisible value (`tp_size` consecutive integers cover
-        # every residue mod `tp_size`), at the cost of a slightly-off
+        # divide evenly by `sp_size` specifically (no padding support, see
+        # `WanDiT`'s assertion, which chunks tokens across the mesh's 'sp'
+        # axis -- `tp_size` doesn't shrink the token axis at all).
+        # Growing the width by `dw` up to `sp_size - 1` times is guaranteed
+        # to hit a divisible value (`sp_size` consecutive integers cover
+        # every residue mod `sp_size`), at the cost of a slightly-off
         # aspect ratio only when this was actually necessary.
         if sequence_parallel:
             t_p = latent_t // pt
-            for extra in range(tp_size):
+            for extra in range(sp_size):
                 candidate_w = pixel_w + extra * dw
                 w_p = candidate_w // dw
                 h_p = pixel_h // dh
-                if (t_p * h_p * w_p) % tp_size == 0:
+                if (t_p * h_p * w_p) % sp_size == 0:
                     if extra:
                         logging.info(
                             f"Growing output width {pixel_w} -> {candidate_w} so the patch "
-                            f"token count divides evenly by --tensor_parallel_size ({tp_size}).")
+                            f"token count divides evenly by --sequence_parallel_size ({sp_size}).")
                     pixel_w = candidate_w
                     break
 
@@ -404,21 +414,25 @@ def main(args):
     freqs = jax.device_put(freqs, replicated)
 
     # `sequence_parallel=True` reshapes/reshuffles activations across the
-    # 'tp' mesh axis inside `WanDiT.__call__` itself (chunking the token
+    # 'sp' mesh axis inside `WanDiT.__call__` itself (chunking the token
     # sequence before the block loop, all-to-all around self-attention,
     # all-gathering back after the head) -- these are collectives, so the
     # call needs to run inside `shard_map`, not a plain `jax.jit` (which
     # only sees ordinary per-device-local ops). `in_specs` mirror the
-    # shardings already applied above (`get_batch_sharding` shards the
+    # shardings already applied above: `get_batch_sharding` shards the
     # leading batch axis on 'dp' and replicates the rest, `replicated` is
-    # fully replicated) -- `shard_map` requires the actual input array
-    # shardings to agree with what it's told here.
+    # fully replicated, and `dit_shardings` (computed above) is the *real*
+    # per-leaf Megatron sharding, converted via `to_partition_specs` -- not
+    # a blanket "fully replicated" `P()`, so weight-sharding and
+    # sequence-parallel token-sharding both take effect at once. `shard_map`
+    # requires the actual input array shardings to agree with what it's
+    # told here.
     def _dit_apply(params, latents, t, freqs, context):
         return dit_model.apply(params, latents=latents, t=t, freqs=freqs, context=context)
 
     # `t`'s spec differs between modes: t2v passes one scalar timestep per
     # sample (shape (B,), `P('dp')`); i2v passes a *per-token* timestep
-    # (shape (B, seq_len), `P('dp', None)` -- replicated across 'tp' like
+    # (shape (B, seq_len), `P('dp', None)` -- replicated across 'tp'/'sp' like
     # `x`/`freqs`, chunked the same way internally) so the conditioning
     # frame's tokens can be forced to t=0 -- see `token_mask_flat` above and
     # `single_step` below.
@@ -426,7 +440,8 @@ def main(args):
     if sequence_parallel:
         dit_apply = shard_map(
             _dit_apply, mesh=mesh,
-            in_specs=(P(), P('dp', None, None, None, None), t_spec, (P(), P()), P('dp', None, None)),
+            in_specs=(to_partition_specs(dit_shardings), P('dp', None, None, None, None),
+                      t_spec, (P(), P()), P('dp', None, None)),
             out_specs=P('dp', None, None, None, None),
             check_rep=False,
         )
@@ -557,7 +572,8 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, required=True, nargs="+", help="One text prompt (broadcast to every data-parallel replica) or exactly `num_devices // tensor_parallel_size` prompts, one per replica.")
     parser.add_argument("--negative_prompt", type=str, default=DEFAULT_NEGATIVE_PROMPT, help="Negative prompt for classifier-free guidance. Defaults to the reference's `sample_neg_prompt`.")
     parser.add_argument("--guide_scale", type=float, default=5.0, help="Classifier-free guidance scale: velocity = uncond + guide_scale * (cond - uncond). The reference's default is 5.0; skipping CFG (there is no flag to do so here, matching the reference always running it) produces washed-out, low-contrast output.")
-    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to parallelize each model across -- the DiT via *sequence* parallelism (shards the ~27k-token patch sequence itself between blocks; see this script's header comment) and T5 via ordinary Megatron tensor parallelism (shards attention heads / FFN channels). Must divide num_heads (24 for the 5B DiT, 64 for the T5 encoder) and num_devices, and the DiT's patch token count must be evenly divisible by it too (true by construction at the default 704x1280x121 resolution on 1/2/4/5/8-way splits). Increase this if you hit HBM OOM.")
+    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to Megatron-shard each model's attention heads / FFN channels (weights) across. Must divide num_heads (24 for the 5B DiT, 64 for the T5 encoder) and num_devices. Composes independently with --sequence_parallel_size -- at TI2V-5B's default resolution, --sequence_parallel_size is what actually fits the model in HBM (see this script's header comment); --tensor_parallel_size alone doesn't shrink the ~27k-token patch sequence's per-device memory.")
+    parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's ~27k-token patch sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. This is the flag that actually fits TI2V-5B in HBM at its default resolution -- e.g. --sequence_parallel_size 4 on this repo's 4-chip v4 slice. Must divide num_heads together with --tensor_parallel_size (their product is the real constraint -- DeepSpeed-Ulysses reshuffles across whatever heads Megatron sharding already left each device with), and the DiT's patch token count must be evenly divisible by it too (true by construction at the default 704x1280x121 resolution on 1/2/4/5/8-way splits; i2v's image-derived resolution grows the derived width as needed, see this script's header comment). Increase this if you hit HBM OOM.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the DiT, VAE, and T5 (and cast target for their loaded checkpoints). The reference uses bfloat16 for the DiT/T5 and float32 for the VAE; vidax uses one unified dtype for simplicity. Note: TPU's XLA backend does not implement float16 matmuls (a hardware/compiler limitation, not a vidax one) -- float16 will fail at runtime on TPU.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=None, help="Number of sampling steps for the scheduler. Defaults to the reference's own per-mode default: 50 for text-to-video, 40 for image-to-video (WanTI2V.generate / .i2v).")

@@ -93,7 +93,7 @@ class CosmosDiTBlock(nn.Module):
     eps: float = 1e-6
     mesh: Optional[Mesh] = None
     sequence_parallel: bool = False
-    sp_axis_name: str = "tp"
+    sp_axis_name: str = "sp"
 
     @nn.compact
     def __call__(
@@ -149,9 +149,20 @@ class CosmosDiTBlock(nn.Module):
             use_scale=False, use_bias=False, epsilon=self.eps,
             name="layer_norm_mlp")(x.astype(jnp.float32))
         x_norm = (x_norm * (1 + scale_mlp) + shift_mlp).astype(x.dtype)
-        h = nn.Dense(self.ffn_dim, use_bias=False, name="mlp_layer1")(x_norm)
+        # `mlp_layer1` is column-parallel -- see `vidax.models.wan.common
+        # .dit_layers.attend`'s identical comment for why its declared
+        # output width must be halved under `sequence_parallel` (a no-op
+        # when 'tp' has size 1).
+        tp_size = self.mesh.shape["tp"] if (self.sequence_parallel and self.mesh is not None) else 1
+        h = nn.Dense(self.ffn_dim // tp_size, use_bias=False, name="mlp_layer1")(x_norm)
         h = nn.gelu(h, approximate=False)
         h = nn.Dense(self.dim, use_bias=False, name="mlp_layer2")(h)
+        # `mlp_layer2` is row-parallel -- see `vidax.models.wan.common
+        # .dit_layers.attend`'s identical comment for why this manual reduce
+        # is only needed under `sequence_parallel`, and why it's a safe
+        # no-op otherwise.
+        if self.sequence_parallel:
+            h = jax.lax.psum(h, "tp")
         x = (x.astype(jnp.float32) + gate_mlp * h.astype(jnp.float32)).astype(x.dtype)
         return x
 
@@ -230,7 +241,7 @@ class CosmosDiT(nn.Module):
     timestep_scale: float = 0.001  # reference `MinimalV1LVGDiT`'s trained value for this checkpoint.
     mesh: Optional[Mesh] = None
     sequence_parallel: bool = False
-    sp_axis_name: str = "tp"
+    sp_axis_name: str = "sp"
 
     @nn.compact
     def __call__(

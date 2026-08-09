@@ -23,6 +23,7 @@ from jax.sharding import PartitionSpec as P, NamedSharding
 
 from vidax.core.sharding import (
     build_tpu_mesh, shard_wan_params, get_replicated_sharding, get_batch_sharding,
+    to_partition_specs, configure_jax_cache,
 )
 from vidax.core.rope3d import create_rope3d_freqs
 from vidax.models.wan.wan2_1.configs import I2V_14B_CONFIG
@@ -151,22 +152,29 @@ def build_i2v_conditioning(image: np.ndarray, num_frames: int, pixel_h: int, pix
 
 def main(args):
     """Main inference function."""
+    configure_jax_cache()
     num_devices = jax.device_count()
     tp_size = args.tensor_parallel_size
-    assert num_devices % tp_size == 0, (
-        f"num_devices ({num_devices}) must be divisible by --tensor_parallel_size ({tp_size})")
-    dp_size = num_devices // tp_size
-    mesh = build_tpu_mesh(data_parallel_size=dp_size, tensor_parallel_size=tp_size)
+    sp_size = args.sequence_parallel_size
+    assert num_devices % (tp_size * sp_size) == 0, (
+        f"num_devices ({num_devices}) must be divisible by "
+        f"--tensor_parallel_size * --sequence_parallel_size ({tp_size} * {sp_size})")
+    dp_size = num_devices // (tp_size * sp_size)
+    mesh = build_tpu_mesh(
+        data_parallel_size=dp_size, tensor_parallel_size=tp_size,
+        sequence_parallel_size=sp_size)
     rng = jax.random.PRNGKey(args.seed)
-    logging.info(f"Using {num_devices} devices: {dp_size}-way data // {tp_size}-way tensor parallel.")
+    logging.info(
+        f"Using {num_devices} devices: {dp_size}-way data // {tp_size}-way tensor // "
+        f"{sp_size}-way sequence parallel.")
 
     dtype = DTYPES[args.dtype]
-    sequence_parallel = args.sequence_parallel
+    sequence_parallel = sp_size > 1
 
     # --- Initialize models and scheduler ---
     # See `generate_wan2_1_t2v.py`'s identical comment on `sequence_parallel`
-    # for what this does and why it's opt-in (off by default) here.
-    dit_model = WanDiT(mesh=mesh, sequence_parallel=sequence_parallel, sp_axis_name="tp", **I2V_14B_CONFIG)
+    # for what this does, and how it composes with `--tensor_parallel_size`.
+    dit_model = WanDiT(mesh=mesh, sequence_parallel=sequence_parallel, **I2V_14B_CONFIG)
     vae_decoder = WanVAEDecoder()
     vae_encoder = WanVAEEncoder()
     t5_model = T5Encoder()
@@ -201,12 +209,12 @@ def main(args):
     t5_params = cast_to_dtype(t5_params, dtype)
     clip_params = cast_to_dtype(clip_params, dtype)
 
-    # DiT weights are Megatron-sharded unless `sequence_parallel`, in which
-    # case they're left fully replicated instead (see
-    # `generate_wan2_1_t2v.py`'s identical comment).
+    # DiT weights are always Megatron-sharded regardless of
+    # `sequence_parallel` (see `generate_wan2_1_t2v.py`'s identical
+    # comment -- weight-sharding and token-sharding are independent axes now).
     replicated = get_replicated_sharding(mesh)
-    dit_params = jax.device_put(
-        dit_params, replicated if sequence_parallel else shard_wan_params(dit_params, mesh))
+    dit_shardings = shard_wan_params(dit_params, mesh)
+    dit_params = jax.device_put(dit_params, dit_shardings)
     t5_params = jax.device_put(t5_params, shard_wan_params(t5_params, mesh))
     vae_params = jax.device_put(vae_params, replicated)
     clip_params = jax.device_put(clip_params, replicated)
@@ -261,7 +269,8 @@ def main(args):
     if sequence_parallel:
         dit_apply = shard_map(
             _dit_apply, mesh=mesh,
-            in_specs=(P(), P('dp', None, None, None, None), P('dp'), (P(), P()), P('dp', None, None),
+            in_specs=(to_partition_specs(dit_shardings), P('dp', None, None, None, None),
+                      P('dp'), (P(), P()), P('dp', None, None),
                       P('dp', None, None, None, None), P('dp', None, None)),
             out_specs=P('dp', None, None, None, None),
             check_rep=False,
@@ -339,8 +348,8 @@ if __name__ == "__main__":
     parser.add_argument("--image_path", type=str, required=True, help="Path to the conditioning image.")
     parser.add_argument("--prompt", type=str, required=True, help="Text prompt for video generation.")
     parser.add_argument("--negative_prompt", type=str, default=DEFAULT_NEGATIVE_PROMPT, help="Negative prompt for classifier-free guidance. Defaults to the reference's i2v `sample_neg_prompt`.")
-    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to shard each model's attention heads / FFN channels across. Must divide num_devices and num_heads (40 for the 14B DiT, 64 for the T5 encoder).")
-    parser.add_argument("--sequence_parallel", action="store_true", help="Shard the DiT's token sequence itself across --tensor_parallel_size devices (DeepSpeed-Ulysses) instead of Megatron-style tensor parallelism. See generate_wan2_1_t2v.py's identical flag for the full reasoning. Also requires the DiT's patch token count to be evenly divisible by --tensor_parallel_size.")
+    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to Megatron-shard each model's attention heads / FFN channels (weights) across. Must divide num_devices and num_heads (40 for the 14B DiT, 64 for the T5 encoder). Composes independently with --sequence_parallel_size.")
+    parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. See generate_wan2_1_t2v.py's identical flag for the full reasoning. Also requires the DiT's patch token count to be evenly divisible by this value.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the DiT, VAE, T5, and CLIP. Note: TPU's XLA backend does not implement float16 matmuls -- float16 will fail at runtime on TPU.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=40, help="Number of sampling steps. The reference's i2v default is 40 (vs 50 for t2v).")

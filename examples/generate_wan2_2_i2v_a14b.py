@@ -30,6 +30,7 @@ from jax.sharding import PartitionSpec as P
 
 from vidax.core.sharding import (
     build_tpu_mesh, shard_wan_params, get_replicated_sharding, get_batch_sharding,
+    to_partition_specs, configure_jax_cache,
 )
 from vidax.core.rope3d import create_rope3d_freqs
 from vidax.models.wan.wan2_2.configs import I2V_A14B_CONFIG
@@ -139,30 +140,36 @@ def build_i2v_conditioning(image: np.ndarray, num_frames: int, pixel_h: int, pix
 
 def main(args):
     """Main inference function."""
+    configure_jax_cache()
     num_devices = jax.device_count()
     tp_size = args.tensor_parallel_size
-    assert num_devices % tp_size == 0, (
-        f"num_devices ({num_devices}) must be divisible by --tensor_parallel_size ({tp_size})")
-    dp_size = num_devices // tp_size
-    mesh = build_tpu_mesh(data_parallel_size=dp_size, tensor_parallel_size=tp_size)
+    sp_size = args.sequence_parallel_size
+    assert num_devices % (tp_size * sp_size) == 0, (
+        f"num_devices ({num_devices}) must be divisible by "
+        f"--tensor_parallel_size * --sequence_parallel_size ({tp_size} * {sp_size})")
+    dp_size = num_devices // (tp_size * sp_size)
+    mesh = build_tpu_mesh(
+        data_parallel_size=dp_size, tensor_parallel_size=tp_size,
+        sequence_parallel_size=sp_size)
     rng = jax.random.PRNGKey(args.seed)
-    logging.info(f"Using {num_devices} devices: {dp_size}-way data // {tp_size}-way tensor parallel.")
+    logging.info(
+        f"Using {num_devices} devices: {dp_size}-way data // {tp_size}-way tensor // "
+        f"{sp_size}-way sequence parallel.")
 
     dtype = DTYPES[args.dtype]
-    sequence_parallel = args.sequence_parallel
+    sequence_parallel = sp_size > 1
 
     # --- Initialize models and scheduler ---
-    dit_model = WanDiT(
-        mesh=mesh, sequence_parallel=sequence_parallel, sp_axis_name="tp", **I2V_A14B_CONFIG)
+    dit_model = WanDiT(mesh=mesh, sequence_parallel=sequence_parallel, **I2V_A14B_CONFIG)
     vae_decoder = WanVAEDecoder()
     vae_encoder = WanVAEEncoder()
     t5_model = T5Encoder()
     scheduler = RectifiedFlowScheduler(num_steps=args.num_steps, shift=args.shift)
     boundary_val = args.boundary * scheduler.num_train_timesteps
 
-    assert dit_model.num_heads % tp_size == 0, (
+    assert dit_model.num_heads % (tp_size * sp_size) == 0, (
         f"WanDiT.num_heads ({dit_model.num_heads}) must be divisible by "
-        f"--tensor_parallel_size ({tp_size}); e.g. tp in {{1,2,4,5,8,10,20,40}}.")
+        f"--tensor_parallel_size * --sequence_parallel_size ({tp_size} * {sp_size}).")
     assert t5_model.num_heads % tp_size == 0, (
         f"T5Encoder.num_heads ({t5_model.num_heads}) must be divisible by "
         f"--tensor_parallel_size ({tp_size}).")
@@ -189,13 +196,15 @@ def main(args):
     # device here -- see generate_wan2_2_t2v_a14b.py's identical comment for
     # why (single-resident-expert swapping instead of both at once, since
     # this repo's 4-chip TP=4 target doesn't have headroom for both).
+    # `--sequence_parallel_size` composes with this unchanged, same as that
+    # script.
     replicated = get_replicated_sharding(mesh)
     high_dit_params = cast_to_dtype(high_dit_params, dtype)
     low_dit_params = cast_to_dtype(low_dit_params, dtype)
     vae_params = cast_to_dtype(vae_params, dtype)
     t5_params = cast_to_dtype(t5_params, dtype)
 
-    dit_sharding_spec = replicated if sequence_parallel else shard_wan_params(high_dit_params, mesh)
+    dit_sharding_spec = shard_wan_params(high_dit_params, mesh)
     t5_params = jax.device_put(t5_params, shard_wan_params(t5_params, mesh))
     vae_params = jax.device_put(vae_params, replicated)
     logging.info("Weights loaded and cast (DiT experts stay on host until needed).")
@@ -242,7 +251,8 @@ def main(args):
     if sequence_parallel:
         dit_apply = shard_map(
             _dit_apply, mesh=mesh,
-            in_specs=(P(), P('dp', None, None, None, None), P('dp'), (P(), P()), P('dp', None, None)),
+            in_specs=(to_partition_specs(dit_sharding_spec), P('dp', None, None, None, None),
+                      P('dp'), (P(), P()), P('dp', None, None)),
             out_specs=P('dp', None, None, None, None),
             check_rep=False,
         )
@@ -323,8 +333,8 @@ if __name__ == "__main__":
     parser.add_argument("--negative_prompt", type=str, default=DEFAULT_NEGATIVE_PROMPT, help="Negative prompt for classifier-free guidance.")
     parser.add_argument("--guide_scale", type=float, default=5.0, help="Classifier-free guidance scale: velocity = uncond + guide_scale * (cond - uncond).")
     parser.add_argument("--boundary", type=float, default=0.900, help="Fraction of num_train_timesteps (1000) above which the high_noise_model expert is used instead of low_noise_model. Reference default for I2V is 0.900 (0.875 for T2V).")
-    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to shard each model's attention heads / FFN channels across. Must divide num_heads (40 for each DiT expert, 64 for T5) and num_devices.")
-    parser.add_argument("--sequence_parallel", action="store_true", help="Shard the DiT's token sequence itself across --tensor_parallel_size devices (DeepSpeed-Ulysses) instead of Megatron-style tensor parallelism. See generate_wan2_1_t2v.py's identical flag for the full reasoning.")
+    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to Megatron-shard the (single device-resident) DiT expert's attention heads / FFN channels (weights) across. Must divide num_heads (40 per expert, 64 for T5) and num_devices. Composes independently with --sequence_parallel_size.")
+    parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. See generate_wan2_1_t2v.py's identical flag for the full reasoning.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for both DiT experts, VAE, and T5. Note: TPU's XLA backend does not implement float16 matmuls -- float16 will fail at runtime on TPU.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=40, help="Number of sampling steps. The reference's i2v default is 40 (vs 50 for t2v).")

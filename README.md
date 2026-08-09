@@ -42,28 +42,28 @@ Rows are merged across tasks when one script/checkpoint handles all of them
 ships them as genuinely distinct checkpoints/pipelines (e.g. Wan2.1's T2V vs.
 I2V, Wan2.2's A14B).
 
-| Model Family | Variant | Task | Tested (TPU v4/v5e/v6e) | Guide | Weights |
-| --- | --- | --- | --- | --- | --- |
-| Cosmos3 | Nano(16B) | T2V/I2V | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos3-Nano) |
-| Cosmos3 | Edge(4B) | T2V/I2V | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos3-Edge) |
-| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | ❌/❌/❌ | [cosmos.md](docs/models/cosmos.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-14B) |
-| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅/❌/❌ | [cosmos.md](docs/models/cosmos.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B) |
-| Wan2.2 | A14B | T2V | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B) |
-| Wan2.2 | A14B | I2V | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) |
-| Wan2.2 | 5B | T2V/I2V | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) |
-| Wan2.1 | 14B | T2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B) |
-| Wan2.1 | 14B(720P) | I2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P) |
-| Wan2.1 | 14B(480P) | I2V | ❌/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P) |
-| Wan2.1 | 1.3B | T2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) |
-| LTX-Video | 13B | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
-| LTX-Video | 2B | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
-| HunyuanVideo1.5 | 8.3B | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/tencent/HunyuanVideo-1.5) |
-| HunyuanVideo | 13B | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/tencent/HunyuanVideo) |
-| CogVideoX1.5 | 5B | I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX1.5-5B-I2V) |
-| CogVideoX1.5 | 5B | T2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX1.5-5B) |
-| CogVideoX | 5B | I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX-5b-I2V) |
-| CogVideoX | 5B | T2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX-5b) |
-| CogVideoX | 2B | T2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX-2b) |
+| Model Family | Variant | Task | Implemented (Unit test) | Tested (TPU v4/v5e/v6e) | Guide | Weights |
+| --- | --- | --- | --- | --- | --- | --- |
+| Cosmos3 | Nano (16B) | T2V/I2V | ✅ | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos3-Nano) |
+| Cosmos3 | Edge (4B) | T2V/I2V | ✅ | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos3-Edge) |
+| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | ❌ | ❌/❌/❌ | [cosmos.md](docs/models/cosmos.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-14B) |
+| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅ | ✅/❌/❌ | [cosmos.md](docs/models/cosmos.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B) |
+| Wan2.2 | A14B | T2V | ✅ | ❌/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B) |
+| Wan2.2 | A14B | I2V | ✅ | ❌/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) |
+| Wan2.2 | 5B | T2V/I2V | ✅ | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) |
+| Wan2.1 | 14B | T2V | ✅ | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B) |
+| Wan2.1 | 14B (720P) | I2V | ✅ | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P) |
+| Wan2.1 | 14B (480P) | I2V | ❌ | ❌/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P) |
+| Wan2.1 | 1.3B | T2V | ✅ | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) |
+| LTX-Video | 13B | T2V/I2V | ❌ | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
+| LTX-Video | 2B | T2V/I2V | ❌ | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
+| HunyuanVideo1.5 | 8.3B | T2V/I2V | ❌ | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/tencent/HunyuanVideo-1.5) |
+| HunyuanVideo | 13B | T2V/I2V | ❌ | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/tencent/HunyuanVideo) |
+| CogVideoX1.5 | 5B | I2V | ❌ | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX1.5-5B-I2V) |
+| CogVideoX1.5 | 5B | T2V | ❌ | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX1.5-5B) |
+| CogVideoX | 5B | I2V | ❌ | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX-5b-I2V) |
+| CogVideoX | 5B | T2V | ❌ | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX-5b) |
+| CogVideoX | 2B | T2V | ❌ | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX-2b) |
 
 Per-model checkpoint sources, CLI flags, architecture notes, and
 verification status live in each **Guide** link above. Benchmarking numbers

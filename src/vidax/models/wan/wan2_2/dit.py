@@ -37,21 +37,30 @@ parallelism (sharding attention heads/FFN channels, `mesh` alone) keeps the
 *full* sequence on every device and doesn't shrink these, so it alone
 doesn't fit a 4-chip v4 slice's HBM even after cutting weight memory 4x.
 Setting `sequence_parallel=True` instead shards the *token sequence itself*
-between blocks (each device holds only `seq_len / sp_size` tokens for the
-FFN/norm/modulation-heavy part of every block, cutting exactly the memory
-that was overflowing), reshuffling to a head-sharded, full-sequence view
-only for the duration of self-attention itself via
-`vidax.core.attention.sequence_parallel_self_attention`'s all-to-all
-(DeepSpeed-Ulysses, matching Wan2.2-main/wan/distributed/sequence_parallel.py
-+ ulysses.py). This requires the whole `WanDiT.apply(...)` call to run
-inside `jax.experimental.shard_map.shard_map` over `mesh` (not just the
-attention op, unlike the Megatron path) -- see
-`examples/generate_wan2_2_ti2v.py` for how that's wired up, and DiT
-parameters should be **replicated**, not tensor-sharded (`shard_wan_params`),
-when this is enabled: cutting activation memory by sharding the sequence
-made the OOM go away, not sharding weights, and the two schemes shard
-fundamentally different axes (heads/channels vs. tokens) in ways that don't
-compose without deliberately combining them, which this doesn't attempt.
+between blocks on the mesh's `'sp'` axis (each device holds only
+`seq_len / sp_size` tokens for the FFN/norm/modulation-heavy part of every
+block, cutting exactly the memory that was overflowing), reshuffling to a
+head-sharded, full-sequence view only for the duration of self-attention
+itself via `vidax.core.attention.sequence_parallel_self_attention`'s
+all-to-all (DeepSpeed-Ulysses, matching
+Wan2.2-main/wan/distributed/sequence_parallel.py + ulysses.py). This
+requires the whole `WanDiT.apply(...)` call to run inside
+`jax.experimental.shard_map.shard_map` over `mesh` (not just the attention
+op, unlike the Megatron path) -- see `examples/generate_wan2_2_ti2v.py` for
+how that's wired up.
+
+`sequence_parallel` composes with ordinary Megatron weight-sharding (`mesh`
+alone): they shard independent mesh axes (`'tp'` for weights, `'sp'` for
+tokens -- see `vidax.core.sharding.build_tpu_mesh`), so both can be nonzero
+at once. The one piece that doesn't come for free inside `shard_map`: row-
+parallel projections (`ffn_2`, `self_attn_o`/`cross_attn_o` in `attend`)
+normally get their cross-device all-reduce inserted automatically by GSPMD,
+but GSPMD's auto-partitioner doesn't run inside a `shard_map` body, so this
+module and `attend` insert it by hand (`jax.lax.psum(x, 'tp')`) whenever
+`sequence_parallel` is set -- a no-op when `'tp'` has size 1 (weights not
+actually split), so this is safe regardless of whether combined sharding is
+actually in use. See `docs/hardware_and_sharding.md`'s "Combining both"
+section for the full picture.
 """
 import math
 from typing import Optional, Tuple
@@ -78,7 +87,7 @@ class Wan22DiTBlock(nn.Module):
     eps: float = 1e-6
     mesh: Optional[Mesh] = None
     sequence_parallel: bool = False
-    sp_axis_name: str = "tp"
+    sp_axis_name: str = "sp"
 
     @nn.compact
     def __call__(
@@ -134,9 +143,20 @@ class Wan22DiTBlock(nn.Module):
             use_scale=False, use_bias=False, epsilon=self.eps,
             name="norm2")(x.astype(jnp.float32))
         norm_h = (norm_h * (1 + scale_mlp) + shift_mlp).astype(x.dtype)
-        h = nn.Dense(self.ffn_dim, name="ffn_0")(norm_h)
+        # `ffn_0` is column-parallel -- see `vidax.models.wan.common
+        # .dit_layers.attend`'s identical comment for why its declared
+        # output width must be halved under `sequence_parallel` (a no-op
+        # when 'tp' has size 1).
+        tp_size = self.mesh.shape["tp"] if (self.sequence_parallel and self.mesh is not None) else 1
+        h = nn.Dense(self.ffn_dim // tp_size, name="ffn_0")(norm_h)
         h = nn.gelu(h, approximate=True)
         h = nn.Dense(self.dim, name="ffn_2")(h)
+        # `ffn_2` is row-parallel -- see `vidax.models.wan.common.dit_layers
+        # .attend`'s identical comment for why this manual reduce is only
+        # needed under `sequence_parallel`, and why it's a safe no-op
+        # otherwise.
+        if self.sequence_parallel:
+            h = jax.lax.psum(h, "tp")
         x = (x.astype(jnp.float32) +
              h.astype(jnp.float32) * gate_mlp).astype(x.dtype)
         return x
@@ -193,7 +213,7 @@ class WanDiT(nn.Module):
     eps: float = 1e-6
     mesh: Optional[Mesh] = None
     sequence_parallel: bool = False
-    sp_axis_name: str = "tp"
+    sp_axis_name: str = "sp"
 
     @nn.compact
     def __call__(

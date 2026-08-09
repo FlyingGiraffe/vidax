@@ -107,7 +107,7 @@ python examples/generate_wan2_1_t2v.py \
 | `--negative_prompt` | reference's `sample_neg_prompt` | Negative prompt for CFG. |
 | `--guide_scale` | `5.0` | CFG scale: `velocity = uncond + guide_scale * (cond - uncond)`. |
 | `--tensor_parallel_size` | `1` | Devices to Megatron-shard attention heads / FFN channels across (see [hardware doc](../hardware_and_sharding.md)). Must divide `num_devices` and `num_heads` (12 for the 1.3B DiT, 40 for the 14B DiT, 64 for T5). `--tensor_parallel_size 4` (4-way TP × 2-way DP) is a reasonable start on a v4-8 at full 1280×720 for 1.3B; the 14B model was verified with `--tensor_parallel_size 4` on a v4-8. Raise it if you hit HBM OOM. |
-| `--sequence_parallel` | off | Shard the DiT's token sequence itself (DeepSpeed-Ulysses) instead of Megatron TP. Not needed at 1.3B scale; may help the 14B model at higher resolutions — see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses). |
+| `--sequence_parallel_size` | `1` | Devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of `--tensor_parallel_size`'s weight-sharding — the two compose freely (see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s "Combining with Megatron TP"). Not needed at 1.3B scale; may help the 14B model at higher resolutions. |
 | `--dtype` | `bfloat16` | `float32` \| `float16` \| `bfloat16`. Matches the reference's `bfloat16` T5/DiT, `float32` VAE, unified here for simplicity. `float16` will fail at runtime — TPU's XLA backend doesn't implement `float16` matmuls. |
 | `--seed` | `0` | Initial noise seed. |
 | `--num_steps` | `50` | Sampling steps. |
@@ -171,7 +171,7 @@ projection (`WanDiT`'s `model_type="i2v"` path).
 | `--prompt` | *required* | Text prompt (single string, not a list — unlike the t2v script). |
 | `--negative_prompt` | reference's i2v `sample_neg_prompt` | Negative prompt for CFG. |
 | `--tensor_parallel_size` | `1` | Must divide `num_devices` and `num_heads` (40 for the 14B DiT, 64 for T5). `--tensor_parallel_size 4` (full width on this repo's v4-8, i.e. 4 chips — see [hardware doc](../hardware_and_sharding.md#2-sharding--tpu-topology-megatron-style-tensor-parallelism)) is the typical starting point for the 14B model, same as t2v. |
-| `--sequence_parallel` | off | Same DeepSpeed-Ulysses flag as the t2v script — the one to reach for once actually running this 14B model at higher resolution, where self-attention activation memory is the more likely bottleneck than at 1.3B scale. Verified to work correctly with the CLIP image cross-attention branch too (see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)). |
+| `--sequence_parallel_size` | `1` | Same DeepSpeed-Ulysses flag as the t2v script, independent of `--tensor_parallel_size` — the one to reach for once actually running this 14B model at higher resolution, where self-attention activation memory is the more likely bottleneck than at 1.3B scale. Verified to work correctly with the CLIP image cross-attention branch too, as long as `--tensor_parallel_size 1` (combining both with i2v's CLIP branch isn't supported yet — see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s "Combining with Megatron TP"). |
 | `--dtype` | `bfloat16` | Same choices/caveats as t2v. |
 | `--seed` | `0` | Initial noise seed. |
 | `--num_steps` | `40` | Reference i2v default (vs. 50 for t2v). |

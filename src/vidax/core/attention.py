@@ -41,6 +41,43 @@ class RMSNorm(nn.Module):
         return (normed.astype(orig_dtype)) * scale.astype(orig_dtype)
 
 
+class TPShardedRMSNorm(nn.Module):
+    """RMSNorm whose reduction spans a Megatron-sharded feature axis.
+
+    Ordinary `RMSNorm` normalizes over its own local last axis -- correct
+    when the whole feature axis is present locally, but wrong when it's
+    column-sharded across devices (Wan's Q/K-RMSNorm, which -- unlike
+    Cosmos's per-head norm -- reduces over the *entire* projected `dim`,
+    before that gets split into heads; see
+    `vidax.models.wan.common.dit_layers.attend`). A per-device-local
+    mean-square would only see this device's slice of channels, not the
+    true global one the reference model computes, so this sums each
+    device's local sum-of-squares via `jax.lax.psum('tp')` first. Must be
+    called from inside `shard_map` over a mesh with a `'tp'` axis (a
+    correctness requirement, not just a perf detail: `psum` needs a bound
+    axis environment, which only exists inside `shard_map`/`pmap`).
+
+    `scale` is itself Megatron-sharded (see `vidax.core.sharding
+    .shard_wan_params`'s column-parallel handling of this module's params),
+    so no extra slicing is needed for it here -- the `params` pytree
+    `shard_map` hands this call is already this device's local share.
+    """
+    dim_local: int
+    global_dim: int
+    eps: float = 1e-6
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        scale = self.param("scale", nn.initializers.ones, (self.dim_local,))
+        orig_dtype = x.dtype
+        x = x.astype(jnp.float32)
+        local_sq_sum = jnp.sum(jnp.square(x), axis=-1, keepdims=True)
+        global_sq_sum = jax.lax.psum(local_sq_sum, "tp")
+        var = global_sq_sum / self.global_dim
+        normed = x * jax.lax.rsqrt(var + self.eps)
+        return (normed.astype(orig_dtype)) * scale.astype(orig_dtype)
+
+
 def _pad_seq(x: jnp.ndarray, axis: int, multiple: int = _FLASH_BLOCK):
     """Zero-pads `x` along `axis` up to the next multiple of `multiple`."""
     size = x.shape[axis]

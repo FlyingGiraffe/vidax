@@ -32,7 +32,7 @@ that doesn't know the history.
 
 - **`vN-M` names TensorCores, not chips.** A v4 chip has 2 TensorCores, so
   `v4-8` is a 4-*chip* slice (`jax.device_count() == 4`), not 8 — this repo
-  currently runs on a v4-8. `--tensor_parallel_size`/`--sequence_parallel`
+  currently runs on a v4-8. `--tensor_parallel_size`/`--sequence_parallel_size`
   values throughout this repo's docs are chip counts (what
   `jax.device_count()` reports and what `tensor_parallel_size` must divide
   into), so "full width on a v4-8" means 4, not 8. v5e and v6e chips have 1
@@ -110,11 +110,10 @@ bound too. See `examples/generate_wan2_2_ti2v.py` for the wiring
 (`dit_apply`, built once with `in_specs` matching the shardings already
 applied to its arguments).
 
-**Weights are replicated, not Megatron-sharded, under sequence
-parallelism**: since SP shards activations, not weights, every device
-needs its own complete copy of every DiT weight. This is a real trade-off
-(more per-device weight memory) made in exchange for cutting the
-activation memory that was actually overflowing.
+**Weights compose independently via `--tensor_parallel_size`** (originally
+this section said SP forced weights fully replicated — that was true only
+because nothing combined the two mesh axes yet; see "Combining with
+Megatron TP" below for how that changed and why it was worth doing).
 
 **A real bug found here:** `attend()`'s i2v CLIP image cross-attention
 branch always dispatched through the mesh-based `dot_product_attention`
@@ -125,6 +124,90 @@ through the same local, non-mesh-dispatched path as text cross-attention.
 Verified numerically identical to the non-SP path on real TPU hardware for
 both t2v and i2v (including this CLIP branch) using synthetic-dimension
 models.
+
+### Combining with Megatron TP
+
+Wan2.2 A14B (14B params, two MoE experts) is heavy enough that neither
+scheme alone fits this repo's 4-chip machine at real resolutions: Megatron
+TP shards weights but not the (large, per-token-modulated) activations;
+sequence parallelism shards activations but replicates weights, and one
+14B expert unsharded is already most of a chip's HBM budget by itself.
+`--tensor_parallel_size` and `--sequence_parallel_size` now compose freely
+instead of being mutually exclusive — `vidax.core.sharding.build_tpu_mesh`
+builds a 3-axis `(dp, tp, sp)` mesh (previously 2-axis, with SP overloading
+the `tp` axis name for token-chunking), and every `sequence_parallel`
+example script's `dit_apply` now feeds `shard_map`'s `in_specs` the *real*
+per-leaf Megatron sharding (`to_partition_specs(shard_wan_params(...))`)
+instead of a blanket "fully replicated" `P()` for the params argument.
+`--sequence_parallel_size 1` (the default) is a complete no-op for
+everything below — nothing changes for callers that don't ask for this.
+
+Two things had to be fixed to make this actually correct, not just wired
+up — both stem from the same root cause: **GSPMD's auto-partitioner
+doesn't run inside `shard_map`.** Outside it (plain Megatron TP, no SP),
+GSPMD transparently reconciles a layer's *declared* (global) shape against
+its *physically* Megatron-sharded weight — the model code stays written in
+global-shape terms, and the compiler figures out the rest. Inside
+`shard_map`, there is no such magic: every op sees the true local array,
+and Flax's `self.param(...)` (used by both `nn.Dense` and `RMSNorm`)
+validates the existing weight's actual shape against a *static* Python
+shape argument you give it — if that argument still says the old global
+width, `shard_map` raises a shape mismatch immediately.
+
+1. **Column-parallel Dense layers** (`self_attn_q/k/v`, `cross_attn_q/k/v`,
+   `ffn_0`/`mlp_layer1`) now pass `features = global_width // tp_size`
+   instead of the global width, whenever `sequence_parallel` is set
+   (`tp_size` read from `mesh.shape['tp']`, a static Python int at trace
+   time — 1, a no-op, when TP isn't in use). Row-parallel layers
+   (`self_attn_o`/`cross_attn_o`, `ffn_2`/`mlp_layer2`) need no shape
+   change: Flax infers a Dense layer's *input* width from the actual local
+   array already, only its *output* width is a static argument, and that
+   correctly stays the full global width (matching the value after the
+   manual `psum` below).
+2. **The manual all-reduce row-parallel layers need.** Outside `shard_map`,
+   GSPMD auto-inserts the cross-device sum a row-parallel layer's output
+   needs; inside it, nothing does, so `vidax.models.wan.common.dit_layers
+   .attend` and `vidax.models.cosmos.common.dit_layers.cosmos_attend`
+   (their shared output projection) and every DiT block's FFN down-
+   projection now call `jax.lax.psum(x, 'tp')` by hand whenever
+   `sequence_parallel` is set — a no-op when `'tp'` has size 1.
+3. **Wan's Q/K-RMSNorm needed more than a shape fix.** It normalizes over
+   the *entire* projected `dim` (before splitting into heads) — under TP
+   sharding, that axis is now split across devices, so a naive per-device
+   local mean-square would be a mathematically different (wrong) number
+   from the reference's, not just a differently-shaped one. Fixed with a
+   new `vidax.core.attention.TPShardedRMSNorm`: sums each device's local
+   sum-of-squares via `jax.lax.psum('tp')` before normalizing, applying
+   this device's own (now Megatron-sharded, via new `COLUMN_PARALLEL_NAMES`
+   entries in `shard_wan_params`) local slice of the scale parameter.
+   Cosmos's Q/K-RMSNorm needed no equivalent: it normalizes per-*head*
+   (over `head_dim`, after splitting into heads), and Megatron sharding
+   always keeps whole heads on one device, so that axis is never split.
+
+**Verified two ways.** First, numerically: a small synthetic-dimension
+`WanDiT`/`CosmosDiT`, real random weights, forward pass computed once
+unsharded as ground truth, then again under `(tp=4,sp=1)` (regression),
+`(tp=1,sp=4)` (regression), and `(tp=2,sp=2)` (new) on this repo's real 4
+chips — all three matched the ground truth (Wan: bit-exact; Cosmos: matched
+each other and the ground truth to the same small floating-point-
+associativity tolerance real multi-device reductions always carry, not a
+tolerance specific to the new combined path). Second, end-to-end against
+real A14B checkpoints: `--tensor_parallel_size 2 --sequence_parallel_size 2`
+ran correctly (including the two-expert boundary switch) at a noticeably
+larger resolution than either trick alone reached on this 4-chip machine,
+though still short of the reference's full 720x1280x81 — see
+[`docs/models/wan2_2.md`](models/wan2_2.md)'s A14B sections for the actual
+numbers.
+
+Wan2.1's i2v CLIP image-cross-attention (`image_context`) isn't threaded
+through the column-parallel halving above — combining it with TP weight-
+sharding under `sequence_parallel` would give `k_img`/`v_img` a different
+head count than `q` (they aren't Megatron-sharded at all, being small and
+outside `COLUMN_PARALLEL_NAMES`). `attend()` raises `NotImplementedError`
+rather than silently computing something wrong if this combination is
+attempted; use one parallelism scheme or the other for i2v with CLIP
+conditioning, or `--tensor_parallel_size 1` alongside
+`--sequence_parallel_size` (or vice versa).
 
 ## 4. Flash Attention (TPU)
 

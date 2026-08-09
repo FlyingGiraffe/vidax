@@ -134,18 +134,22 @@ tensor/sequence parallelism existed, `--tensor_parallel_size` (default `1`)
 now Megatron-shards both the DiT's attention heads/FFN channels *and*
 Reason1's (its 7B params are by far the largest of the three checkpoints,
 so this is where TP matters most for fitting on fewer chips — see
-[Architecture notes](#architecture-notes)). `--sequence_parallel` shards the
-DiT's token sequence itself (DeepSpeed-Ulysses) instead of Megatron-sharding
-it, for pushing to much higher resolution/frame counts where self-attention
-activation memory becomes the bottleneck rather than weight memory — see
-`vidax.models.cosmos.cosmos2_5.dit.CosmosDiT`'s module docstring, ported
-directly from Wan's DiTs (`--sequence_parallel` only affects the DiT;
-Reason1 always uses plain Megatron TP, its 512-token sequence being far too
-short for sequence parallelism to matter). Passing `num_devices //
-tensor_parallel_size` prompts (instead of one, broadcast) gives one video
-per prompt instead of that many independent samples of the same prompt (the
-conditioning image/video, if any, is shared across every replica — only the
-text prompt varies).
+[Architecture notes](#architecture-notes)). `--sequence_parallel_size`
+(default `1`) shards the DiT's token sequence itself (DeepSpeed-Ulysses),
+independent of `--tensor_parallel_size`'s weight-sharding — the two compose
+freely (see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s
+"Combining with Megatron TP"), and `--sequence_parallel_size` alone is what
+matters for pushing to much higher resolution/frame counts where self-
+attention activation memory becomes the bottleneck rather than weight
+memory — see `vidax.models.cosmos.cosmos2_5.dit.CosmosDiT`'s module
+docstring, ported directly from Wan's DiTs (`--sequence_parallel_size` only
+affects the DiT; Reason1 always uses plain Megatron TP via
+`--tensor_parallel_size`, its 512-token sequence being far too short for
+sequence parallelism to matter). Passing `num_devices // tensor_parallel_size
+// sequence_parallel_size` prompts (instead of one, broadcast) gives one
+video per prompt instead of that many independent samples of the same
+prompt (the conditioning image/video, if any, is shared across every
+replica — only the text prompt varies).
 
 ### CLI reference
 
@@ -163,7 +167,7 @@ text prompt varies).
 | `--negative_prompt` | vidax's own quality-negative-prompt | Negative prompt for CFG (the reference's own default is a long boilerplate string; vidax uses a shorter equivalent — see the script's module-level `DEFAULT_NEGATIVE_PROMPT`). |
 | `--guide_scale` | `7.0` | CFG scale: `velocity = uncond + guide_scale * (cond - uncond)`. Matches the reference's default. |
 | `--tensor_parallel_size` | `1` | Devices to Megatron-shard the DiT's attention heads/FFN channels *and* Reason1's weights across (see [hardware doc](../hardware_and_sharding.md)). Must divide `num_devices`, `CosmosDiT.num_heads` (16), and `Qwen2TextModel.num_key_value_heads` (4, GQA — the binding constraint if Reason1 is meaningfully sharded, so `tp` in `{1,2,4}` in practice, though the DiT alone tolerates `{1,2,4,8,16}`). |
-| `--sequence_parallel` | off | Shard the DiT's token sequence itself (DeepSpeed-Ulysses) instead of Megatron-sharding it. Not needed at 2B scale/typical resolutions; there for pushing to much higher resolution/frame counts — see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses). Only affects the DiT — Reason1 always uses Megatron TP regardless. Requires the latent frame count to divide evenly by `--tensor_parallel_size`. |
+| `--sequence_parallel_size` | `1` | Devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of `--tensor_parallel_size`'s weight-sharding. Not needed at 2B scale/typical resolutions; there for pushing to much higher resolution/frame counts — see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s "Combining with Megatron TP". Only affects the DiT — Reason1 always uses Megatron TP (`--tensor_parallel_size`) regardless. Requires the latent frame count to divide evenly by this value. |
 | `--dtype` | `bfloat16` | `float32` \| `float16` \| `bfloat16`. `float16` will fail at runtime — TPU's XLA backend doesn't implement `float16` matmuls. |
 | `--seed` | `0` | Initial noise seed. |
 | `--num_steps` | `35` | UniPC sampling steps. Reference default for the 2B base checkpoint. |
@@ -248,9 +252,8 @@ weight-loading exact-match checks) before the real bug was found.
   synthetic ids), producing the expected `(B, 512, 100352)` embedding with
   sane statistics.
 - Parallelism: both `--tensor_parallel_size 4` (Megatron, all 4 chips) and
-  `--tensor_parallel_size 2 --sequence_parallel` (2-way data-parallel ×
-  2-way sequence-parallel) complete cleanly against the real checkpoints,
-  with correct output shapes.
+  `--sequence_parallel_size 2` (2-way data-parallel × 2-way sequence-parallel)
+  complete cleanly against the real checkpoints, with correct output shapes.
 
 See the [parity matrix in the root README](../../README.md#model-support--parity-matrix)
 for the up-to-date status across all variants.

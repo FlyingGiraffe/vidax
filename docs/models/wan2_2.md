@@ -149,13 +149,19 @@ single sharded 14B expert's weights (~7.5GB/device in bf16) already leave
 little headroom, and Wan2.2's *per-token* AdaLN modulation (unlike Wan2.1's
 per-sample modulation — see `vidax.models.wan.wan2_2.dit`'s module
 docstring) means the forward pass's own working-set memory scales with the
-full token count under Megatron TP, since TP shards attention heads/FFN
-channels but not the token axis. Keeping both experts resident at once (as
-every other multi-checkpoint script in this repo does) was the very first
-thing tried here and reliably ran out of HBM; `--sequence_parallel` doesn't
-help either, since it *replicates* rather than shards DiT weights, and one
-full 14B expert unsharded (~28.5GB/device in bf16) alone is nearly this
-repo's whole per-chip budget on a 4-chip slice.
+full token count under Megatron TP alone, since TP shards attention
+heads/FFN channels but not the token axis. Keeping both experts resident at
+once (as every other multi-checkpoint script in this repo does) was the
+very first thing tried here and reliably ran out of HBM.
+
+`--tensor_parallel_size` and `--sequence_parallel_size` now compose freely
+(see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s
+"Combining with Megatron TP") — the currently-resident expert can have both
+its weights *and* the token sequence sharded at once, e.g.
+`--tensor_parallel_size 2 --sequence_parallel_size 2` on this repo's 4
+chips. This measurably helps: it's what let A14B run at a noticeably larger
+resolution than either trick alone reached here (see Status below), though
+still short of the reference's full 1280x720x81 on just 4 chips.
 
 Unlike TI2V-5B, A14B reuses **Wan2.1's causal VAE** (`Wan2.1_VAE.pth`,
 `vae_stride=(4,8,8)`) — the checkpoint repo ships that file, not
@@ -185,8 +191,8 @@ python examples/generate_wan2_2_t2v_a14b.py \
 | `--negative_prompt` | reference's `sample_neg_prompt` | Negative prompt for CFG. |
 | `--guide_scale` | `5.0` | CFG scale. |
 | `--boundary` | `0.875` | Fraction of `num_train_timesteps` (1000) above which `high_noise_model` is used instead of `low_noise_model`. |
-| `--tensor_parallel_size` | `1` | Megatron-style, same semantics as `generate_wan2_1_t2v.py`'s 14B path (must divide `num_heads`=40 per expert, 64 for T5). Only one expert is ever device-resident at a time (see above), so this behaves like sharding a single 14B model, not two. |
-| `--sequence_parallel` | off | Same DeepSpeed-Ulysses flag as the Wan2.1 scripts. Replicates (rather than shards) DiT weights, so it trades away the headroom `--tensor_parallel_size` sharding buys — see the note above. |
+| `--tensor_parallel_size` | `1` | Megatron-style, same semantics as `generate_wan2_1_t2v.py`'s 14B path (must divide `num_heads`=40 per expert, 64 for T5). Only one expert is ever device-resident at a time (see above), so this behaves like sharding a single 14B model, not two. Composes with `--sequence_parallel_size` — their product is the real head-divisibility constraint. |
+| `--sequence_parallel_size` | `1` | Devices to shard the token sequence itself across (DeepSpeed-Ulysses), independent of `--tensor_parallel_size`'s weight-sharding. Worth trying together with `--tensor_parallel_size` at resolutions where even one device-resident 14B expert alone doesn't fit — see the note above. |
 | `--dtype` | `bfloat16` | Same choices/caveats as Wan2.1. |
 | `--seed` | `0` | Initial noise seed. |
 | `--num_steps` | `50` | Sampling steps. |
@@ -198,17 +204,25 @@ python examples/generate_wan2_2_t2v_a14b.py \
 
 **Status:** verified end-to-end against the real T2V-A14B checkpoints (both
 experts, weight shapes/keys confirmed to exactly match
-`T2V_A14B_CONFIG`'s param tree) on a 4-chip v4 slice at
-`--tensor_parallel_size 4` — 6 sampling steps, 128x128, 9 frames,
-confirmed both experts actually engage (high_noise_model for the first 4
-steps, low_noise_model for the rest, matching `boundary=0.875` at
-`shift=12.0`). This reduced resolution/frame count is a limitation of this
-specific 4-chip, ~30GB/chip environment (see the memory note above), not of
-the model or pipeline — the reference's default 1280x720x81 needs
-substantially more accelerator memory than this repo's Wan2.1-14B/TI2V-5B
-runs did, since it's effectively "one 14B model's worth of weights, plus a
-14B model's worth of per-token-modulation activation memory that Megatron
-TP alone doesn't shrink." Not yet run at full resolution.
+`T2V_A14B_CONFIG`'s param tree) on a 4-chip v4 slice, at two sharding
+configurations: `--tensor_parallel_size 4` (128x128, 9 frames) and
+`--tensor_parallel_size 2 --sequence_parallel_size 2` (256x256, 9 frames —
+4x the pixel count, the combined scheme's actual payoff). Both confirmed
+both experts engage correctly (high_noise_model for the earlier steps,
+low_noise_model for the rest, matching `boundary=0.875` at `shift=12.0`).
+This reduced resolution/frame count is a limitation of this specific
+4-chip, ~30GB/chip environment (see the memory note above and the
+[hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s
+"Combining with Megatron TP"), not of the model, pipeline, or sharding
+code — the reference's default 1280x720x81 needs substantially more
+accelerator memory than this repo's Wan2.1-14B/TI2V-5B runs did, and even
+combining every parallelism trick this repo has, 4 chips isn't enough to
+reach it: a compile-time HLO-temporaries estimate at 480x832x9 frames
+(`--tensor_parallel_size 2 --sequence_parallel_size 2`) still came in at
+~33.75GB against a 30.75GB/chip budget. More chips (a real v4-16/v4-32 pod
+slice, not just this 4-chip machine) should close the remaining gap, since
+`--tensor_parallel_size`/`--sequence_parallel_size` both scale with however
+many chips are available. Not yet run at full resolution.
 
 ---
 
@@ -249,7 +263,7 @@ python examples/generate_wan2_2_i2v_a14b.py \
 | `--guide_scale` | `5.0` | CFG scale. |
 | `--boundary` | `0.900` | Fraction of `num_train_timesteps` above which `high_noise_model` is used. Reference default for I2V (vs. 0.875 for T2V). |
 | `--tensor_parallel_size` | `1` | Same semantics as T2V-A14B — only one expert is ever device-resident at a time, so this behaves like sharding a single 14B model (see the memory note in the T2V section above). |
-| `--sequence_parallel` | off | Same DeepSpeed-Ulysses flag; replicates rather than shards DiT weights (see the T2V section's memory note). |
+| `--sequence_parallel_size` | `1` | Same DeepSpeed-Ulysses flag, independent of `--tensor_parallel_size` (see the T2V section's memory note). |
 | `--dtype` | `bfloat16` | Same choices/caveats. |
 | `--seed` | `0` | Initial noise seed. |
 | `--num_steps` | `40` | Reference i2v default (vs. 50 for t2v). |
@@ -261,9 +275,11 @@ python examples/generate_wan2_2_i2v_a14b.py \
 **Status:** verified end-to-end against the real I2V-A14B checkpoints (both
 experts, weight shapes/keys confirmed to exactly match
 `I2V_A14B_CONFIG`'s param tree, including the channel-concat conditioning
-path) on a 4-chip v4 slice at `--tensor_parallel_size 4` — 6 sampling steps,
-`--max_area 16384` (96x144), 9 frames, confirmed both experts engage
-(high_noise_model for the first 3 steps, low_noise_model for the rest,
+path) on a 4-chip v4 slice, at `--tensor_parallel_size 4` (`--max_area
+16384`, 96x144, 9 frames) and at `--tensor_parallel_size 2
+--sequence_parallel_size 2` (`--max_area 65536`, 208x288, 9 frames — 4x the
+pixel count), both confirming both experts engage correctly
+(high_noise_model for the earlier steps, low_noise_model for the rest,
 matching `boundary=0.900` at `shift=5.0`). Same reduced-resolution caveat as
 T2V-A14B above — not yet run at full resolution.
 

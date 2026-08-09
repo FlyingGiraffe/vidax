@@ -11,11 +11,13 @@ import math
 from typing import Optional, Tuple
 
 import flax.linen as nn
+import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from vidax.core.attention import (
-    RMSNorm, chunk_by_rank, dot_product_attention, local_attention, sequence_parallel_self_attention,
+    RMSNorm, TPShardedRMSNorm, chunk_by_rank, dot_product_attention, local_attention,
+    sequence_parallel_self_attention,
 )
 from vidax.core.rope3d import apply_rope3d
 
@@ -38,7 +40,7 @@ def attend(
     mesh: Optional[Mesh] = None,
     image_context: Optional[jnp.ndarray] = None,
     sequence_parallel: bool = False,
-    sp_axis_name: str = "tp",
+    sp_axis_name: str = "sp",
 ) -> jnp.ndarray:
     """Shared QKV-projection + RMSNorm + attention + output-projection path.
 
@@ -52,31 +54,64 @@ def attend(
     output with the text one before the shared output projection -- matching
     ``WanI2VCrossAttention``, which reuses the same query for both.
 
-    ``sequence_parallel``, when set (Wan2.2 DiT only -- see
-    ``vidax.models.wan.wan2_2.dit``'s module docstring), must be called from
-    *within* an active ``shard_map`` over a mesh with an axis named
-    ``sp_axis_name``: self-attention (``rope_freqs`` given) dispatches to
+    ``sequence_parallel``, when set, must be called from *within* an active
+    ``shard_map`` over a mesh with an axis named ``sp_axis_name``: self-
+    attention (``rope_freqs`` given) dispatches to
     ``sequence_parallel_self_attention``'s all-to-all reshuffle; cross-
     attention runs as an ordinary *local* call instead (``x_kv`` is the small,
     already fully-replicated text context, so no cross-device reshuffle is
     needed there -- just a plain per-device flash-attention call, since
     ``dot_product_attention``'s own dispatch heuristics can't tell they're
     already running inside a sharded body).
+
+    Composes with Megatron weight-sharding on the mesh's independent ``'tp'``
+    axis (see ``vidax.core.sharding.build_tpu_mesh``): whenever
+    ``sequence_parallel`` is set, `q`/`k`/`v`'s Dense output width and head
+    count are divided by ``mesh.shape['tp']`` (a no-op when that's 1) to
+    match what's actually local to this device under `shard_map` -- unlike
+    plain Megatron TP (no `shard_map`), where GSPMD's auto-partitioner
+    reconciles a Dense layer's *declared* (global) output width against its
+    physically-sharded weight transparently, `shard_map` hands every op the
+    true local array, so the declared width must already say so. Q/K-RMSNorm
+    needs an extra fix beyond the shape change: it reduces over the *entire*
+    projected `dim`, which is now split across devices, so a per-device
+    local mean-square would be a different (wrong) number from the
+    reference's -- ``TPShardedRMSNorm`` sums each device's local
+    sum-of-squares via ``psum`` first (see its own docstring). ``image_context``
+    (Wan2.1 i2v's CLIP cross-attention) isn't threaded through this yet --
+    combining it with TP weight-sharding under `sequence_parallel` raises
+    below rather than silently producing wrong output.
     """
     head_dim = dim // num_heads
     b = x_q.shape[0]
 
-    q = nn.Dense(dim, name=f"{prefix}_q")(x_q)
-    k = nn.Dense(dim, name=f"{prefix}_k")(x_kv)
-    v = nn.Dense(dim, name=f"{prefix}_v")(x_kv)
+    tp_size = mesh.shape["tp"] if (sequence_parallel and mesh is not None) else 1
+    if image_context is not None and tp_size > 1:
+        raise NotImplementedError(
+            "Combining --tensor_parallel_size > 1 with --sequence_parallel_size > 1 "
+            "isn't supported for Wan2.1's i2v CLIP cross-attention (image_context) yet "
+            "-- k_img/v_img aren't Megatron-sharded, so they'd end up with a different "
+            "head count than the (now TP-sharded) q. Use --tensor_parallel_size 1 with "
+            "--sequence_parallel_size, or --sequence_parallel_size 1 with "
+            "--tensor_parallel_size, for i2v.")
+    dim_local = dim // tp_size
+    num_heads_local = num_heads // tp_size
+
+    q = nn.Dense(dim_local, name=f"{prefix}_q")(x_q)
+    k = nn.Dense(dim_local, name=f"{prefix}_k")(x_kv)
+    v = nn.Dense(dim_local, name=f"{prefix}_v")(x_kv)
 
     if qk_norm:
-        q = RMSNorm(dim, eps=eps, name=f"{prefix}_norm_q")(q)
-        k = RMSNorm(dim, eps=eps, name=f"{prefix}_norm_k")(k)
+        if tp_size > 1:
+            q = TPShardedRMSNorm(dim_local, dim, eps=eps, name=f"{prefix}_norm_q")(q)
+            k = TPShardedRMSNorm(dim_local, dim, eps=eps, name=f"{prefix}_norm_k")(k)
+        else:
+            q = RMSNorm(dim, eps=eps, name=f"{prefix}_norm_q")(q)
+            k = RMSNorm(dim, eps=eps, name=f"{prefix}_norm_k")(k)
 
-    q = q.reshape(b, -1, num_heads, head_dim)
-    k = k.reshape(b, -1, num_heads, head_dim)
-    v = v.reshape(b, -1, num_heads, head_dim)
+    q = q.reshape(b, -1, num_heads_local, head_dim)
+    k = k.reshape(b, -1, num_heads_local, head_dim)
+    v = v.reshape(b, -1, num_heads_local, head_dim)
 
     if rope_freqs is not None:
         q = apply_rope3d(q, rope_freqs)
@@ -89,9 +124,11 @@ def attend(
             out = local_attention(q, k, v)
     else:
         out = dot_product_attention(q, k, v, mesh=mesh)
-    out = out.reshape(b, -1, dim)
+    out = out.reshape(b, -1, dim_local)
 
     if image_context is not None:
+        # Only reached when tp_size == 1 (guarded above), so dim_local ==
+        # dim / num_heads_local == num_heads here.
         k_img = nn.Dense(dim, name=f"{prefix}_k_img")(image_context)
         v_img = nn.Dense(dim, name=f"{prefix}_v_img")(image_context)
         if qk_norm:
@@ -109,7 +146,18 @@ def attend(
             img_out = dot_product_attention(q, k_img, v_img, mesh=mesh).reshape(b, -1, dim)
         out = out + img_out
 
-    return nn.Dense(dim, name=f"{prefix}_o")(out)
+    out = nn.Dense(dim, name=f"{prefix}_o")(out)
+    # `{prefix}_o` is row-parallel (its input, `out`, is already TP-split
+    # across attention heads): outside `sequence_parallel`, GSPMD's ordinary
+    # auto-partitioner inserts the cross-device sum this needs automatically;
+    # inside it (this whole call running under `shard_map`), nothing does
+    # that for us, so it must be requested by hand. A no-op when the 'tp'
+    # axis has size 1 (weights not actually split), so this is safe to
+    # always include whenever `sequence_parallel` is on, regardless of
+    # whether TP weight-sharding is also in use.
+    if sequence_parallel:
+        out = jax.lax.psum(out, "tp")
+    return out
 
 
 class WanHead(nn.Module):

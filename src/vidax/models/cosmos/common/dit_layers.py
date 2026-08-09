@@ -13,6 +13,7 @@ reference), unlike Wan's biased Dense layers.
 from typing import Optional, Tuple
 
 import flax.linen as nn
+import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
@@ -33,7 +34,7 @@ def cosmos_attend(
     rope_freqs: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None,
     mesh: Optional[Mesh] = None,
     sequence_parallel: bool = False,
-    sp_axis_name: str = "tp",
+    sp_axis_name: str = "sp",
 ) -> jnp.ndarray:
     """Shared QKV-projection + per-head RMSNorm + (optional RoPE) + attention
     + output-projection path, matching Cosmos's `Attention` class. Used for
@@ -52,17 +53,31 @@ def cosmos_attend(
     reshuffle is needed there) -- exactly mirroring
     ``vidax.models.wan.common.dit_layers.attend``'s own split between the
     two, since the reasoning (and the underlying primitives) are identical.
+
+    Composes with Megatron weight-sharding on the mesh's independent ``'tp'``
+    axis (see ``vidax.core.sharding.build_tpu_mesh``): whenever
+    ``sequence_parallel`` is set, `q`/`k`/`v`'s Dense output width and head
+    count are divided by ``mesh.shape['tp']`` (a no-op when that's 1) --
+    see ``attend``'s identical comment for why (GSPMD reconciles this
+    automatically outside `shard_map`, but nothing does inside it). Unlike
+    Wan's Q/K-RMSNorm, Cosmos's is per-*head* (reduces over `head_dim`
+    only, which Megatron sharding never splits -- whole heads always stay
+    on one device), so it needs no distributed-reduction equivalent of
+    ``vidax.core.attention.TPShardedRMSNorm``.
     """
     b = x_q.shape[0]
     inner_dim = num_heads * head_dim
+    tp_size = mesh.shape["tp"] if (sequence_parallel and mesh is not None) else 1
+    inner_dim_local = inner_dim // tp_size
+    num_heads_local = num_heads // tp_size
 
-    q = nn.Dense(inner_dim, use_bias=False, name=f"{prefix}_q_proj")(x_q)
-    k = nn.Dense(inner_dim, use_bias=False, name=f"{prefix}_k_proj")(x_kv)
-    v = nn.Dense(inner_dim, use_bias=False, name=f"{prefix}_v_proj")(x_kv)
+    q = nn.Dense(inner_dim_local, use_bias=False, name=f"{prefix}_q_proj")(x_q)
+    k = nn.Dense(inner_dim_local, use_bias=False, name=f"{prefix}_k_proj")(x_kv)
+    v = nn.Dense(inner_dim_local, use_bias=False, name=f"{prefix}_v_proj")(x_kv)
 
-    q = q.reshape(b, -1, num_heads, head_dim)
-    k = k.reshape(b, -1, num_heads, head_dim)
-    v = v.reshape(b, -1, num_heads, head_dim)
+    q = q.reshape(b, -1, num_heads_local, head_dim)
+    k = k.reshape(b, -1, num_heads_local, head_dim)
+    v = v.reshape(b, -1, num_heads_local, head_dim)
 
     # Per-head RMSNorm (over the last axis, `head_dim`) -- unlike Wan, which
     # normalizes over the full `dim` before splitting into heads.
@@ -80,5 +95,12 @@ def cosmos_attend(
             out = local_attention(q, k, v)
     else:
         out = dot_product_attention(q, k, v, mesh=mesh)
-    out = out.reshape(b, -1, inner_dim)
-    return nn.Dense(dim, use_bias=False, name=f"{prefix}_output_proj")(out)
+    out = out.reshape(b, -1, inner_dim_local)
+    out = nn.Dense(dim, use_bias=False, name=f"{prefix}_output_proj")(out)
+    # Row-parallel: see `vidax.models.wan.common.dit_layers.attend`'s
+    # identical comment for why this manual reduce is needed only inside
+    # `sequence_parallel` (running under `shard_map`), and why it's a safe
+    # no-op when 'tp' has size 1.
+    if sequence_parallel:
+        out = jax.lax.psum(out, "tp")
+    return out

@@ -42,6 +42,7 @@ from jax.sharding import PartitionSpec as P
 
 from vidax.core.sharding import (
     build_tpu_mesh, get_batch_sharding, get_replicated_sharding, shard_wan_params,
+    to_partition_specs, configure_jax_cache,
 )
 from vidax.models.cosmos.common.reason1 import (
     NUM_EMBEDDING_PADDING_TOKENS, Qwen2TextModel, Reason1Tokenizer, compute_reason1_embeddings,
@@ -170,40 +171,50 @@ def build_cosmos_conditioning(
 
 
 def main(args):
+    configure_jax_cache()
     num_devices = jax.device_count()
     tp_size = args.tensor_parallel_size
-    assert num_devices % tp_size == 0, (
-        f"num_devices ({num_devices}) must be divisible by --tensor_parallel_size ({tp_size})")
-    dp_size = num_devices // tp_size
-    mesh = build_tpu_mesh(data_parallel_size=dp_size, tensor_parallel_size=tp_size)
+    sp_size = args.sequence_parallel_size
+    assert num_devices % (tp_size * sp_size) == 0, (
+        f"num_devices ({num_devices}) must be divisible by "
+        f"--tensor_parallel_size * --sequence_parallel_size ({tp_size} * {sp_size})")
+    dp_size = num_devices // (tp_size * sp_size)
+    mesh = build_tpu_mesh(
+        data_parallel_size=dp_size, tensor_parallel_size=tp_size,
+        sequence_parallel_size=sp_size)
     rng = jax.random.PRNGKey(args.seed)
-    logging.info(f"Using {num_devices} devices: {dp_size}-way data // {tp_size}-way tensor parallel.")
+    logging.info(
+        f"Using {num_devices} devices: {dp_size}-way data // {tp_size}-way tensor // "
+        f"{sp_size}-way sequence parallel.")
 
     dtype = DTYPES[args.dtype]
-    sequence_parallel = args.sequence_parallel
+    sequence_parallel = sp_size > 1
     assert not (args.image_path and args.video_path), (
         "Pass at most one of --image_path (image2world) / --video_path (video2world).")
     has_conditioning = args.image_path is not None or args.video_path is not None
 
-    # `sequence_parallel=True` shards the DiT's token sequence itself across
-    # the 'tp' axis (DeepSpeed-Ulysses -- see `CosmosDiT`'s module
-    # docstring, ported directly from Wan's DiTs), instead of Megatron-style
-    # tensor parallelism (sharding attention heads/FFN channels, the
-    # `mesh`-only path below). Off by default: at the 2B model's typical
-    # resolutions Megatron TP already fits fine on its own; sequence
-    # parallelism is there for pushing to much higher resolution/frame
-    # counts, the same tradeoff Wan2.1's t2v script documents.
-    dit_model = CosmosDiT(mesh=mesh, sequence_parallel=sequence_parallel, sp_axis_name="tp")
+    # `--sequence_parallel_size > 1` shards the DiT's token sequence itself
+    # across the mesh's 'sp' axis (DeepSpeed-Ulysses -- see `CosmosDiT`'s
+    # module docstring, ported directly from Wan's DiTs); `--tensor_parallel_size`
+    # shards its weights (Megatron-style, attention heads/FFN channels)
+    # across the independent 'tp' axis -- the two compose freely, see
+    # `docs/hardware_and_sharding.md`'s "Combining both" section. Sequence
+    # parallelism is off (size 1) by default: at the 2B model's typical
+    # resolutions Megatron TP already fits fine on its own; it's there for
+    # pushing to much higher resolution/frame counts, the same tradeoff
+    # Wan2.1's t2v script documents.
+    dit_model = CosmosDiT(mesh=mesh, sequence_parallel=sequence_parallel)
     vae_decoder = WanVAEDecoder()
     vae_encoder = WanVAEEncoder() if has_conditioning else None
     reason1_model = Qwen2TextModel()
     scheduler = FlowUniPCMultistepScheduler(
         num_steps=args.num_steps, shift=args.shift, solver_order=args.solver_order)
 
-    assert dit_model.num_heads % tp_size == 0, (
+    assert dit_model.num_heads % (tp_size * sp_size) == 0, (
         f"CosmosDiT.num_heads ({dit_model.num_heads}) must be divisible by "
-        f"--tensor_parallel_size ({tp_size}); tp in {{1,2,4,8,16}} for the 2B model.")
-    # Reason1 always uses ordinary Megatron TP regardless of `--sequence_parallel`
+        f"--tensor_parallel_size * --sequence_parallel_size ({tp_size} * {sp_size}) "
+        f"(product constraint -- see generate_wan2_2_ti2v.py's identical assert).")
+    # Reason1 always uses ordinary Megatron TP regardless of `--sequence_parallel_size`
     # (that flag only controls the DiT): its 512-token sequence is far too
     # short for sequence parallelism to matter, but at 7B params it's by far
     # the largest of the three checkpoints, so weight-sharding it still pays
@@ -230,21 +241,19 @@ def main(args):
     reason1_params = load_torch_checkpoint_to_jax(
         args.reason1_checkpoint_path, model_type="reason1_text_encoder")
 
-    # The DiT is Megatron tensor-sharded *unless* `sequence_parallel`, in
-    # which case its weights are instead left fully **replicated**:
-    # sequence parallelism shards activations along the token axis, not
-    # weights, so every device needs its own complete copy of every DiT
-    # weight (same reasoning as `generate_wan2_2_ti2v.py`). Reason1 is
-    # always Megatron tensor-sharded regardless (see the assert above); the
-    # VAE is small and stays replicated either way.
+    # The DiT is always Megatron tensor-sharded regardless of
+    # `sequence_parallel` (weight-sharding and token-sharding are
+    # independent mesh axes now -- see `generate_wan2_1_t2v.py`'s identical
+    # comment). Reason1 is always Megatron tensor-sharded too (see the
+    # assert above); the VAE is small and stays replicated either way.
     replicated = get_replicated_sharding(mesh)
-    dit_params = jax.device_put(
-        cast_to_dtype(dit_params, dtype),
-        replicated if sequence_parallel else shard_wan_params(dit_params, mesh))
+    dit_params = cast_to_dtype(dit_params, dtype)
+    dit_shardings = shard_wan_params(dit_params, mesh)
+    dit_params = jax.device_put(dit_params, dit_shardings)
     vae_params = jax.device_put(cast_to_dtype(vae_params, dtype), replicated)
     reason1_params = jax.device_put(
         cast_to_dtype(reason1_params, dtype), shard_wan_params(reason1_params, mesh))
-    logging.info("Weights loaded, cast, and replicated across devices.")
+    logging.info("Weights loaded, cast, and sharded across devices.")
 
     # --- Resolve output resolution + conditioning frames ---
     pt, ph, pw = dit_model.patch_size
@@ -346,16 +355,19 @@ def main(args):
     negative_embeds = jax.device_put(negative_embeds, get_batch_sharding(mesh, negative_embeds.ndim))
 
     # `sequence_parallel=True` reshapes/reshuffles activations across the
-    # 'tp' mesh axis inside `CosmosDiT.__call__` itself -- these are
+    # 'sp' mesh axis inside `CosmosDiT.__call__` itself -- these are
     # collectives, so the call needs to run inside `shard_map`, not a plain
     # `jax.jit` (which only sees ordinary per-device-local ops). `in_specs`
-    # mirror the shardings already applied above (`get_batch_sharding`
+    # mirror the shardings already applied above: `get_batch_sharding`
     # shards the leading batch axis on 'dp' and replicates the rest,
-    # `replicated`/`P()` fully replicated) -- `shard_map` requires the
-    # actual input array shardings to agree with what it's told here.
-    # `cond_mask_full` is passed explicitly (not closed over) for the same
-    # reason: `shard_map` needs every array its traced function touches to
-    # be declared as an argument.
+    # `replicated`/`P()` fully replicated, and `dit_shardings` (computed
+    # above) is the *real* per-leaf Megatron sharding, converted via
+    # `to_partition_specs` -- not a blanket "fully replicated" `P()`, so
+    # weight-sharding and sequence-parallel token-sharding both take effect
+    # at once. `shard_map` requires the actual input array shardings to
+    # agree with what it's told here. `cond_mask_full` is passed explicitly
+    # (not closed over) for the same reason: `shard_map` needs every array
+    # its traced function touches to be declared as an argument.
     def _dit_apply(params, latents, t, context, cond_mask):
         return dit_model.apply(
             params, latents=latents, timesteps=t, context=context,
@@ -365,7 +377,7 @@ def main(args):
         dit_apply = shard_map(
             _dit_apply, mesh=mesh,
             in_specs=(
-                P(), P('dp', None, None, None, None), P('dp', None),
+                to_partition_specs(dit_shardings), P('dp', None, None, None, None), P('dp', None),
                 P('dp', None, None), P('dp', None, None, None, None),
             ),
             out_specs=P('dp', None, None, None, None),
@@ -511,8 +523,8 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, required=True, nargs="+", help="One text prompt (broadcast to every data-parallel replica) or exactly `num_devices // tensor_parallel_size` prompts, one per replica.")
     parser.add_argument("--negative_prompt", type=str, default=DEFAULT_NEGATIVE_PROMPT, help="Negative prompt for classifier-free guidance.")
     parser.add_argument("--guide_scale", type=float, default=7.0, help="Classifier-free guidance scale: velocity = uncond + guide_scale * (cond - uncond). Matches the reference's default of 7.")
-    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's attention heads / FFN channels (Megatron-style) across -- or, with --sequence_parallel, to shard its token sequence across instead. Also always used for Reason1's own (Megatron-only) weight sharding, independent of --sequence_parallel. Must divide num_devices, CosmosDiT.num_heads (16), and Qwen2TextModel.num_key_value_heads (4, the binding GQA constraint -- so tp in {1,2,4} if Reason1 is being sharded meaningfully, though the DiT alone would tolerate {1,2,4,8,16}).")
-    parser.add_argument("--sequence_parallel", action="store_true", help="Shard the DiT's token sequence itself across --tensor_parallel_size devices (DeepSpeed-Ulysses) instead of Megatron-style tensor parallelism. Off by default since Megatron TP already fits the 2B model fine at typical resolutions; useful for pushing to much higher resolution/frame counts, where self-attention activation memory (not weight memory) becomes the bottleneck. Also requires the latent frame count (`1 + (num_frames - 1) // 4`) to be evenly divisible by --tensor_parallel_size.")
+    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to Megatron-shard the DiT's attention heads / FFN channels (weights) across. Also always used for Reason1's own (Megatron-only) weight sharding, independent of --sequence_parallel_size. Must divide num_devices, CosmosDiT.num_heads (16), and Qwen2TextModel.num_key_value_heads (4, the binding GQA constraint -- so tp in {1,2,4} if Reason1 is being sharded meaningfully, though the DiT alone would tolerate {1,2,4,8,16}). Composes independently with --sequence_parallel_size (their product is the DiT's real head-divisibility constraint).")
+    parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. 1 (off) by default since Megatron TP already fits the 2B model fine at typical resolutions; useful for pushing to much higher resolution/frame counts, where self-attention activation memory (not weight memory) becomes the bottleneck. Also requires the latent frame count (`1 + (num_frames - 1) // 4`) to be evenly divisible by this value.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the DiT, VAE, and Reason1 encoder.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=35, help="Number of UniPC sampling steps. The reference's default for the 2B base checkpoint is 35.")

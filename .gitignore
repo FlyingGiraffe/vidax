@@ -36,6 +36,7 @@ dist/
 
 # Local example outputs
 out/
+benchmarks/results/
 
 # reference codebases
 refs/

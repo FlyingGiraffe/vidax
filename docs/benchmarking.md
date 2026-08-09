@@ -5,6 +5,18 @@ Google Cloud TPU. **Empty cells mean that combination hasn't been measured
 yet** — not that it's unsupported; see each model's own
 [`docs/models/`](models/) guide for implementation/verification status.
 
+Reproduce any row with `benchmarks/run_*.py` (see
+[`benchmarks/common.py`](../benchmarks/common.py) for the shared harness and
+[`benchmarks/run_all.py`](../benchmarks/run_all.py) to run every
+checkpoint-available combination in one pass, in the same order as this
+doc's table). Checkpoints are assumed to live under `./checkpoints/` (every
+example script's own default); point elsewhere with `--checkpoint_dir` or
+the `VIDAX_CHECKPOINT_DIR` environment variable without touching any script.
+Measured with `jax==0.11.0` on `TPU v4` (4 chips) — a different JAX/libtpu
+version or chip generation can shift these numbers meaningfully; each
+`benchmarks/results/*.json` file records the exact `jax_version`/
+`device_kind`/`device_count` used for that row.
+
 ## Metrics
 
 JAX is a trace-and-compile framework: the first call at a given
@@ -41,22 +53,51 @@ chip count.
 
 ## Results
 
+Model order matches the root [`README.md`](../README.md#model-support--parity-matrix)'s
+model-support table. Tasks get separate rows by default (T2V/I2V typically
+differ in resolution/steps/shift, so one shared row would misrepresent one
+of them) — merge tasks into a single "T2V/I2V/..." row only when their
+configs are genuinely identical, as documented per-row when that's the case
+(e.g. Cosmos-Predict2.5's T2V/I2V/V2V share the same resolution/frames/steps
+and only differ in which conditioning-mask/timestep values are passed in).
+
 | Model | Variant | Task | Hardware | Resolution | Frames | Steps | Compile (s) | Generation (s) | Per-step (s) | Peak HBM/chip (GB) |
 | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| Wan2.1 | 1.3B | T2V | v4-8 | 480x832 | 81 | 50 | | | | |
-| Wan2.1 | 14B | T2V | v4-8 | 480x832 | 81 | 50 | | | | |
-| Wan2.1 | 14B | I2V | v4-8 | 720x1280 | 81 | 40 | | | | |
+| Cosmos3 | Nano (16B) | T2V | v4-8 | | | | | | | |
+| Cosmos3 | Nano (16B) | I2V | v4-8 | | | | | | | |
+| Cosmos3 | Edge (4B) | T2V | v4-8 | | | | | | | |
+| Cosmos3 | Edge (4B) | I2V | v4-8 | | | | | | | |
+| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | v4-8 | 1280x704 | 45\* | 35 | 91.8 | 1261.4 | 36.0 | 22.1 |
+| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | v4-8 | 1280x704 | 93 | 35 | 116.9 | 1357.0 | 38.8 | 16.0 |
+| Wan2.2 | A14B | T2V | v4-8 | 720x1280 | 81 | 50 | | | | |
+| Wan2.2 | A14B | I2V | v4-8 | 720x1280 | 81 | 40 | | | | |
 | Wan2.2 | 5B (TI2V) | T2V | v4-8 | 704x1280 | 121 | 50 | | | | |
 | Wan2.2 | 5B (TI2V) | I2V | v4-8 | 704x1280 | 121 | 40 | | | | |
-| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | v4-8 | | | | | | | |
-| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | v4-8 | | | | | | | |
-| Cosmos 3 | Nano (16B) | T2V/I2V | v4-8 | | | | | | | |
-| Cosmos 3 | Edge (4B) | T2V/I2V | v4-8 | | | | | | | |
+| Wan2.1 | 14B | T2V | v4-8 | 480x832 | 81 | 50 | | | | |
+| Wan2.1 | 14B (480P) | I2V | v4-8 | 720x1280 | 81 | 40 | | | | |
+| Wan2.1 | 1.3B | T2V | v4-8 | 480x832 | 81 | 50 | | | | |
 
 Resolution/frame/step columns are each model's reference default (see its
 own guide's CLI reference) — not necessarily the resolution that fits this
 repo's current hardware today (A14B in particular; see
-[`docs/models/wan2_2.md`](models/wan2_2.md)'s A14B sections).
+[`docs/models/wan2_2.md`](models/wan2_2.md)'s A14B sections). Every row uses
+the same standardized prompt/conditioning-image/conditioning-video across
+every model — see [`benchmarks/common.py`](../benchmarks/common.py) — so
+results are comparable across model families, not just across variants of
+one model.
+
+\* Cosmos-Predict2.5 14B's reference default (93 frames) didn't fit this
+machine's 4 chips at any `--tensor_parallel_size`/`--sequence_parallel_size`
+split (`tp=4,sp=1` needed ~22.6G/chip with 18.5G free; `tp=2,sp=2` needed
+~13.0G/chip with only 9.1G free — weight-sharding four ways beats splitting
+across tensor+sequence parallelism here, since 14B's weights dominate over
+activations at this frame count) — reduced to 45 frames (`tp=4`), the
+largest that fits; see [`benchmarks/run_cosmos2_5.py`](../benchmarks/run_cosmos2_5.py).
+Both Cosmos-Predict2.5 rows measure T2V only (I2V/V2V share the same DiT
+compute cost, only conditioning-mask/timestep values differ — see
+[`docs/models/cosmos.md`](models/cosmos.md)) — the "T2V/I2V/V2V" task label
+reflects the checkpoint's supported tasks, not that all three were
+separately measured.
 
 ---
 

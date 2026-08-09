@@ -42,11 +42,11 @@ Rows are merged across tasks when one script/checkpoint handles all of them
 ships them as genuinely distinct checkpoints/pipelines (e.g. Wan2.1's T2V vs.
 I2V, Wan2.2's A14B).
 
-| Model Family | Variant | Task | Implemented (Unit test) | Tested (TPU v4/v5e/v6e) | Guide | Weights |
+| Model Family | Variant | Task | Implemented (Smoke test) | TPU test (v4/v5e/v6e) | Guide | Weights |
 | --- | --- | --- | --- | --- | --- | --- |
 | Cosmos3 | Nano (16B) | T2V/I2V | ✅ | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos3-Nano) |
 | Cosmos3 | Edge (4B) | T2V/I2V | ✅ | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos3-Edge) |
-| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | ❌ | ❌/❌/❌ | [cosmos.md](docs/models/cosmos.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-14B) |
+| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | ✅ | ✅/❌/❌ | [cosmos.md](docs/models/cosmos.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-14B) |
 | Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅ | ✅/❌/❌ | [cosmos.md](docs/models/cosmos.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B) |
 | Wan2.2 | A14B | T2V | ✅ | ❌/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B) |
 | Wan2.2 | A14B | I2V | ✅ | ❌/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) |
@@ -91,13 +91,20 @@ python examples/generate_wan2_1_t2v.py \
 ## 🛠 Directory Layout
 
 `vidax` follows the standard Python `src`-layout. `models/` holds one
-subpackage per model family; within `models/wan/` and `models/cosmos/`, each
-released *architecture version* (`wan2_1/`, `wan2_2/`, `cosmos2_5/`) gets its
-own subpackage, plus a `common/` package for building blocks shared across
-that family's versions. `models/cosmos3/` is flat instead (no version
-subpackages): Nano and Edge are the same architecture at different sizes,
-not different versions, so one `dit.py` plus a `configs.py` of named
-hyperparameter presets covers both. `translator/mappings/` mirrors this
+subpackage per model family. `models/wan/` additionally splits into one
+subpackage per released *architecture version* (`wan2_1/`, `wan2_2/`), plus a
+`common/` package for building blocks shared across those versions, since
+Wan2.1 and Wan2.2 are genuinely different architectures. `models/cosmos2_5/`
+and `models/cosmos3/` are both flat instead (no version/common split): each
+released size within a family (Cosmos-Predict2.5's 2B/14B, Cosmos 3's
+Nano/Edge) is the *same* architecture at different widths/depths, not a
+different version, so one `dit.py` plus a `configs.py` of named
+hyperparameter presets covers every size in that family. (`models/cosmos2_5/`
+and `models/cosmos3/` were originally nested under a shared `models/cosmos/`
+package on the assumption Cosmos-Predict2.5 and Cosmos 3 would share
+significant model code; in practice they turned out architecturally
+unrelated, so they're now flat siblings under `models/`, matching `wan/`'s
+own top-level positioning.) `translator/mappings/` mirrors this
 layout one-for-one.
 
 ```text
@@ -118,7 +125,7 @@ vidax/                          # Repository Root
 │   ├── generate_wan2_2_ti2v.py    # Wan2.2 TI2V-5B, t2v + i2v
 │   ├── generate_wan2_2_t2v_a14b.py # Wan2.2 A14B t2v (two-expert MoE)
 │   ├── generate_wan2_2_i2v_a14b.py # Wan2.2 A14B i2v (two-expert MoE)
-│   ├── generate_cosmos2_5.py      # Cosmos-Predict2.5 2B, text2world/image2world/video2world
+│   ├── generate_cosmos2_5.py      # Cosmos-Predict2.5, --model_size {2B,14B}, text2world/image2world/video2world
 │   └── generate_cosmos3.py        # Cosmos3 Nano/Edge, --model_size {nano,edge}, text2video + image2video
 └── src/
     └── vidax/                  # Core Python Package
@@ -142,14 +149,13 @@ vidax/                          # Repository Root
         │   │       ├── configs.py       # Named hyperparameter presets: TI2V_5B/T2V_A14B/I2V_A14B
         │   │       ├── dit.py           # Wan2.2 DiT, per-token timestep, sequence-parallel-capable
         │   │       └── vae.py           # Wan2.2 VAE (AvgDown3D/DupUp3D/patchify), jit-per-chunk
-        │   ├── cosmos/
-        │   │   ├── common/           # Building blocks shared by every Cosmos-Predict2.5 version
-        │   │   │   ├── reason1.py        # Qwen2.5-VL-7B text tower + embedding-extraction pipeline
-        │   │   │   ├── rope.py           # Cosmos's 3D RoPE (rotate-half convention, NTK extrapolation)
-        │   │   │   └── dit_layers.py     # Shared DiT attention block (per-head QK-RMSNorm)
-        │   │   └── cosmos2_5/
-        │   │       └── dit.py            # Cosmos-Predict2.5 2B DiT, AdaLN-LoRA, per-frame timestep, TP/sequence-parallel-capable
-        │   └── cosmos3/               # Cosmos 3 -- architecturally unrelated to models/cosmos/ above
+        │   ├── cosmos2_5/
+        │   │   ├── configs.py            # Named hyperparameter presets: BASE_2B_CONFIG/BASE_14B_CONFIG
+        │   │   ├── reason1.py            # Qwen2.5-VL-7B text tower + embedding-extraction pipeline
+        │   │   ├── rope.py               # Cosmos's 3D RoPE (rotate-half convention, NTK extrapolation)
+        │   │   ├── dit_layers.py         # Shared DiT attention block (per-head QK-RMSNorm)
+        │   │   └── dit.py                # Cosmos-Predict2.5 DiT (2B or 14B, config-driven), AdaLN-LoRA, per-frame timestep, TP/sequence-parallel-capable
+        │   └── cosmos3/               # Cosmos 3 -- architecturally unrelated to cosmos2_5/ above
         │       ├── configs.py            # Named hyperparameter presets: NANO_CONFIG/EDGE_CONFIG
         │       ├── mrope.py              # Interleaved 3D mRoPE (distinct from both Wan's and Cosmos-Predict2.5's RoPE)
         │       ├── dit_layers.py         # Dual-pathway (causal "und" / full-attention "gen") attention + decoder layer, config-driven per-checkpoint toggles

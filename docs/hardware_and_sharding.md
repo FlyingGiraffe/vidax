@@ -167,7 +167,7 @@ width, `shard_map` raises a shape mismatch immediately.
 2. **The manual all-reduce row-parallel layers need.** Outside `shard_map`,
    GSPMD auto-inserts the cross-device sum a row-parallel layer's output
    needs; inside it, nothing does, so `vidax.models.wan.common.dit_layers
-   .attend` and `vidax.models.cosmos.common.dit_layers.cosmos_attend`
+   .attend` and `vidax.models.cosmos2_5.dit_layers.cosmos_attend`
    (their shared output projection) and every DiT block's FFN down-
    projection now call `jax.lax.psum(x, 'tp')` by hand whenever
    `sequence_parallel` is set — a no-op when `'tp'` has size 1.
@@ -361,7 +361,7 @@ this — it only shows up against a real `AutoTokenizer.from_pretrained(...)`.
 ### RoPE dtype: float32 cos/sin tables silently upcast q/k but not v
 
 Reason1's RoPE (`_apply_rotary_pos_emb` in
-`vidax.models.cosmos.common.reason1`) computed `cos`/`sin` tables in
+`vidax.models.cosmos2_5.reason1`) computed `cos`/`sin` tables in
 float32 (needed for numerical range/precision) and applied them via `x *
 cos + rotate_half(x) * sin` *without* casting the result back to `x`'s
 original dtype. Under bf16 (the real checkpoint's native dtype), this
@@ -372,7 +372,7 @@ bfloat16"`) rather than promoting for you. Every earlier synthetic test used
 float32 throughout, so this never triggered. Fixed by explicitly casting
 back to the input's original dtype at the end of `_apply_rotary_pos_emb`
 (the same convention `vidax.core.rope3d.apply_rope3d` and
-`vidax.models.cosmos.common.rope.apply_cosmos_rope3d` already followed
+`vidax.models.cosmos2_5.rope.apply_cosmos_rope3d` already followed
 correctly — this was an inconsistency between two independently-written
 RoPE implementations in the same repo, not a new idea to invent).
 

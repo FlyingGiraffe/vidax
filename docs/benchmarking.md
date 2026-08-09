@@ -49,6 +49,7 @@ chip count.
 | Wan2.2 | 5B (TI2V) | T2V | v4-8 | 704x1280 | 121 | 50 | | | | |
 | Wan2.2 | 5B (TI2V) | I2V | v4-8 | 704x1280 | 121 | 40 | | | | |
 | Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | v4-8 | | | | | | | |
+| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | v4-8 | | | | | | | |
 | Cosmos 3 | Nano (16B) | T2V/I2V | v4-8 | | | | | | | |
 | Cosmos 3 | Edge (4B) | T2V/I2V | v4-8 | | | | | | | |
 

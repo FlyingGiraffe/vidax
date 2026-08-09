@@ -6,7 +6,7 @@ predict2/networks/minimal_v4_dit.py) differs from Wan's `WanSelfAttention`:
 QK-RMSNorm is applied *per attention head* (over `head_dim`), not over the
 full projected `dim`, and RoPE (`create_cosmos_rope3d_freqs` /
 `apply_cosmos_rope3d`) uses the rotate-half convention, not Wan's interleaved
-pairs -- see `vidax.models.cosmos.common.rope`'s module docstring. All
+pairs -- see `vidax.models.cosmos2_5.rope`'s module docstring. All
 projections are bias-free (`nn.Linear(..., bias=False)` throughout the
 reference), unlike Wan's biased Dense layers.
 """
@@ -20,7 +20,7 @@ from jax.sharding import Mesh
 from vidax.core.attention import (
     RMSNorm, dot_product_attention, local_attention, sequence_parallel_self_attention,
 )
-from vidax.models.cosmos.common.rope import apply_cosmos_rope3d
+from vidax.models.cosmos2_5.rope import apply_cosmos_rope3d
 
 
 def cosmos_attend(
@@ -44,7 +44,7 @@ def cosmos_attend(
     tokens' positional signal is already encoded by the text model itself).
 
     ``sequence_parallel`` (DeepSpeed-Ulysses, see
-    ``vidax.models.cosmos.cosmos2_5.dit``'s module docstring): must be
+    ``vidax.models.cosmos2_5.dit``'s module docstring): must be
     called from *within* an active ``shard_map`` over a mesh with an axis
     named ``sp_axis_name``. Self-attention (``rope_freqs`` given) dispatches
     to ``sequence_parallel_self_attention``'s all-to-all reshuffle;

@@ -1,12 +1,12 @@
 """PyTorch state_dict -> Flax parameter tree key mapping for Cosmos-Predict2.5's
-DiT (`vidax.models.cosmos.cosmos2_5.dit.CosmosDiT`).
+DiT (`vidax.models.cosmos2_5.dit.CosmosDiT`).
 
 The released checkpoint (`model_ema_bf16.pt`/`model_ema_fp32.pt`) is a flat
 `dict[str, Tensor]`, every key prefixed `net.` (the EMA net's state_dict,
 saved with that prefix regardless). Buffers with no analogue in this port
 are silently skipped:
   - `net.pos_embedder.*` -- RoPE lookup tables, regenerated fresh every
-    forward pass by `vidax.models.cosmos.common.rope.create_cosmos_rope3d_freqs`,
+    forward pass by `vidax.models.cosmos2_5.rope.create_cosmos_rope3d_freqs`,
     not learned.
   - `net.accum_*` -- training-loop bookkeeping (sample/iteration counters).
   - `net.*._extra_state` -- TransformerEngine FP8/internal bookkeeping blobs.

@@ -1,5 +1,5 @@
 """PyTorch state_dict -> Flax parameter tree mapping for the Reason1 text
-encoder (`vidax.models.cosmos.common.reason1.Qwen2TextModel`).
+encoder (`vidax.models.cosmos2_5.reason1.Qwen2TextModel`).
 
 Key layout (`cosmos_predict2/_src/reason1/models/vlm_qwen.py`'s `QwenModel`
 wraps a local `Qwen2_5_VLModel` (`.../networks/qwen2_5_vl.py:1157`) under the
@@ -31,7 +31,7 @@ from .common import _leaf_name, _set_nested_dict
 
 def map_reason1_text_encoder_keys(pt_state_dict: Dict) -> Dict:
     """Translates a Reason1/Qwen2.5-VL text-tower state_dict into a Flax
-    param tree for `vidax.models.cosmos.common.reason1.Qwen2TextModel`.
+    param tree for `vidax.models.cosmos2_5.reason1.Qwen2TextModel`.
     """
     jax_params: Dict[str, Any] = {}
 

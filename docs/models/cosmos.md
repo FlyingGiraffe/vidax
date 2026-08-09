@@ -1,12 +1,16 @@
 # Cosmos-Predict2.5 — Usage Guide
 
 One standalone TPU inference script currently lives in `examples/`:
-`generate_cosmos2_5.py`, for the 2B base checkpoint — a single script
-covering all three tasks the checkpoint supports (text2world, image2world,
-video2world), selected by which conditioning flag you pass. It shares the
-same building blocks as the Wan scripts (`vidax.core`, `vidax.schedulers`,
-`vidax.translator`) but differs in checkpoint layout, sampler (UniPC instead
-of Euler), and text encoder (a 7B-parameter VLM instead of T5) — see
+`generate_cosmos2_5.py`, for both released sizes (2B and 14B, selected via
+`--model_size`) — a single script covering all three tasks the checkpoints
+support (text2world, image2world, video2world), selected by which
+conditioning flag you pass. Both sizes share one architecture
+(`vidax.models.cosmos2_5.dit.CosmosDiT`, config-driven — see
+`vidax.models.cosmos2_5.configs`) and only differ in `dim`/`ffn_dim`/
+`num_heads`/`num_layers`. It shares the same building blocks as the Wan
+scripts (`vidax.core`, `vidax.schedulers`, `vidax.translator`) but differs in
+checkpoint layout, sampler (UniPC instead of Euler), and text encoder (a
+7B-parameter VLM instead of T5) — see
 [`docs/hardware_and_sharding.md`](../hardware_and_sharding.md) for the shared
 engineering background, and this doc's [Architecture notes](#architecture-notes)
 section below for what's specific to Cosmos.
@@ -14,6 +18,7 @@ section below for what's specific to Cosmos.
 | Script | Model | Params | Task | Checkpoint dir example |
 | --- | --- | --- | --- | --- |
 | `generate_cosmos2_5.py` | Cosmos-Predict2.5 | 2B | Text2World, Image2World, Video2World | `Cosmos-Predict2.5-2B/base/pre-trained` |
+| `generate_cosmos2_5.py` | Cosmos-Predict2.5 | 14B | Text2World, Image2World, Video2World | `Cosmos-Predict2.5-14B/base/pre-trained` |
 
 Requires the `torch` extra (to deserialize the `.pt` DiT/VAE checkpoints),
 the `text` extra (`transformers`, for the Reason1/Qwen2.5-VL-7B tokenizer),
@@ -26,20 +31,29 @@ pip install -e ".[tpu,torch,text,i2v]"
 
 ---
 
-## Cosmos-Predict2.5 (2B) — `generate_cosmos2_5.py`
+## Cosmos-Predict2.5 (2B / 14B) — `generate_cosmos2_5.py`
 
-Checkpoints come from two separate repos: the DiT and VAE from
+Checkpoints come from three separate repos: the DiT and VAE from
 [nvidia/Cosmos-Predict2.5-2B](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B)
-(the DiT as a flat PyTorch state_dict, `base/pre-trained/<uuid>/model_ema_bf16.pt`;
-the VAE — Wan2.1's causal VAE, reused verbatim by Cosmos-Predict2.5, see
-[Architecture notes](#architecture-notes) — as `tokenizer.pth` at the
-checkpoint root), and the text encoder from
+or [nvidia/Cosmos-Predict2.5-14B](https://huggingface.co/nvidia/Cosmos-Predict2.5-14B)
+(the DiT as a flat PyTorch state_dict, `base/pre-trained/<uuid>/model_ema_bf16.pt`
+for 2B, `base/pre-trained/<uuid>_ema_bf16.pt` for 14B; the VAE — Wan2.1's
+causal VAE, reused verbatim by Cosmos-Predict2.5, see
+[Architecture notes](#architecture-notes) — as `tokenizer.pth`, shipped only
+in the 2B repo and shared by both sizes, since neither the DiT architecture
+nor the VAE depend on which DiT size you're running), and the text encoder
+(shared by both sizes too) from
 [nvidia/Cosmos-Reason1-7B](https://huggingface.co/nvidia/Cosmos-Reason1-7B)
 (a standard HuggingFace-format repo: sharded
 `model-NNNNN-of-NNNNN.safetensors` + a `model.safetensors.index.json`
 manifest, plus `tokenizer.json`/`tokenizer_config.json`/`chat_template.json`
 — pass the `.index.json` manifest's path as `--reason1_checkpoint_path`;
-`--tokenizer_path` then defaults to that same directory).
+`--tokenizer_path` then defaults to that same directory). Pass
+`--model_size 2B` (the default) or `--model_size 14B` to match whichever
+`--dit_checkpoint_path` you point at — the two configs only differ in
+`dim`/`ffn_dim`/`num_heads`/`num_layers` (see
+`vidax.models.cosmos2_5.configs`); every other flag/behavior below applies
+identically to both.
 
 Unlike Wan2.1's i2v (a separate 14B model, CLIP cross-attention + an extra
 concatenated channel) but *like* Wan2.2 TI2V-5B's i2v, image2world/
@@ -141,7 +155,7 @@ freely (see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-de
 "Combining with Megatron TP"), and `--sequence_parallel_size` alone is what
 matters for pushing to much higher resolution/frame counts where self-
 attention activation memory becomes the bottleneck rather than weight
-memory — see `vidax.models.cosmos.cosmos2_5.dit.CosmosDiT`'s module
+memory — see `vidax.models.cosmos2_5.dit.CosmosDiT`'s module
 docstring, ported directly from Wan's DiTs (`--sequence_parallel_size` only
 affects the DiT; Reason1 always uses plain Megatron TP via
 `--tensor_parallel_size`, its 512-token sequence being far too short for
@@ -155,9 +169,10 @@ replica — only the text prompt varies).
 
 | Flag | Default | Notes |
 | --- | --- | --- |
+| `--model_size` | `2B` | `2B` \| `14B`. Selects which of `vidax.models.cosmos2_5.configs`' two presets to build `CosmosDiT` with — must match `--dit_checkpoint_path`'s actual size (the checkpoint carries no size metadata of its own to check against). |
 | `--dit_checkpoint_path` | *required* | DiT `.pt` checkpoint (`model_ema_bf16.pt`/`model_ema_fp32.pt` — the flat, EMA-only state_dict; **not** the raw `model.pt` training checkpoint, which is a much larger PyTorch distributed-checkpoint (DCP) shard set). |
 | `--vae_checkpoint_path` | *required* | `tokenizer.pth` — Wan2.1's own VAE checkpoint format, loaded via `model_type="wan2.1_vae"` (see [Architecture notes](#architecture-notes)). |
-| `--reason1_checkpoint_path` | *required* | Path to Reason1's `model.safetensors.index.json` (a separate download from Cosmos-Predict2.5-2B — see this section's intro). |
+| `--reason1_checkpoint_path` | *required* | Path to Reason1's `model.safetensors.index.json` (a separate download, shared by both DiT sizes — see this section's intro). |
 | `--tokenizer_path` | directory of `--reason1_checkpoint_path` | HuggingFace tokenizer id/path for Reason1's chat-template + BPE tokenization. The released repo bundles the tokenizer files alongside the model shards, so the default avoids a network call in the common case. |
 | `--image_path` | `None` | Conditioning image, for image2world. Mutually exclusive with `--video_path`. When given, output resolution is derived from the image + `--max_area` (`--height`/`--width` ignored). |
 | `--video_path` | `None` | Conditioning video, for video2world. Mutually exclusive with `--image_path`. Same resolution-derivation as `--image_path`. |
@@ -166,8 +181,8 @@ replica — only the text prompt varies).
 | `--prompt` | *required*, 1+ values | One prompt (broadcast to every data-parallel replica) or exactly `num_devices // tensor_parallel_size` prompts, one per replica. |
 | `--negative_prompt` | vidax's own quality-negative-prompt | Negative prompt for CFG (the reference's own default is a long boilerplate string; vidax uses a shorter equivalent — see the script's module-level `DEFAULT_NEGATIVE_PROMPT`). |
 | `--guide_scale` | `7.0` | CFG scale: `velocity = uncond + guide_scale * (cond - uncond)`. Matches the reference's default. |
-| `--tensor_parallel_size` | `1` | Devices to Megatron-shard the DiT's attention heads/FFN channels *and* Reason1's weights across (see [hardware doc](../hardware_and_sharding.md)). Must divide `num_devices`, `CosmosDiT.num_heads` (16), and `Qwen2TextModel.num_key_value_heads` (4, GQA — the binding constraint if Reason1 is meaningfully sharded, so `tp` in `{1,2,4}` in practice, though the DiT alone tolerates `{1,2,4,8,16}`). |
-| `--sequence_parallel_size` | `1` | Devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of `--tensor_parallel_size`'s weight-sharding. Not needed at 2B scale/typical resolutions; there for pushing to much higher resolution/frame counts — see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s "Combining with Megatron TP". Only affects the DiT — Reason1 always uses Megatron TP (`--tensor_parallel_size`) regardless. Requires the latent frame count to divide evenly by this value. |
+| `--tensor_parallel_size` | `1` | Devices to Megatron-shard the DiT's attention heads/FFN channels *and* Reason1's weights across (see [hardware doc](../hardware_and_sharding.md)). Must divide `num_devices`, `CosmosDiT.num_heads` (16 for 2B, 40 for 14B), and `Qwen2TextModel.num_key_value_heads` (4, GQA — the binding constraint if Reason1 is meaningfully sharded, so `tp` in `{1,2,4}` in practice). |
+| `--sequence_parallel_size` | `1` | Devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of `--tensor_parallel_size`'s weight-sharding. Not needed at 2B scale/typical resolutions; more likely to matter at 14B or at much higher resolution/frame counts — see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s "Combining with Megatron TP". Only affects the DiT — Reason1 always uses Megatron TP (`--tensor_parallel_size`) regardless. Requires the latent frame count to divide evenly by this value. |
 | `--dtype` | `bfloat16` | `float32` \| `float16` \| `bfloat16`. `float16` will fail at runtime — TPU's XLA backend doesn't implement `float16` matmuls. |
 | `--seed` | `0` | Initial noise seed. |
 | `--num_steps` | `35` | UniPC sampling steps. Reference default for the 2B base checkpoint. |
@@ -255,6 +270,20 @@ weight-loading exact-match checks) before the real bug was found.
   `--sequence_parallel_size 2` (2-way data-parallel × 2-way sequence-parallel)
   complete cleanly against the real checkpoints, with correct output shapes.
 
+**14B** (`--model_size 14B`): the same translator mapping, DiT architecture,
+and sampling loop as 2B, just with `configs.BASE_14B_CONFIG`'s wider/deeper
+dims — verified end-to-end against the real released checkpoint
+(`Cosmos-Predict2.5-14B/base/pre-trained/..._ema_bf16.pt`) with
+`--tensor_parallel_size 4`: weight loading, Megatron sharding across all 4
+chips, Reason1 text encoding, UniPC sampling, and VAE decode all complete
+without error and produce a non-degenerate video (correct shape, sane pixel
+statistics) at a small low-step smoke-test config. Not yet run at
+full resolution/step-count for a real quality judgment the way 2B's T2V/I2V
+outputs were (see above) — the 4 architecture bugs found and fixed during 2B
+development live in code shared by both sizes, so there's no size-specific
+correctness gap expected, but this hasn't been independently confirmed by a
+full-quality 14B generation the way 2B's has.
+
 See the [parity matrix in the root README](../../README.md#model-support--parity-matrix)
 for the up-to-date status across all variants.
 
@@ -286,13 +315,15 @@ from a full quality judgment, which still needs the native resolution.
   8x spatial / 4x-with-a-+1 causal temporal compression, same 16-channel
   latent space. `generate_cosmos2_5.py` imports
   `vidax.models.wan.wan2_1.vae.WanVAEDecoder`/`WanVAEEncoder` directly rather
-  than duplicating them; there is no `vidax.models.cosmos.*.vae` module.
-- **DiT (`vidax.models.cosmos.cosmos2_5.dit.CosmosDiT`):** 28 transformer
-  blocks, 2048-dim, 16 heads (head_dim 128), `patch_size=(1,2,2)` (no
+  than duplicating them; there is no `vidax.models.cosmos2_5.vae` module.
+- **DiT (`vidax.models.cosmos2_5.dit.CosmosDiT`):** config-driven, like
+  Wan's DiTs — 28 transformer blocks / 2048-dim / 16 heads for 2B, 36 blocks
+  / 5120-dim / 40 heads for 14B (both head_dim 128 — see
+  `vidax.models.cosmos2_5.configs`), `patch_size=(1,2,2)` (no
   temporal compression at the DiT level — all of it happens in the VAE).
   Departs from Wan's DiT in several concrete ways: per-head (not per-tensor)
   QK-RMSNorm, rotate-half RoPE (not Wan's interleaved-pair convention, see
-  `vidax.models.cosmos.common.rope`), and AdaLN-LoRA modulation where each
+  `vidax.models.cosmos2_5.rope`), and AdaLN-LoRA modulation where each
   block's three sublayers (self-attn/cross-attn/MLP) get their own small
   modulation MLP plus a shared global correction term, rather than Wan's
   single 6-way-split-per-block vector. Supports both of Wan's parallelism
@@ -321,7 +352,7 @@ from a full quality judgment, which still needs the native resolution.
   initial noise and after every UniPC step — matching Wan2.2 TI2V-5B's i2v
   precedent, with the one documented simplification described at the top of
   this doc and in the script's module docstring.
-- **Text encoder (`vidax.models.cosmos.common.reason1`):** Reason1 is a
+- **Text encoder (`vidax.models.cosmos2_5.reason1`):** Reason1 is a
   Reason1-finetuned Qwen2.5-VL-7B-Instruct; only its text-only decoder tower
   is ported (the vision encoder is never invoked for text prompts — image2world/
   video2world's conditioning frames go through the *VAE* encoder, not
@@ -368,8 +399,6 @@ from a full quality judgment, which still needs the native resolution.
   margin, the largest correctness bug found in this model's port.
 
 ## Coming later
-
-- **Cosmos-Predict2.5 non-2B variants**, if released.
 
 **Cosmos 3** is a separate, architecturally unrelated model family (a
 Mixture-of-Transformers, not a DiT continuation of Cosmos-Predict2.5) — see

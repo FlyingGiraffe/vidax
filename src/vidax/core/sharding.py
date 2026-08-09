@@ -31,7 +31,7 @@ DEFAULT_JAX_CACHE_DIR = os.path.expanduser("~/.cache/vidax/jax")
 # Dense-layer names (the parent key one level above "kernel"/"bias" in a
 # flax param tree) that are column-parallel (shard the output/last axis) vs.
 # row-parallel (shard the input/first axis). Covers WanDiT's, T5Encoder's,
-# CosmosDiT's, and Reason1's (`vidax.models.cosmos.common.reason1`)
+# CosmosDiT's, and Reason1's (`vidax.models.cosmos2_5.reason1`)
 # naming conventions. Cosmos's per-head QK-RMSNorm (`self_attn_q_norm`/
 # `_k_norm`, shape `(head_dim,)`, shared identically across every head)
 # needs no entry here at all: unlike Wan's QK-RMSNorm (over the *full*,

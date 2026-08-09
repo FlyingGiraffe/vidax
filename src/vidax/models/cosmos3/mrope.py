@@ -4,7 +4,7 @@ position-id builders `get_3d_mrope_ids_text_tokens`/`get_3d_mrope_ids_vae_tokens
 in refs/diffusers-cosmos3/pipeline_cosmos3_omni.py:60-127).
 
 Differs from both Wan's 3D RoPE (`vidax.core.rope3d`) and Cosmos-Predict2.5's
-3D RoPE (`vidax.models.cosmos.common.rope`) in how the three (T, H, W) axes'
+3D RoPE (`vidax.models.cosmos2_5.rope`) in how the three (T, H, W) axes'
 frequency tables are combined into one `head_dim`-wide table:
 
   - Wan/Cosmos2.5: *block* layout -- the first `dim_t` channels use T's

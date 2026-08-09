@@ -18,7 +18,7 @@ def chunk_by_rank(x: jnp.ndarray, axis: int, sp_size: int, rank: jnp.ndarray) ->
     Model-family-agnostic: shared by every sequence-parallel DiT in this
     repo (Wan2.1/2.2 via `vidax.models.wan.common.dit_layers`, which
     re-exports this rather than defining its own copy; Cosmos-Predict2.5 via
-    `vidax.models.cosmos.cosmos2_5.dit`) for chunking the token sequence
+    `vidax.models.cosmos2_5.dit`) for chunking the token sequence
     (and, where it also varies per token/frame, the timestep-modulation
     state) before the block loop.
     """

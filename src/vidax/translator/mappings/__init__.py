@@ -59,9 +59,25 @@ def _load_pt_state_dict(checkpoint_path: str) -> Dict:
     elif ext == ".safetensors":
         return safetensors.numpy.load_file(checkpoint_path)
     elif ext in (".pth", ".pt", ".bin"):
+        import io
         import torch  # Optional dependency; install the `torch` extra.
-        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        return {k: v.detach().cpu() for k, v in state_dict.items()}
+        # Cosmos-Predict2.5 checkpoints stash TransformerEngine bookkeeping
+        # blobs in `*._extra_state` as raw `io.BytesIO` objects (skipped
+        # entirely by `cosmos2_5.map_cosmos2_5_dit_keys` -- see its module
+        # docstring) -- `weights_only=True`'s unpickler rejects that type by
+        # default. Allow-listing it is safe (it holds opaque bytes, not
+        # executable state) without falling back to `weights_only=False`
+        # (unrestricted unpickling) for the whole checkpoint.
+        with torch.serialization.safe_globals([io.BytesIO]):
+            state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        # `io.BytesIO`'s own `.detach()` (inherited from `IOBase`, meant for
+        # layered streams) raises `UnsupportedOperation` if called -- an
+        # unrelated method that happens to share the tensor API's name, not
+        # a tensor-like `.detach()`. Only real tensors need detaching.
+        return {
+            k: v.detach().cpu() if isinstance(v, torch.Tensor) else v
+            for k, v in state_dict.items()
+        }
     else:
         raise ValueError(f"Unrecognized checkpoint extension: '{ext}' ({checkpoint_path})")
 
@@ -100,7 +116,7 @@ def load_torch_checkpoint_to_jax(checkpoint_path: str, model_type: str = "wan2.1
     elif model_type == "reason1_text_encoder":
         # Cosmos-Predict2.5-2B's text encoder (Reason1-finetuned
         # Qwen2.5-VL-7B-Instruct, text tower only -- see
-        # vidax.models.cosmos.common.reason1). Ships as its own separate
+        # vidax.models.cosmos2_5.reason1). Ships as its own separate
         # HuggingFace-format repo (nvidia/Cosmos-Reason1-7B), sharded
         # `model-NNNNN-of-NNNNN.safetensors` + a `model.safetensors.index.json`
         # manifest -- pass the `.json` manifest's path as `checkpoint_path`

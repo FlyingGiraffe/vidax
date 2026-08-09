@@ -1,11 +1,19 @@
-"""Cosmos-Predict2.5 2B Diffusion Transformer backbone (Flax/JAX).
+"""Cosmos-Predict2.5 Diffusion Transformer backbone (Flax/JAX).
 
 A structural port of the reference PyTorch `MinimalV1LVGDiT`
 (cosmos-predict2.5-main/cosmos_predict2/_src/predict2/networks/
-minimal_v1_lvg_dit.py, subclassing `MiniTrainDIT` in minimal_v4_dit.py),
-configured for the released 2B base checkpoint
-(`checkpoints/Cosmos-Predict2.5-2B/base/pre-trained/.../model_ema_bf16.pt`).
-Weights load via `vidax.translator.mappings.cosmos2_5`.
+minimal_v1_lvg_dit.py, subclassing `MiniTrainDIT` in minimal_v4_dit.py).
+Architecture-only and config-driven, the same way
+`vidax.models.wan.wan2_1`/`wan2_2`'s `WanDiT` are: this module's dataclass
+defaults match the released 2B base checkpoint
+(`checkpoints/Cosmos-Predict2.5-2B/base/pre-trained/.../model_ema_bf16.pt`);
+`configs.py`'s `BASE_14B_CONFIG` overrides `dim`/`ffn_dim`/`num_heads`/
+`num_layers` for the released 14B checkpoint
+(`checkpoints/Cosmos-Predict2.5-14B/base/pre-trained/..._ema_bf16.pt`) --
+every other hyperparameter (RoPE ratios, `adaln_lora_dim`, `context_dim`,
+`timestep_scale`, ...) is identical between the two sizes. Weights load via
+`vidax.translator.mappings.cosmos2_5` regardless of size (the state_dict key
+structure doesn't depend on model width/depth).
 
 Architecture, at a glance (see this repo's `docs/models/cosmos.md` for the
 full writeup, and `docs/hardware_and_sharding.md`'s Cosmos section for the
@@ -25,7 +33,7 @@ debugging history of getting this port producing correct output):
     a video-conditioning mask (1 = "this latent frame is given, not
     denoised" -- all 0s for pure text2video; see `__call__`'s docstring for
     how image2world/video2world conditioning would set this).
-  - 3D axial RoPE (`vidax.models.cosmos.common.rope`) on self-attention
+  - 3D axial RoPE (`vidax.models.cosmos2_5.rope`) on self-attention
     only; cross-attention has none.
   - AdaLN-LoRA modulation: unlike Wan's single 6-way-split-per-block
     modulation vector, each of a block's three sublayers (self-attn,
@@ -53,8 +61,8 @@ from jax.sharding import Mesh
 
 from vidax.core.rope3d import sinusoidal_embedding_1d
 from vidax.core.attention import RMSNorm, chunk_by_rank
-from vidax.models.cosmos.common.dit_layers import cosmos_attend
-from vidax.models.cosmos.common.rope import create_cosmos_rope3d_freqs
+from vidax.models.cosmos2_5.dit_layers import cosmos_attend
+from vidax.models.cosmos2_5.rope import create_cosmos_rope3d_freqs
 
 
 def _adaln_lora_modulation(
@@ -192,7 +200,9 @@ class CosmosFinalLayer(nn.Module):
 
 
 class CosmosDiT(nn.Module):
-    """Cosmos-Predict2.5 2B DiT. Defaults match the released base checkpoint.
+    """Cosmos-Predict2.5 DiT. Dataclass defaults match the released 2B base
+    checkpoint; pass `**configs.BASE_14B_CONFIG` for the 14B checkpoint (see
+    `configs.py` for exactly which fields differ).
 
     Two parallelism strategies, both ported directly from Wan's DiTs (see
     `vidax.models.wan.wan2_1.dit`/`wan2_2.dit`'s module docstrings for the
@@ -206,8 +216,10 @@ class CosmosDiT(nn.Module):
       holds the *full* token sequence but only its own slice of heads/
       channels. `cosmos_attend` already threads `mesh` through to
       `dot_product_attention`, so this needs no other change here. At 2B
-      params this mainly matters for very high resolution/frame-count runs;
-      the 2B model fits comfortably on a single chip otherwise.
+      params this mainly matters for very high resolution/frame-count runs
+      (the 2B model fits comfortably on a single chip otherwise); at 14B it
+      matters for fitting the weights themselves, the same tradeoff Wan's
+      14B-class DiTs document.
     - `sequence_parallel=True` (DeepSpeed-Ulysses): shards the *token
       sequence itself* between blocks instead, reshuffling to a
       head-sharded full-sequence view only for the duration of

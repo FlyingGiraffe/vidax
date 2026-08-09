@@ -22,7 +22,7 @@ from vidax.core.attention import (
 from vidax.core.rope3d import apply_rope3d
 
 # Re-exported for backward compatibility -- every caller in this repo
-# imports `chunk_by_rank` from here (or from `vidax.models.cosmos.cosmos2_5
+# imports `chunk_by_rank` from here (or from `vidax.models.cosmos2_5
 # .dit`, which imports the same underlying function directly from
 # `vidax.core.attention`, its natural model-family-agnostic home).
 __all__ = ["chunk_by_rank", "attend", "WanHead"]

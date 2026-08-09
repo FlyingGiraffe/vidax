@@ -1,5 +1,5 @@
 # End-to-end text2world / image2world / video2world inference script for
-# Cosmos-Predict2.5-2B on TPU.
+# Cosmos-Predict2.5 (2B or 14B, via --model_size) on TPU.
 #
 # One checkpoint, three tasks, selected by what conditioning you pass:
 # nothing (text2world, i.e. plain t2v), --image_path (image2world, a single
@@ -11,7 +11,7 @@
 # tells the DiT which frames are conditioning via a concatenated mask
 # channel *and* a nonzero-but-tiny per-frame timestep for those frames
 # (`CosmosDiT`'s `condition_video_mask` + per-frame `timesteps`), not just
-# frame substitution alone. See `vidax.models.cosmos.cosmos2_5.dit`'s module
+# frame substitution alone. See `vidax.models.cosmos2_5.dit`'s module
 # docstring and `docs/models/cosmos.md`'s "Architecture notes" section.
 #
 # Known simplification vs. the reference: the reference's `denoise()` also
@@ -44,10 +44,11 @@ from vidax.core.sharding import (
     build_tpu_mesh, get_batch_sharding, get_replicated_sharding, shard_wan_params,
     to_partition_specs, configure_jax_cache,
 )
-from vidax.models.cosmos.common.reason1 import (
+from vidax.models.cosmos2_5.reason1 import (
     NUM_EMBEDDING_PADDING_TOKENS, Qwen2TextModel, Reason1Tokenizer, compute_reason1_embeddings,
 )
-from vidax.models.cosmos.cosmos2_5.dit import CosmosDiT
+from vidax.models.cosmos2_5.configs import BASE_2B_CONFIG, BASE_14B_CONFIG
+from vidax.models.cosmos2_5.dit import CosmosDiT
 from vidax.models.wan.wan2_1.vae import Decoder3d, WanVAEDecoder, WanVAEEncoder, _count_causal_convs
 from vidax.schedulers.unipc import FlowUniPCMultistepScheduler
 from vidax.translator.mappings import load_torch_checkpoint_to_jax
@@ -55,6 +56,7 @@ from vidax.translator.mappings import load_torch_checkpoint_to_jax
 logging.basicConfig(level=logging.INFO)
 
 DTYPES = {"float32": jnp.float32, "float16": jnp.float16, "bfloat16": jnp.bfloat16}
+MODEL_SIZE_CONFIGS = {"2B": BASE_2B_CONFIG, "14B": BASE_14B_CONFIG}
 
 # See `vidax.schedulers.unipc`'s / the reference's `sigma_conditional`: the
 # tiny (not exactly zero) noise level conditioning frames are told they're
@@ -202,8 +204,12 @@ def main(args):
     # parallelism is off (size 1) by default: at the 2B model's typical
     # resolutions Megatron TP already fits fine on its own; it's there for
     # pushing to much higher resolution/frame counts, the same tradeoff
-    # Wan2.1's t2v script documents.
-    dit_model = CosmosDiT(mesh=mesh, sequence_parallel=sequence_parallel)
+    # Wan2.1's t2v script documents. --model_size selects which of the two
+    # released architectures to build (see `configs.py`); it must match
+    # --dit_checkpoint_path's actual size, same convention as Wan2.1/Wan2.2's
+    # own --model_size flags.
+    dit_model = CosmosDiT(
+        mesh=mesh, sequence_parallel=sequence_parallel, **MODEL_SIZE_CONFIGS[args.model_size])
     vae_decoder = WanVAEDecoder()
     vae_encoder = WanVAEEncoder() if has_conditioning else None
     reason1_model = Qwen2TextModel()
@@ -511,10 +517,11 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="End-to-end text2world / image2world / video2world generation with Cosmos-Predict2.5-2B on TPU.")
-    parser.add_argument("--dit_checkpoint_path", type=str, required=True, help="Path to the DiT .pt checkpoint (e.g. checkpoints/Cosmos-Predict2.5-2B/base/pre-trained/.../model_ema_bf16.pt).")
-    parser.add_argument("--vae_checkpoint_path", type=str, required=True, help="Path to the (Wan2.1) VAE .pth checkpoint (checkpoints/Cosmos-Predict2.5-2B/tokenizer.pth).")
-    parser.add_argument("--reason1_checkpoint_path", type=str, required=True, help="Path to the Reason1 (Qwen2.5-VL-7B text tower) checkpoint's model.safetensors.index.json -- a separate download from Cosmos-Predict2.5-2B itself, from the nvidia/Cosmos-Reason1-7B repo.")
+    parser = argparse.ArgumentParser(description="End-to-end text2world / image2world / video2world generation with Cosmos-Predict2.5 (2B or 14B) on TPU.")
+    parser.add_argument("--model_size", type=str, default="2B", choices=list(MODEL_SIZE_CONFIGS.keys()), help="Which released Cosmos-Predict2.5 config to build (must match --dit_checkpoint_path's actual size). Both sizes share one architecture and only differ in dim/ffn_dim/num_heads/num_layers -- see vidax.models.cosmos2_5.configs.")
+    parser.add_argument("--dit_checkpoint_path", type=str, required=True, help="Path to the DiT .pt checkpoint (e.g. checkpoints/Cosmos-Predict2.5-2B/base/pre-trained/.../model_ema_bf16.pt or checkpoints/Cosmos-Predict2.5-14B/base/pre-trained/..._ema_bf16.pt -- must match --model_size).")
+    parser.add_argument("--vae_checkpoint_path", type=str, required=True, help="Path to the (Wan2.1) VAE .pth checkpoint (checkpoints/Cosmos-Predict2.5-2B/tokenizer.pth -- shared by both sizes; the 14B release doesn't ship its own).")
+    parser.add_argument("--reason1_checkpoint_path", type=str, required=True, help="Path to the Reason1 (Qwen2.5-VL-7B text tower) checkpoint's model.safetensors.index.json -- a separate download from Cosmos-Predict2.5 itself (shared by both sizes), from the nvidia/Cosmos-Reason1-7B repo.")
     parser.add_argument("--tokenizer_path", type=str, default=None, help="HuggingFace tokenizer id/path for Reason1. Defaults to the directory of --reason1_checkpoint_path (the released repo bundles the tokenizer files alongside the model shards).")
     parser.add_argument("--image_path", type=str, default=None, help="Path to a conditioning image, for image2world generation (a single conditioning latent frame). Mutually exclusive with --video_path. When given, output resolution is derived from the image's aspect ratio + --max_area instead of --height/--width (which are then ignored).")
     parser.add_argument("--video_path", type=str, default=None, help="Path to a conditioning video, for video2world generation (its first --num_conditional_latent_frames-implied pixel frames are used). Mutually exclusive with --image_path. Same resolution-derivation behavior as --image_path.")
@@ -523,7 +530,7 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, required=True, nargs="+", help="One text prompt (broadcast to every data-parallel replica) or exactly `num_devices // tensor_parallel_size` prompts, one per replica.")
     parser.add_argument("--negative_prompt", type=str, default=DEFAULT_NEGATIVE_PROMPT, help="Negative prompt for classifier-free guidance.")
     parser.add_argument("--guide_scale", type=float, default=7.0, help="Classifier-free guidance scale: velocity = uncond + guide_scale * (cond - uncond). Matches the reference's default of 7.")
-    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to Megatron-shard the DiT's attention heads / FFN channels (weights) across. Also always used for Reason1's own (Megatron-only) weight sharding, independent of --sequence_parallel_size. Must divide num_devices, CosmosDiT.num_heads (16), and Qwen2TextModel.num_key_value_heads (4, the binding GQA constraint -- so tp in {1,2,4} if Reason1 is being sharded meaningfully, though the DiT alone would tolerate {1,2,4,8,16}). Composes independently with --sequence_parallel_size (their product is the DiT's real head-divisibility constraint).")
+    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to Megatron-shard the DiT's attention heads / FFN channels (weights) across. Also always used for Reason1's own (Megatron-only) weight sharding, independent of --sequence_parallel_size. Must divide num_devices, CosmosDiT.num_heads (16 for 2B, 40 for 14B -- see --model_size), and Qwen2TextModel.num_key_value_heads (4, the binding GQA constraint -- so tp in {1,2,4} if Reason1 is being sharded meaningfully). Composes independently with --sequence_parallel_size (their product is the DiT's real head-divisibility constraint).")
     parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. 1 (off) by default since Megatron TP already fits the 2B model fine at typical resolutions; useful for pushing to much higher resolution/frame counts, where self-attention activation memory (not weight memory) becomes the bottleneck. Also requires the latent frame count (`1 + (num_frames - 1) // 4`) to be evenly divisible by this value.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the DiT, VAE, and Reason1 encoder.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")

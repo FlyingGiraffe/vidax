@@ -58,7 +58,7 @@ def main():
             skipped.append((script, extra_args))
             continue
         cmd = [sys.executable, os.path.join(BENCHMARKS_DIR, script), *extra_args,
-               "--checkpoint_dir", checkpoint_dir]
+               "--checkpoint_dir", checkpoint_dir, "--num_runs", str(args.num_runs)]
         print(f"RUN {' '.join(cmd)}")
         result = subprocess.run(cmd)
         if result.returncode != 0:

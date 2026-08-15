@@ -46,8 +46,8 @@ I2V, Wan2.2's A14B).
 | --- | --- | --- | --- | --- | --- | --- |
 | Cosmos3 | Nano (16B) | T2V/I2V | ✅ | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos3-Nano) |
 | Cosmos3 | Edge (4B) | T2V/I2V | ✅ | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos3-Edge) |
-| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | ✅ | ✅/❌/❌ | [cosmos.md](docs/models/cosmos.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-14B) |
-| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅ | ✅/❌/❌ | [cosmos.md](docs/models/cosmos.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B) |
+| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | ✅ | ✅/❌/❌ | [cosmos2_5.md](docs/models/cosmos2_5.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-14B) |
+| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅ | ✅/❌/❌ | [cosmos2_5.md](docs/models/cosmos2_5.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B) |
 | Wan2.2 | A14B | T2V | ✅ | ❌/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B) |
 | Wan2.2 | A14B | I2V | ✅ | ❌/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) |
 | Wan2.2 | 5B | T2V/I2V | ✅ | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) |

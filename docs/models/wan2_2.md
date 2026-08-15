@@ -286,7 +286,7 @@ T2V-A14B above — not yet run at full resolution.
 ---
 
 See [`docs/models/wan2_1.md`](wan2_1.md) for Wan2.1 (1.3B/14B T2V, 14B I2V),
-[`docs/models/cosmos.md`](cosmos.md) for Cosmos-Predict2.5, and
+[`docs/models/cosmos2_5.md`](cosmos2_5.md) for Cosmos-Predict2.5, and
 [`docs/models/cosmos3.md`](cosmos3.md) for Cosmos 3.
 
 See the [Model Support table in the root README](../../README.md#-model-support)

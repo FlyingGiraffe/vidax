@@ -90,7 +90,8 @@ def main():
     size = args.model_size.lower() if args.task == "t2v" else "14b"
     main_fn = generate_wan2_1_t2v.main if args.task == "t2v" else generate_wan2_1_i2v.main
     common.run_benchmark(
-        model="wan", version="2.1", size=size, task=args.task, main_fn=main_fn, args=run_args)
+        model="wan", version="2.1", size=size, task=args.task, main_fn=main_fn, args=run_args,
+        num_runs=args.num_runs)
 
 
 if __name__ == "__main__":

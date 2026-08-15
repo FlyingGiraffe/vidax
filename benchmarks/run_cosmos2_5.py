@@ -68,7 +68,7 @@ def build_args(args: argparse.Namespace) -> argparse.Namespace:
         width=1280,
         num_frames=num_frames,
         fps=16,
-        output_path=common.output_path("cosmos", "predict2.5", args.model_size.lower(), args.task),
+        output_path=common.output_path("cosmos", "2.5", args.model_size.lower(), args.task),
     )
 
     if args.task == "i2v":
@@ -90,8 +90,8 @@ def main():
 
     run_args = build_args(args)
     common.run_benchmark(
-        model="cosmos", version="predict2.5", size=args.model_size.lower(), task=args.task,
-        main_fn=generate_cosmos2_5.main, args=run_args)
+        model="cosmos", version="2.5", size=args.model_size.lower(), task=args.task,
+        main_fn=generate_cosmos2_5.main, args=run_args, num_runs=args.num_runs)
 
 
 if __name__ == "__main__":

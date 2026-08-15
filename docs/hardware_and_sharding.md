@@ -571,7 +571,7 @@ achieved even at the model's native 704x1280 resolution and the reference's
 own 35-step/`guide_scale=7` defaults in the runs done so far; whether that
 needs further investigation (a remaining smaller bug), more steps, or is
 simply a real limitation of testing with `bfloat16` weights and a handful of
-frames is not yet resolved — see [`docs/models/cosmos.md`](models/cosmos.md)'s
+frames is not yet resolved — see [`docs/models/cosmos2_5.md`](models/cosmos2_5.md)'s
 status section for the current, honest state.
 
 ### A note on diagnostic method

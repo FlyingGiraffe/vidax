@@ -70,11 +70,16 @@ python examples/generate_cosmos3.py \
   --vae_checkpoint_path "./checkpoints/Cosmos3-Nano/vae/diffusion_pytorch_model.safetensors" \
   --tokenizer_path "./checkpoints/Cosmos3-Nano/text_tokenizer" \
   --prompt "A majestic red panda climbing a bamboo tree in the snow, 4k" \
-  --max_text_len 256 \
+  --max_text_len 3072 \
   --tensor_parallel_size 4 \
   --num_steps 35 \
   --output_path "out/output_cosmos3_nano_t2v.mp4"
 ```
+
+A short plain-text `--prompt` like the one above works for Nano, but see
+[Prompting](#prompting) below — the checkpoints are documented to expect
+richer, JSON-structured prompts, and Edge in particular needs this for good
+output quality.
 
 ### Image2Video
 
@@ -86,11 +91,17 @@ python examples/generate_cosmos3.py \
   --tokenizer_path "./checkpoints/Cosmos3-Nano/text_tokenizer" \
   --image_path "./examples/assets/cat.jpg" \
   --prompt "A cat wearing sunglasses on a boat in the ocean, waves splashing" \
-  --max_text_len 256 \
+  --negative_prompt "Low quality, blurry, oversaturated, static, distorted." \
+  --max_text_len 128 \
   --tensor_parallel_size 4 \
   --num_steps 35 \
   --output_path "out/output_cosmos3_nano_i2v.mp4"
 ```
+
+A short `--prompt` here needs a comparably short `--negative_prompt` too — see
+[Prompting](#prompting) for why (this port's default negative prompt is a
+much longer, JSON-structured one, meant to pair with an equally detailed
+positive prompt).
 
 `--image_path` anchors latent frame 0 to the VAE-encoded conditioning image
 (resized to `--height`/`--width`, center-cropped is *not* applied — resize
@@ -112,6 +123,14 @@ helps at higher resolution/step counts. Uses its own tokenizer under
 151936 — pass `--model_size edge`'s matching `--tokenizer_path`, don't mix
 checkpoints across sizes).
 
+**Resolution/frame count/scheduler are not interchangeable with Nano's, and
+T2V and I2V use *different* scheduler values from each other** — always
+pass Edge's explicit `--height`/`--width`/`--num_frames`/`--num_steps`/
+`--use_karras_sigmas`/`--shift` as shown below rather than reusing Nano's
+defaults or mixing T2V's/I2V's values. See [Status](#status) for how these
+values were determined and what happens if you don't (it doesn't error —
+it just looks badly wrong).
+
 ### Text2Video
 
 ```bash
@@ -121,11 +140,16 @@ python examples/generate_cosmos3.py \
   --vae_checkpoint_path "./checkpoints/Cosmos3-Edge/vae/diffusion_pytorch_model.safetensors" \
   --tokenizer_path "./checkpoints/Cosmos3-Edge/text_tokenizer" \
   --prompt "A majestic red panda climbing a bamboo tree in the snow, 4k" \
-  --max_text_len 256 \
+  --max_text_len 3072 \
   --tensor_parallel_size 4 \
-  --num_steps 35 \
+  --height 480 --width 832 --num_frames 121 \
+  --num_steps 35 --use_karras_sigmas false --shift 10.0 \
+  --add_duration_template false --add_resolution_template false \
   --output_path "out/output_cosmos3_edge_t2v.mp4"
 ```
+
+For Edge especially, quality depends heavily on prompt richness — see
+[Prompting](#prompting).
 
 ### Image2Video
 
@@ -137,9 +161,12 @@ python examples/generate_cosmos3.py \
   --tokenizer_path "./checkpoints/Cosmos3-Edge/text_tokenizer" \
   --image_path "./checkpoints/Cosmos3-Edge/assets/example_i2v_input.jpg" \
   --prompt "A car driving along a coastal mountain road" \
-  --max_text_len 256 \
+  --negative_prompt "Low quality, blurry, oversaturated, static, distorted." \
+  --max_text_len 128 \
   --tensor_parallel_size 4 \
-  --num_steps 35 \
+  --height 480 --width 832 --num_frames 121 \
+  --num_steps 20 --use_karras_sigmas false --shift 12.0 \
+  --add_duration_template false --add_resolution_template false \
   --output_path "out/output_cosmos3_edge_i2v.mp4"
 ```
 
@@ -151,7 +178,7 @@ python examples/generate_cosmos3.py \
   --dit_checkpoint_path ... --vae_checkpoint_path ... --tokenizer_path ... \
   --prompt "..." \
   --tensor_parallel_size 4 \
-  --height 256 --width 256 --num_frames 9 --num_steps 10 --max_text_len 256 \
+  --height 256 --width 256 --num_frames 9 --num_steps 10 --max_text_len 3072 \
   --output_path out/quick_test.mp4
 ```
 
@@ -159,13 +186,18 @@ Same rationale as Cosmos-Predict2.5's quick-testing section: full-resolution
 (704x1280), full-step (35) runs are slow to iterate with. This config still
 exercises the full pipeline (tokenization, packed-sequence assembly, mRoPE,
 the dual-pathway DiT, Karras-sigma UniPC sampling, VAE decode) end to end —
-this exact command (with `--model_size` swapped) is what verified both
-sizes (see [Status](#status)).
+**for Nano.** This exact quick-test config is *not* valid for Edge: swapping
+only `--model_size` (keeping 256x256/9 frames, Karras sigmas) reliably
+produces degraded, incoherent Edge output — a real trap, since it doesn't
+error, it just looks badly wrong. For a genuine Edge T2V smoke test, use its
+real recipe's scheduler (`--use_karras_sigmas false --shift 10.0`) even at
+a reduced frame count for faster iteration, e.g.
+`--height 480 --width 832 --num_frames 50 --num_steps 35`.
 
-Note `--max_text_len` needs to comfortably fit the *negative* prompt too —
-`vidax`'s own default negative prompt tokenizes to ~180 tokens; pass a
-shorter `--negative_prompt` or raise `--max_text_len` if you hit the
-tokenized-length assertion.
+`--max_text_len` needs to comfortably fit the *negative* prompt too — the
+default negative prompt (see [Prompting](#prompting)) tokenizes to ~2800
+tokens, hence the `3072` default; pass a shorter `--negative_prompt` or
+raise `--max_text_len` further if you hit the tokenized-length assertion.
 
 ### CLI reference
 
@@ -176,53 +208,118 @@ tokenized-length assertion.
 | `--vae_checkpoint_path` | *required* | `vae/diffusion_pytorch_model.safetensors` — Wan2.2-TI2V-5B's VAE, but in `diffusers`' `AutoencoderKLWan` checkpoint *layout* (different key names than the original Wan repo release, same architecture — loaded via `model_type="wan2.2_vae_diffusers"`, a separate mapper from Wan2.2's own `"wan2.2_vae"`). Identical for both Nano and Edge. See [Architecture notes](#architecture-notes). |
 | `--tokenizer_path` | *required* | The checkpoint's own `text_tokenizer/` directory (Qwen2TokenizerFast + chat template) — Nano and Edge ship different tokenizers, don't mix them. |
 | `--image_path` | `None` | Conditioning image for image2video. Resized (not cropped) to `--height`/`--width`. |
-| `--prompt` | *required* | Text prompt. |
-| `--negative_prompt` | vidax's own quality-negative-prompt | CFG negative prompt — see the "Quick testing" note above about `--max_text_len`. |
-| `--max_text_len` | `128` | Fixed padded text-token length. JAX needs a static shape; the reference uses each prompt's exact tokenized length instead — this port pads to a fixed length with an explicit validity mask so `gen`'s cross-attention correctly excludes padding positions (see [Architecture notes](#architecture-notes)). |
+| `--prompt` | *required* | Text prompt — see [Prompting](#prompting) for format recommendations. |
+| `--negative_prompt` | a real, JSON-structured negative prompt (see [Prompting](#prompting)) | CFG negative prompt. |
+| `--add_duration_template` / `--add_resolution_template` | `true` | Whether to append the reference's duration/FPS and resolution metadata sentences to the prompt. Every real usage example in `refs/cosmos-main` passes `false` for both — see [Prompting](#prompting). |
+| `--max_text_len` | `3072` | Fixed padded text-token length. JAX needs a static shape; the reference uses each prompt's exact tokenized length instead — this port pads to a fixed length with an explicit validity mask so `gen`'s cross-attention correctly excludes padding positions (see [Architecture notes](#architecture-notes)). |
 | `--guide_scale` | `6.0` | CFG scale. Matches the reference pipeline's default. |
 | `--tensor_parallel_size` | `1` | Devices to Megatron-shard the DiT's attention heads/FFN channels across. Must divide `num_devices`, `num_attention_heads`, and `num_key_value_heads` (32/8 for Nano, 16/8 for Edge — GQA's KV-head count is the binding constraint, so `tp` in `{1,2,4,8}` in practice for either). Effectively required (not just a memory-saving option) for Nano at its size; optional but still useful for Edge. |
 | `--dtype` | `bfloat16` | `float32` \| `float16` \| `bfloat16`. `float16` will fail at runtime — TPU's XLA backend doesn't implement `float16` matmuls. |
 | `--seed` | `0` | Initial noise seed. |
-| `--num_steps` | `35` | UniPC sampling steps. |
-| `--karras_sigma_min` / `--karras_sigma_max` | `0.147` / `200.0` | Karras noise-schedule bounds — matches both checkpoints' `scheduler/scheduler_config.json` `sigma_min`/`sigma_max` (a genuinely different curve from Cosmos-Predict2.5's linear/`shift`-warped one, see [Architecture notes](#architecture-notes)). |
-| `--height` | `704` | Output video height. Must be divisible by 32 (VAE's 16x spatial compression × the DiT's `latent_patch_size=2`). |
-| `--width` | `1280` | Output video width. Same divisibility rule as `--height`. |
-| `--num_frames` | `93` | Output frame count. |
+| `--num_steps` | `35` | UniPC sampling steps. Nano default; also Edge T2V's real value (unchanged from Nano) — Edge I2V's real recipe uses `20`. |
+| `--use_karras_sigmas` | `true` | Nano's schedule (its `scheduler_config.json` default). Edge's real recipe (T2V and I2V alike) instead uses a plain shift-warped (non-Karras) schedule — pass `--use_karras_sigmas false` for Edge, with `--shift` set per task (see below). |
+| `--shift` | `5.0` | Shift-warp factor for the non-Karras schedule; only read when `--use_karras_sigmas false`. Edge's real value is `10.0` for **T2V** (same as Nano's) but `12.0` for **I2V** — don't reuse one task's value for the other, see [Cosmos3-Edge](#cosmos3-edge-4b--model_size-edge). |
+| `--karras_sigma_min` / `--karras_sigma_max` | `0.147` / `200.0` | Karras noise-schedule bounds, only read when `--use_karras_sigmas true` — matches Nano's `scheduler/scheduler_config.json` `sigma_min`/`sigma_max` (a genuinely different curve from Cosmos-Predict2.5's linear/`shift`-warped one, see [Architecture notes](#architecture-notes)). |
+| `--height` | `704` | Output video height. Must be divisible by 32 (VAE's 16x spatial compression × the DiT's `latent_patch_size=2`). This default targets **Nano's** documented spec — Edge needs an explicit override (e.g. `480`, see [Cosmos3-Edge](#cosmos3-edge-4b--model_size-edge)'s note above). |
+| `--width` | `1280` | Output video width. Same divisibility rule as `--height`. Nano default — override for Edge (e.g. `832`). |
+| `--num_frames` | `93` | Output frame count. Nano default — Edge's real recipe uses `121`. |
 | `--fps` | `24.0` | Output video frame rate, also injected into the mRoPE temporal modulation and the prompt's duration-metadata sentence. |
 | `--output_path` | `output_cosmos3.mp4` | Output video path. |
 
 ### Status
 
-**Verified end-to-end on real weights for both Nano and Edge, text2video and
-image2video, all four producing coherent, prompt-matching output** at
-256x256, 9 frames, 10 steps (see [Quick testing](#quick-testing)). Nano was
-the first port attempted; the two dominant lessons from Cosmos-Predict2.5's
-port (verify architecture pieces in isolation *before* touching real
-weights; the sampler/preconditioning boundary is the highest-leverage place
-a diffusion port silently breaks) were applied proactively there, and Nano
-ran correctly on the first successful full attempt:
+**Both sizes verified: clean, stable, high-quality output** — Nano at its
+full resolution (1280x704, 93 frames, 35 steps), Edge at its real per-task
+recipe (480x832, 121 frames, non-Karras; T2V: 35 steps/`shift=10.0`, I2V:
+20 steps/`shift=12.0`), **with a properly JSON-structured prompt** (see
+[Prompting](#prompting) — this matters far more for Edge than for Nano).
 
-- The interleaved 3D mRoPE (`vidax.models.cosmos3.mrope`) was unit-tested
-  for its relative-position invariant (`q_i . k_j` depends only on `i - j`,
-  checked with fixed content vectors at varying positions) *before* any
-  real-weight run.
-- Weight loading was verified with an exact key-set + shape match against
-  both the DiT's and the VAE's own initialized parameter trees (not just
-  "did it load without an exception") before the first forward pass — for
-  both Nano's and Edge's differing weight sets (Edge lacks `norm_q`/`norm_k`
-  and `mlp.gate_proj`, and adds `k_norm_und_for_gen`; both confirmed exactly
-  against each checkpoint's real key list).
-- The sampling loop feeds the DiT's raw output directly to the scheduler as
-  velocity, with no EDM-style preconditioning wrapper.
+Three real, distinct bugs were found and fixed to get here:
 
-Edge was added after Nano by generalizing the same DiT/attention/MLP code
-(see [Architecture notes](#architecture-notes)) rather than writing a
-parallel implementation, and passed its own weight-shape check and a
-real-checkpoint T2V/I2V run on the first attempt.
+1. **Vision-segment mRoPE offset used the padded `--max_text_len` instead of
+   each prompt's real token count.** The reference has no padding at all (a
+   ragged, per-item design), so it never faces this; this port pads text to
+   a fixed length for JAX's static shapes, and using the padded length
+   inflated the relative RoPE gap between vision tokens and the text tokens
+   they cross-attend to by `max_text_len - real_length` — differently
+   between the cond and uncond CFG passes whenever their real lengths
+   differ. Fixed by computing each pass's vision temporal offset from its
+   own real (unpadded) token count (`generate_cosmos3.py`'s
+   `_vision_position_ids_for`). This alone fully resolved Nano; Edge
+   improved substantially but not completely.
+2. **Edge's resolution/frame count and scheduler were both wrong.** This
+   repo's shared `--height`/`--width`/`--num_frames` defaults target Nano's
+   spec (1280x704/93 frames); Edge needs 480x832/121 frames instead (its
+   checkpoint documents a narrower 256p/480p, 50-150 frame range). Separately,
+   `examples/generate_cosmos3.py` hardcoded `use_karras_sigmas=True`
+   unconditionally — correct for Nano, wrong for Edge, whose real recipe uses
+   a non-Karras, shift-warped schedule. Running Edge at Nano's resolution, or
+   with Karras sigmas, doesn't error — it just produces degraded/incoherent
+   output, including a temporal-instability artifact that escalated past a
+   fixed absolute frame position on longer clips (traced to a real directional
+   divergence inside the DiT before the scheduler was identified as the actual
+   cause). Fixed by adding `--use_karras_sigmas`/`--shift` CLI flags (Nano's
+   `use_karras_sigmas=True` default is untouched) and correcting the
+   resolution/frame-count defaults used for Edge in
+   `benchmarks/run_cosmos3.py`. T2V and I2V need *different* `--shift`/
+   `--num_steps` values for Edge (confirmed by cross-checking three
+   independent `refs/cosmos-main` backend notebooks) — don't reuse one
+   task's values for the other.
+3. **Prompt format.** Both models' checkpoints document that "for optimal
+   quality, prompts should be upsampled into a specific JSON structure" —
+   this repo had been using short plain-text prompts throughout. Nano
+   tolerates this reasonably well; Edge does not — the previous fixes
+   resolved Edge's instability and gross incoherence, but output remained
+   flat, oversaturated, and short on detail until switching to a real,
+   JSON-structured prompt/negative-prompt pair, which produced fully
+   photorealistic, detailed output. See [Prompting](#prompting).
 
-Only tested so far at low resolution/frame count/step count (256x256, 9
-frames, 10 steps) for either size — a fuller-resolution, more-steps run to
-confirm quality holds at scale is a natural next step.
+Verification methodology for (1)-(2): full checkpoint-value verification
+(542/542 DiT tensors byte-exact against raw safetensors, VAE byte-identical
+between Nano and Edge), an independent from-scratch PyTorch reimplementation
+of the reference's attention/MLP/norm/RoPE math loaded with Edge's real
+weights (matched our JAX port to floating-point noise), and the mRoPE
+relative-position invariant verified at Edge's actual `rope_theta`. This
+ruled out the architecture port itself well before the scheduler and prompt
+issues were identified — both bugs were in the example script's usage of
+the model, not the model port.
+
+### Prompting
+
+Cosmos3's checkpoints document that prompts should be **"upsampled into a
+specific JSON structure"** for optimal quality (see each checkpoint's own
+`README.md`), not passed as a short plain-text sentence. The JSON structure
+covers subjects, background/setting, lighting, aesthetics, cinematography,
+and a temporal caption — see `examples/assets/cosmos3_t2v_prompt.json` for
+a real example, and NVIDIA's `cosmos-framework` repo for the upsampling
+tool itself (an LLM prompt-expansion step, not something this repo
+implements).
+
+This matters more than it might look: a short prompt like `"A red panda
+climbing a bamboo tree"` still produces recognizable output on Nano (16B),
+but on Edge (4B) the same short prompt produces flat, oversaturated, mostly
+featureless output — swapping in a real JSON-upsampled prompt (same
+scheduler settings, same everything else) produces fully photorealistic,
+detailed output instead. `--prompt` still accepts a plain string (this port
+doesn't require JSON), but for Edge specifically, use a JSON-structured one
+for real work.
+
+`generate_cosmos3.py`'s **default negative prompt** is a real, JSON-structured
+negative prompt (`examples/assets/cosmos3_t2v_negative_prompt.json`, from
+`refs/cosmos-main`), not a short placeholder — pair it with a comparably
+detailed positive prompt. Pairing a short positive prompt with a much
+longer/richer negative prompt is a real trap: the large difference in real
+token count between the cond and uncond passes inflates the vision-segment
+mRoPE offset gap between them (same mechanism as bug (1) in
+[Status](#status), just from a length mismatch between prompts rather than
+padding) and can produce badly corrupted output. Keep positive and negative
+prompts roughly comparable in scale.
+
+`--add_duration_template`/`--add_resolution_template` (both default `true`,
+matching the reference pipeline's own default) append metadata sentences
+like *"This video is of 832x480 resolution."* to the prompt. Every real
+usage example in `refs/cosmos-main` passes `false` for both — do the same
+unless you have a specific reason not to.
 
 ### Scope
 
@@ -357,16 +454,18 @@ need that for T2V/I2V specifically).
   as the generation-start markers. No separate text encoder is invoked —
   token ids feed `embed_tokens` directly inside the shared transformer.
 - **Sampler:** `vidax.schedulers.unipc.FlowUniPCMultistepScheduler`, same
-  core predictor-corrector solver as Cosmos-Predict2.5, but with a new
-  Karras-sigma schedule path added (`use_karras_sigmas=True`) — both
-  checkpoints' actual default (`scheduler/scheduler_config.json`:
-  `use_karras_sigmas: true`, `use_flow_sigmas: true`,
-  `sigma_min: 0.147`, `sigma_max: 200.0`), a genuinely different curve from
-  Cosmos-Predict2.5's linear-sigma/`shift`-warp schedule, not just a
-  different `shift` value. Matches `diffusers`' own
+  core predictor-corrector solver as Cosmos-Predict2.5, with a Karras-sigma
+  schedule path added (`use_karras_sigmas=True`) matching `diffusers`' own
   `UniPCMultistepScheduler._convert_to_karras` (an elucidating-diffusion-
   models power-law ramp) followed by its `sigma / (sigma + 1)` remap into
-  this scheduler's own `alpha = 1 - sigma` convention.
+  this scheduler's own `alpha = 1 - sigma` convention — a genuinely
+  different curve from Cosmos-Predict2.5's linear-sigma/`shift`-warp
+  schedule, not just a different `shift` value. Both checkpoints'
+  bundled `scheduler/scheduler_config.json` defaults to
+  `use_karras_sigmas: true`, `sigma_min: 0.147`, `sigma_max: 200.0` — the
+  real recipe for Nano, but not for Edge (see [Status](#status) and
+  [Cosmos3-Edge](#cosmos3-edge-4b--model_size-edge)'s `--use_karras_sigmas`/
+  `--shift` values).
 
 ## Coming later
 

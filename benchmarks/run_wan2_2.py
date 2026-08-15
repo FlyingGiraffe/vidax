@@ -112,7 +112,8 @@ def main():
         size = "a14b"
 
     common.run_benchmark(
-        model="wan", version="2.2", size=size, task=args.task, main_fn=main_fn, args=run_args)
+        model="wan", version="2.2", size=size, task=args.task, main_fn=main_fn, args=run_args,
+        num_runs=args.num_runs)
 
 
 if __name__ == "__main__":

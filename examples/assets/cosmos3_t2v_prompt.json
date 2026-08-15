@@ -1,0 +1,95 @@
+{
+  "subjects": [
+    {
+      "description": "A majestic red panda with a round face, black button nose, and large white-tufted ears, its thick fur a deep rust-red on the back fading to black on the belly and legs, with a long bushy tail ringed in alternating red and cream bands.",
+      "appearance_details": "White markings frame the eyes and muzzle like a mask. The fur is dense and windswept, with individual guard hairs visible catching the light. Sharp curved claws grip the bamboo firmly.",
+      "relationship": "Sole subject of the scene, climbing through the bamboo",
+      "location": "Center of frame, mid-height on a bamboo stalk",
+      "relative_size": "Medium within frame, filling roughly a third of the vertical extent",
+      "orientation": "Body angled diagonally along the bamboo stalk, head turned toward the camera",
+      "pose": "Climbing, all four limbs gripping the bamboo, tail curled for balance",
+      "action": "Climbing upward along a snow-dusted bamboo tree, pausing briefly to look around",
+      "state_changes": "Shifts its grip and weight fluidly as it ascends, fur ruffling slightly in the breeze",
+      "clothing": "",
+      "expression": "Alert, curious",
+      "gender": "",
+      "age": "Adult",
+      "skin_tone_and_texture": "Thick, dense fur with visible individual strands",
+      "facial_features": "Round face, black nose, dark eyes, white-tufted ears",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 4
+    }
+  ],
+  "background_setting": "A quiet bamboo forest in winter, tall green-and-yellow bamboo stalks rising in every direction, their leaves dusted with fresh snow. A soft blanket of snow covers the ground and settles on the lower leaves. Pale, overcast daylight filters down through the bamboo canopy.",
+  "lighting": {
+    "conditions": "Soft, diffuse overcast daylight typical of a snowy forest",
+    "direction": "Even, ambient light from above with no strong directional shadows",
+    "shadows": "Faint, soft-edged shadows beneath the panda and along the bamboo stalks",
+    "illumination_effect": "Cool, crisp winter atmosphere with gentle natural light"
+  },
+  "aesthetics": {
+    "composition": "The panda is centered along a diagonal bamboo stalk, with layers of bamboo and snow-covered foliage receding into a softly blurred background",
+    "color_scheme": "Cool greens and whites of the bamboo and snow contrasted against the panda's warm red-orange fur",
+    "mood_atmosphere": "Serene, natural, quietly majestic",
+    "patterns": "Vertical bamboo stalks and ringed pattern on the panda's tail"
+  },
+  "cinematography": {
+    "camera_motion": "Slow, steady handheld-style drift following the panda's climb",
+    "framing": "Medium shot keeping the full climbing panda and surrounding bamboo in frame",
+    "camera_angle": "Eye level with the panda",
+    "depth_of_field": "Shallow, background bamboo softly out of focus",
+    "focus": "Sharp focus on the panda's face and forepaws",
+    "lens_focal_length": "85mm equivalent"
+  },
+  "style_medium": "Live-action nature documentary footage, 4k",
+  "artistic_style": "Naturalistic wildlife cinematography",
+  "context": "A nature documentary shot of a red panda in its natural bamboo-forest habitat during winter",
+  "actions": [
+    {
+      "time": "0:00-0:03",
+      "description": "The red panda climbs steadily up the bamboo stalk, gripping with all four paws"
+    },
+    {
+      "time": "0:03-0:06",
+      "description": "It pauses partway up, looking around alertly, tail curling for balance"
+    },
+    {
+      "time": "0:06-0:08",
+      "description": "It resumes climbing higher into the snow-dusted bamboo canopy"
+    }
+  ],
+  "text_and_signage_elements": [],
+  "segments": [
+    {
+      "segment_index": 0,
+      "time_range": "0:00-0:03",
+      "description": "The panda ascends the bamboo stalk in a steady, fluid climbing motion",
+      "key_changes": "Panda moves from lower to mid-frame, snow occasionally dislodged from leaves it brushes past",
+      "camera": "Slow upward drift tracking the climb"
+    },
+    {
+      "segment_index": 1,
+      "time_range": "0:03-0:06",
+      "description": "The panda pauses, alert, scanning its surroundings",
+      "key_changes": "Brief stillness, ears and head turning, tail shifting for balance",
+      "camera": "Holds steady, slight push-in on the face"
+    },
+    {
+      "segment_index": 2,
+      "time_range": "0:06-0:08",
+      "description": "The panda continues climbing upward into denser bamboo",
+      "key_changes": "Panda gradually becomes partially obscured by bamboo leaves as it climbs higher",
+      "camera": "Continues slow upward drift"
+    }
+  ],
+  "transitions": [],
+  "temporal_caption": "The video opens with a majestic red panda gripping a snow-dusted bamboo stalk, climbing steadily upward with fluid, deliberate movements. Around three seconds in, it pauses partway up the stalk, turning its head alertly to look around, its ringed tail curling for balance. From roughly three to six seconds, it holds this watchful pose amid the quiet, snow-covered bamboo forest. In the final two seconds, it resumes its climb, ascending further into the bamboo canopy until it is partially obscured by snow-dusted leaves.",
+  "resolution": {
+    "W": 832,
+    "H": 480
+  },
+  "aspect_ratio": "16,9",
+  "duration": "5s",
+  "fps": 24
+}

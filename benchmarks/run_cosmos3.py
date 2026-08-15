@@ -20,6 +20,21 @@ import common  # noqa: E402
 TASKS = ("t2v", "i2v")
 
 
+
+# Per-checkpoint resolution/frame count/scheduler -- see
+# docs/models/cosmos3.md#status for how each value was determined. Nano uses
+# its reference default (704x1280, 93 frames, Karras sigmas). Edge's T2V
+# recipe is 480x832, 121 frames, and a non-Karras schedule (35 steps,
+# shift=10.0) -- running Edge at Nano's resolution, or with Karras sigmas,
+# is a known way to get degraded/incoherent output with no error.
+RESOLUTION_BY_SIZE = {
+    "nano": dict(height=704, width=1280, num_frames=93, fps=24.0,
+                 num_steps=35, use_karras_sigmas=True, shift=5.0),
+    "edge": dict(height=480, width=832, num_frames=121, fps=24.0,
+                 num_steps=35, use_karras_sigmas=False, shift=10.0),
+}
+
+
 def build_args(args: argparse.Namespace) -> argparse.Namespace:
     checkpoint_dir = common.resolve_checkpoint_dir(args)
     repo_name = "Cosmos3-Nano" if args.model_size == "nano" else "Cosmos3-Edge"
@@ -33,25 +48,33 @@ def build_args(args: argparse.Namespace) -> argparse.Namespace:
         vae_checkpoint_path=os.path.join(repo_dir, "vae", "diffusion_pytorch_model.safetensors"),
         tokenizer_path=os.path.join(repo_dir, "text_tokenizer"),
         image_path=None,
-        prompt=common.STANDARD_T2V_PROMPT,
+        # JSON-upsampled prompt/negative-prompt pair (not `common`'s shared
+        # plain-text standard prompt) -- Cosmos3 is documented to need this
+        # format for good quality, see docs/models/cosmos3.md#prompting.
+        prompt=generate_cosmos3.EXAMPLE_T2V_PROMPT,
         negative_prompt=generate_cosmos3.DEFAULT_NEGATIVE_PROMPT,
-        max_text_len=128,
+        max_text_len=3072,
+        add_duration_template=False,
+        add_resolution_template=False,
         guide_scale=6.0,
         tensor_parallel_size=tp_size,
         dtype="bfloat16",
         seed=0,
-        num_steps=35,
         karras_sigma_min=0.147,
         karras_sigma_max=200.0,
-        height=704,
-        width=1280,
-        num_frames=93,
-        fps=24.0,
         output_path=common.output_path("cosmos", "3", args.model_size, args.task),
+        **RESOLUTION_BY_SIZE[args.model_size],
     )
     if args.task == "i2v":
         ns.image_path = common.STANDARD_IMAGE_PATH
         ns.prompt = common.STANDARD_I2V_PROMPT
+        # Short prompt -> short negative prompt: DEFAULT_NEGATIVE_PROMPT (a
+        # real, ~2800-token JSON prompt, see docs/models/cosmos3.md#prompting)
+        # paired with a short positive prompt is the exact mismatch that doc
+        # section warns about (inflates the cond/uncond vision mRoPE offset
+        # gap) -- keep both prompts comparably short for I2V instead.
+        ns.negative_prompt = "Low quality, blurry, oversaturated, static, distorted."
+        ns.max_text_len = 256
     return ns
 
 
@@ -65,7 +88,7 @@ def main():
     run_args = build_args(args)
     common.run_benchmark(
         model="cosmos", version="3", size=args.model_size, task=args.task,
-        main_fn=generate_cosmos3.main, args=run_args)
+        main_fn=generate_cosmos3.main, args=run_args, num_runs=args.num_runs)
 
 
 if __name__ == "__main__":

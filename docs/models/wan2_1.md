@@ -198,7 +198,7 @@ path was actually exercised.
 ---
 
 See [`docs/models/wan2_2.md`](wan2_2.md) for Wan2.2 (TI2V-5B, A14B),
-[`docs/models/cosmos.md`](cosmos.md) for Cosmos-Predict2.5, and
+[`docs/models/cosmos2_5.md`](cosmos2_5.md) for Cosmos-Predict2.5, and
 [`docs/models/cosmos3.md`](cosmos3.md) for Cosmos 3.
 
 See the [Model Support table in the root README](../../README.md#-model-support)

@@ -17,6 +17,13 @@ version or chip generation can shift these numbers meaningfully; each
 `benchmarks/results/*.json` file records the exact `jax_version`/
 `device_kind`/`device_count` used for that row.
 
+Every row is the average of `--num_runs` independent end-to-end runs
+(default 5, each with a freshly cleared JAX compilation cache, so every run
+is a genuine cold start, not just the first) — `benchmarks/results/*.json`
+keeps every individual run's raw metrics alongside the average. Each run's
+output video is saved to `out/<slug>/<slug>_<run>.mp4` (e.g.
+`out/cosmos_3_nano_t2v/cosmos_3_nano_t2v_1.mp4`).
+
 ## Metrics
 
 JAX is a trace-and-compile framework: the first call at a given
@@ -63,12 +70,10 @@ and only differ in which conditioning-mask/timestep values are passed in).
 
 | Model | Variant | Task | Hardware | Resolution | Frames | Steps | Compile (s) | Generation (s) | Per-step (s) | Peak HBM/chip (GB) |
 | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| Cosmos3 | Nano (16B) | T2V | v4-8 | | | | | | | |
-| Cosmos3 | Nano (16B) | I2V | v4-8 | | | | | | | |
-| Cosmos3 | Edge (4B) | T2V | v4-8 | | | | | | | |
-| Cosmos3 | Edge (4B) | I2V | v4-8 | | | | | | | |
-| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | v4-8 | 1280x704 | 45\* | 35 | 91.8 | 1261.4 | 36.0 | 22.1 |
-| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | v4-8 | 1280x704 | 93 | 35 | 116.9 | 1357.0 | 38.8 | 16.0 |
+| Cosmos3 | Nano (16B) | T2V/I2V | v4-8 | 1280x704 | 93 | 35 | 64.2 | 249.9 | 7.1 | 29.5 |
+| Cosmos3 | Edge (4B) | T2V/I2V | v4-8 | 832x480 | 121 | 35 | 64.5 | 82.9 | 2.4 | 17.0 |
+| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | v4-8 | 1280x704 | 45\* | 35 | 92.1 | 1259.9 | 36.0 | 22.1 |
+| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | v4-8 | 1280x704 | 93 | 35 | 112.9 | 1357.3 | 38.8 | 16.0 |
 | Wan2.2 | A14B | T2V | v4-8 | 720x1280 | 81 | 50 | | | | |
 | Wan2.2 | A14B | I2V | v4-8 | 720x1280 | 81 | 40 | | | | |
 | Wan2.2 | 5B (TI2V) | T2V | v4-8 | 704x1280 | 121 | 50 | | | | |
@@ -95,15 +100,27 @@ activations at this frame count) — reduced to 45 frames (`tp=4`), the
 largest that fits; see [`benchmarks/run_cosmos2_5.py`](../benchmarks/run_cosmos2_5.py).
 Both Cosmos-Predict2.5 rows measure T2V only (I2V/V2V share the same DiT
 compute cost, only conditioning-mask/timestep values differ — see
-[`docs/models/cosmos.md`](models/cosmos.md)) — the "T2V/I2V/V2V" task label
+[`docs/models/cosmos2_5.md`](models/cosmos2_5.md)) — the "T2V/I2V/V2V" task label
 reflects the checkpoint's supported tasks, not that all three were
 separately measured.
+
+Both Cosmos3 rows are verified correct — see
+[`docs/models/cosmos3.md`](models/cosmos3.md#status) for implementation
+notes. Edge's row measures T2V at its own real recipe (480x832, 121 frames,
+35 steps, non-Karras `shift=10.0` — I2V uses a different recipe, 20 steps
+and `shift=12.0`) — a different resolution/frame count than Nano's row, so
+the two aren't directly comparable; Edge's lower generation time mainly
+reflects its smaller model size, not fewer steps (both use 35 here). Both
+rows use a JSON-structured version of the standardized prompt (see
+[`docs/models/cosmos3.md#prompting`](models/cosmos3.md#prompting)) rather
+than `benchmarks/common.py`'s plain-text default — Cosmos3 is documented to
+need this format for good quality, especially Edge.
 
 ---
 
 See [`docs/models/wan2_1.md`](models/wan2_1.md)/
 [`docs/models/wan2_2.md`](models/wan2_2.md)/
-[`docs/models/cosmos.md`](models/cosmos.md)/
+[`docs/models/cosmos2_5.md`](models/cosmos2_5.md)/
 [`docs/models/cosmos3.md`](models/cosmos3.md) for per-model implementation
 and verification status, and
 [`docs/hardware_and_sharding.md`](hardware_and_sharding.md) for the

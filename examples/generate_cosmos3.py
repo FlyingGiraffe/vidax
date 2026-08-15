@@ -23,7 +23,9 @@
 # `refs/diffusers-cosmos3/pipeline_cosmos3_omni.py`'s own denoising loop.
 
 import argparse
+import json
 import logging
+import os
 
 import imageio
 import jax
@@ -57,16 +59,33 @@ _DURATION_TEMPLATE = "The video is {duration:.1f} seconds long and is of {fps:.0
 _INVERSE_RESOLUTION_TEMPLATE_VIDEO = "This video is not of {height}x{width} resolution."
 _INVERSE_DURATION_TEMPLATE = "The video is not {duration:.1f} seconds long and is not of {fps:.0f} FPS."
 
-DEFAULT_NEGATIVE_PROMPT = (
-    "The video captures a series of frames showing ugly scenes, static with "
-    "no motion, motion blur, over-saturation, shaky footage, low resolution, "
-    "grainy texture, pixelated images, poorly lit areas, underexposed and "
-    "overexposed scenes, poor color balance, washed out colors, choppy "
-    "sequences, jerky movements, low frame rate, artifacting, color banding, "
-    "unnatural transitions, outdated special effects, fake elements, "
-    "unconvincing visuals, poorly edited content, jump cuts, visual noise, "
-    "and flickering. Overall, the video is of poor quality."
-)
+_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+
+
+def _load_json_prompt_asset(filename: str) -> str:
+    """Loads a JSON-structured prompt asset and re-serializes it compactly
+    (matching `refs/cosmos-main`'s own `compact_json_file` helper) -- these
+    JSON-structured prompts are the checkpoint's *documented* recipe
+    ("For optimal quality, prompts should be upsampled into a specific JSON
+    structure", `Cosmos3-Edge/README.md`), not just one option among many. A
+    short plain-text prompt/negative-prompt (this file's own previous
+    default) is measurably worse, especially for Edge -- see
+    docs/models/cosmos3.md#prompting.
+    """
+    with open(os.path.join(_ASSETS_DIR, filename)) as f:
+        return json.dumps(json.load(f), ensure_ascii=True, separators=(",", ":"))
+
+
+DEFAULT_NEGATIVE_PROMPT = _load_json_prompt_asset("cosmos3_t2v_negative_prompt.json")
+# JSON-upsampled version of `benchmarks/common.py`'s plain-text
+# `STANDARD_T2V_PROMPT` -- the exact same red panda/bamboo scene every other
+# model's benchmark uses (for cross-model comparability), just re-described
+# in the JSON structure Cosmos3 is documented to need, schema-matched to
+# `refs/cosmos-main`'s own JSON prompt assets. Used by
+# `benchmarks/run_cosmos3.py` in place of the shared plain-text prompt
+# (changing `STANDARD_T2V_PROMPT` itself would require re-benchmarking every
+# other model family, not just Cosmos3).
+EXAMPLE_T2V_PROMPT = _load_json_prompt_asset("cosmos3_t2v_prompt.json")
 
 
 def save_video(frames: np.ndarray, output_path: str, fps: int = 24):
@@ -86,18 +105,27 @@ def cast_to_dtype(tree, dtype):
 
 
 def tokenize_prompt(tokenizer, prompt: str, height: int, width: int, num_frames: int, fps: float,
-                     max_text_len: int, is_negative: bool = False):
+                     max_text_len: int, is_negative: bool = False,
+                     add_duration_template: bool = True, add_resolution_template: bool = True):
     """Matches the reference's `Cosmos3OmniPipeline.tokenize_prompt`: system
     prompt + resolution/duration metadata templates, chat-templated, with
     `<|vision_start|>` + eos appended -- then padded to `max_text_len` with
     the tokenizer's own pad token, returning `(ids, valid_mask)`.
+
+    `add_duration_template`/`add_resolution_template` match the reference
+    pipeline's own `__call__` kwargs of the same name (both default `True`
+    there too) -- every real usage example in `refs/cosmos-main` (Nano,
+    Super, and Edge alike) explicitly passes both as `False`.
     """
-    duration_template = _INVERSE_DURATION_TEMPLATE if is_negative else _DURATION_TEMPLATE
-    resolution_template = _INVERSE_RESOLUTION_TEMPLATE_VIDEO if is_negative else _RESOLUTION_TEMPLATE_VIDEO
     text = prompt.rstrip(".")
-    text = f"{text}. {duration_template.format(duration=num_frames / fps, fps=fps)}" if text else \
-        duration_template.format(duration=num_frames / fps, fps=fps)
-    text = f"{text}. {resolution_template.format(height=height, width=width)}"
+    if add_duration_template:
+        duration_template = _INVERSE_DURATION_TEMPLATE if is_negative else _DURATION_TEMPLATE
+        text = f"{text}. {duration_template.format(duration=num_frames / fps, fps=fps)}" if text else \
+            duration_template.format(duration=num_frames / fps, fps=fps)
+    if add_resolution_template:
+        resolution_template = _INVERSE_RESOLUTION_TEMPLATE_VIDEO if is_negative else _RESOLUTION_TEMPLATE_VIDEO
+        text = f"{text}. {resolution_template.format(height=height, width=width)}" if text else \
+            resolution_template.format(height=height, width=width)
 
     conversations = [
         {"role": "system", "content": _SYSTEM_PROMPT_VIDEO},
@@ -136,7 +164,8 @@ def main(args):
     vae_decoder = WanVAEDecoder()
     vae_encoder = WanVAEEncoder() if args.image_path else None
     scheduler = FlowUniPCMultistepScheduler(
-        num_steps=args.num_steps, num_train_timesteps=1000, use_karras_sigmas=True,
+        num_steps=args.num_steps, num_train_timesteps=1000,
+        use_karras_sigmas=args.use_karras_sigmas, shift=args.shift,
         karras_sigma_min=args.karras_sigma_min, karras_sigma_max=args.karras_sigma_max)
 
     logging.info(f"Loading DiT weights from {args.dit_checkpoint_path}...")
@@ -159,10 +188,12 @@ def main(args):
 
     # --- Tokenize prompt (cond + uncond), pad to a fixed length ---
     cond_ids, cond_valid = tokenize_prompt(
-        tokenizer, args.prompt, args.height, args.width, args.num_frames, args.fps, args.max_text_len)
+        tokenizer, args.prompt, args.height, args.width, args.num_frames, args.fps, args.max_text_len,
+        add_duration_template=args.add_duration_template, add_resolution_template=args.add_resolution_template)
     uncond_ids, uncond_valid = tokenize_prompt(
         tokenizer, args.negative_prompt, args.height, args.width, args.num_frames, args.fps,
-        args.max_text_len, is_negative=True)
+        args.max_text_len, is_negative=True,
+        add_duration_template=args.add_duration_template, add_resolution_template=args.add_resolution_template)
     und_len = args.max_text_len
     cond_input_ids = jnp.asarray(np.broadcast_to(cond_ids, (b, und_len)))
     uncond_input_ids = jnp.asarray(np.broadcast_to(uncond_ids, (b, und_len)))
@@ -171,12 +202,23 @@ def main(args):
 
     text_position_ids = get_mrope_ids_text_tokens(und_len, temporal_offset=0.0)
     text_position_ids = jnp.broadcast_to(text_position_ids[:, None, :], (3, b, und_len))
-    vision_temporal_offset = float(und_len) + TEMPORAL_MARGIN
-    vision_position_ids = get_mrope_ids_vision_tokens(
-        latent_t, patch_h, patch_w, temporal_offset=vision_temporal_offset,
-        fps=args.fps, base_fps=BASE_FPS, temporal_compression_factor=TEMPORAL_COMPRESSION_FACTOR)
-    vision_position_ids = jnp.broadcast_to(
-        vision_position_ids[:, None, :], (3, b, latent_t * patch_h * patch_w))
+
+    def _vision_position_ids_for(valid_mask: np.ndarray) -> jnp.ndarray:
+        # Offset from each prompt's real (unpadded) token count, matching the
+        # reference's ragged, unpadded design (pipeline_cosmos3_omni.py's
+        # `_prepare_text_segment`: `und_len = len(input_ids)`) -- using the
+        # padded `--max_text_len` here instead would inflate the text<->vision
+        # RoPE gap by `max_text_len - real_length`, differently per cond/uncond
+        # pass whenever their real lengths differ.
+        real_len = float(valid_mask.sum())
+        vision_temporal_offset = real_len + TEMPORAL_MARGIN
+        vis_pos = get_mrope_ids_vision_tokens(
+            latent_t, patch_h, patch_w, temporal_offset=vision_temporal_offset,
+            fps=args.fps, base_fps=BASE_FPS, temporal_compression_factor=TEMPORAL_COMPRESSION_FACTOR)
+        return jnp.broadcast_to(vis_pos[:, None, :], (3, b, latent_t * patch_h * patch_w))
+
+    cond_vision_position_ids = _vision_position_ids_for(cond_valid)
+    uncond_vision_position_ids = _vision_position_ids_for(uncond_valid)
 
     # --- Vision conditioning: I2V anchors latent frame 0 to the real image; T2V is pure noise ---
     vision_condition_mask = jnp.zeros((b, latent_t), dtype=jnp.float32)  # 1.0 = clean/conditioned frame
@@ -217,10 +259,10 @@ def main(args):
 
         v_cond = _dit_apply(
             params, cond_input_ids, text_position_ids, cond_valid_mask,
-            current_latents.astype(dtype), vision_position_ids, vision_sigma, vision_noisy_mask)
+            current_latents.astype(dtype), cond_vision_position_ids, vision_sigma, vision_noisy_mask)
         v_uncond = _dit_apply(
             params, uncond_input_ids, text_position_ids, uncond_valid_mask,
-            current_latents.astype(dtype), vision_position_ids, vision_sigma, vision_noisy_mask)
+            current_latents.astype(dtype), uncond_vision_position_ids, vision_sigma, vision_noisy_mask)
         v_cond = v_cond.astype(jnp.float32) * vision_noisy_mask[:, :, None, None, None]
         v_uncond = v_uncond.astype(jnp.float32) * vision_noisy_mask[:, :, None, None, None]
         return v_uncond + guide_scale * (v_cond - v_uncond)
@@ -275,9 +317,19 @@ if __name__ == "__main__":
                          help="Optional conditioning image for image2video (anchors latent frame 0).")
     parser.add_argument("--prompt", type=str, required=True)
     parser.add_argument("--negative_prompt", type=str, default=DEFAULT_NEGATIVE_PROMPT)
-    parser.add_argument("--max_text_len", type=int, default=128,
+    parser.add_argument("--add_duration_template", type=lambda s: s.lower() != "false", default=True,
+                         help="Append the reference's duration/FPS metadata sentence to the prompt "
+                              "(matches Cosmos3OmniPipeline.__call__'s own default). Every real usage "
+                              "example in refs/cosmos-main passes false for this.")
+    parser.add_argument("--add_resolution_template", type=lambda s: s.lower() != "false", default=True,
+                         help="Append the reference's resolution metadata sentence to the prompt "
+                              "(matches Cosmos3OmniPipeline.__call__'s own default). Every real usage "
+                              "example in refs/cosmos-main passes false for this.")
+    parser.add_argument("--max_text_len", type=int, default=3072,
                          help="Fixed padded text-token length (JAX needs a static shape; the reference uses the "
-                              "prompt's exact tokenized length instead).")
+                              "prompt's exact tokenized length instead). Must comfortably fit the *negative* "
+                              "prompt too -- the default negative prompt (a JSON-structured, checkpoint-realistic "
+                              "prompt, see docs/models/cosmos3.md#prompting) tokenizes to ~2800 tokens.")
     parser.add_argument("--guide_scale", type=float, default=6.0)
     parser.add_argument("--tensor_parallel_size", type=int, default=1,
                          help="Number of devices to shard the DiT's attention heads/FFN channels "
@@ -286,6 +338,13 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_steps", type=int, default=35)
+    parser.add_argument("--use_karras_sigmas", type=lambda s: s.lower() != "false", default=True,
+                         help="Nano's default schedule (its scheduler_config.json: "
+                              "use_karras_sigmas=true). Edge's own recipe instead uses a plain "
+                              "shift-warped linear schedule -- pass --use_karras_sigmas false "
+                              "--shift 12.0 for Edge.")
+    parser.add_argument("--shift", type=float, default=5.0,
+                         help="Only used when --use_karras_sigmas false.")
     parser.add_argument("--karras_sigma_min", type=float, default=0.147)
     parser.add_argument("--karras_sigma_max", type=float, default=200.0)
     parser.add_argument("--height", type=int, default=704)

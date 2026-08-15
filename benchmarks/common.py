@@ -85,6 +85,10 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sequence_parallel_size", type=int, default=None,
         help="Overrides the benchmark script's own default --sequence_parallel_size.")
+    parser.add_argument(
+        "--num_runs", type=int, default=5,
+        help="Number of independent end-to-end runs (each with a cleared JAX "
+             "compilation cache) to average metrics over.")
 
 
 def resolve_checkpoint_dir(args: argparse.Namespace) -> str:
@@ -108,13 +112,22 @@ def find_single(pattern: str) -> str:
     return matches[0]
 
 
+def result_slug(model: str, version: str, size: str, task: str) -> str:
+    """Standardized filename slug, e.g. `('cosmos', '3', 'nano', 't2v')` ->
+    `cosmos3_nano_t2v`, `('cosmos', '2.5', '14b', 't2v')` -> `cosmos2_5_14b_t2v`,
+    `('wan', '2.1', '1.3b', 't2v')` -> `wan2_1_1.3b_t2v`. Model and version are
+    merged into one token (no separator, `.` in version -> `_`) since together
+    they name one released model family; size and task stay separate tokens."""
+    model_version = f"{model}{version.replace('.', '_')}" if version else model
+    return "_".join(p for p in (model_version, size, task) if p)
+
+
 def output_path(model: str, version: str, size: str, task: str, ext: str = "mp4") -> str:
-    """Standardized `out/` filename: model, version, size, and task all
-    appear in it, e.g. `out/cosmos_predict2.5_14b_t2v.mp4`,
-    `out/wan2.1_1.3b_t2v.mp4`."""
-    os.makedirs(OUT_DIR, exist_ok=True)
-    slug = "_".join(p for p in (model, version, size, task) if p)
-    return os.path.join(OUT_DIR, f"{slug}.{ext}")
+    """Standardized base `out/` filename (see `result_slug`).
+    `run_benchmark` derives each individual run's actual output path from
+    this (`out/<slug>/<slug>_<run>.<ext>`) -- this function itself doesn't
+    create anything on disk."""
+    return os.path.join(OUT_DIR, f"{result_slug(model, version, size, task)}.{ext}")
 
 
 # --- Compile-vs-generation timing ---
@@ -189,17 +202,51 @@ def clear_jax_compilation_cache() -> None:
     shutil.rmtree(cache_dir, ignore_errors=True)
 
 
-def run_benchmark(model: str, version: str, size: str, task: str, main_fn, args: argparse.Namespace) -> dict:
-    """Runs one `examples/generate_*.py`'s `main(args)` under
-    `instrument_jit()`, saves a JSON result file under `benchmarks/results/`,
-    and returns the result dict (also printed to stdout)."""
-    clear_jax_compilation_cache()
-    timing = instrument_jit()
-    t_wall0 = time.perf_counter()
-    main_fn(args)
-    wall_s = time.perf_counter() - t_wall0
+def _avg(runs: list, key: str):
+    vals = [r[key] for r in runs if r.get(key) is not None]
+    return sum(vals) / len(vals) if vals else None
 
-    num_steps = getattr(args, "num_steps", None)
+
+def run_benchmark(
+    model: str, version: str, size: str, task: str, main_fn, args: argparse.Namespace,
+    num_runs: int = 5,
+) -> dict:
+    """Runs `examples/generate_*.py`'s `main(args)` `num_runs` times (each
+    under `instrument_jit()`, with a cleared JAX compilation cache -- so
+    every run is an independent, comparable cold start, not just the first),
+    saves each run's video to `out/<slug>/<slug>_<run>.mp4`, and writes one
+    aggregated JSON result file under `benchmarks/results/` containing every
+    run's raw metrics plus their average. Returns that result dict (also
+    printed to stdout).
+    """
+    base_output_path = args.output_path
+    out_dir, ext = os.path.splitext(base_output_path)
+    ext = ext.lstrip(".") or "mp4"
+    slug = os.path.basename(out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+
+    runs = []
+    for i in range(1, num_runs + 1):
+        clear_jax_compilation_cache()
+        args.output_path = os.path.join(out_dir, f"{slug}_{i}.{ext}")
+        timing = instrument_jit()
+        t_wall0 = time.perf_counter()
+        main_fn(args)
+        wall_s = time.perf_counter() - t_wall0
+
+        num_steps = getattr(args, "num_steps", None)
+        run_result = {
+            "run": i,
+            "compile_s": timing.compile_s,
+            "generation_s": timing.generation_s,
+            "per_step_s": (timing.generation_s / num_steps) if num_steps else None,
+            "peak_hbm_gb": peak_hbm_per_chip_gb(),
+            "wall_s": wall_s,
+            "output_path": args.output_path,
+        }
+        runs.append(run_result)
+        print(f"  run {i}/{num_runs}: {json.dumps(run_result)}")
+
     result = {
         "model": model, "version": version, "size": size, "task": task,
         "jax_version": jax.__version__,
@@ -207,19 +254,23 @@ def run_benchmark(model: str, version: str, size: str, task: str, main_fn, args:
         "device_count": jax.device_count(),
         "resolution": f"{getattr(args, 'width', None)}x{getattr(args, 'height', None)}",
         "num_frames": getattr(args, "num_frames", None),
-        "num_steps": num_steps,
-        "compile_s": timing.compile_s,
-        "generation_s": timing.generation_s,
-        "per_step_s": (timing.generation_s / num_steps) if num_steps else None,
-        "peak_hbm_gb": peak_hbm_per_chip_gb(),
-        "wall_s": wall_s,
+        "num_steps": getattr(args, "num_steps", None),
         "tensor_parallel_size": getattr(args, "tensor_parallel_size", None),
         "sequence_parallel_size": getattr(args, "sequence_parallel_size", None),
-        "output_path": getattr(args, "output_path", None),
+        "output_dir": out_dir,
+        "num_runs": num_runs,
+        "runs": runs,
+        "avg": {
+            "compile_s": _avg(runs, "compile_s"),
+            "generation_s": _avg(runs, "generation_s"),
+            "per_step_s": _avg(runs, "per_step_s"),
+            "peak_hbm_gb": _avg(runs, "peak_hbm_gb"),
+            "wall_s": _avg(runs, "wall_s"),
+        },
     }
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    result_path = os.path.join(RESULTS_DIR, f"{model}_{version}_{size}_{task}.json")
+    result_path = os.path.join(RESULTS_DIR, f"{result_slug(model, version, size, task)}.json")
     with open(result_path, "w") as f:
         json.dump(result, f, indent=2)
 

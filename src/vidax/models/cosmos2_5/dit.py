@@ -15,8 +15,8 @@ every other hyperparameter (RoPE ratios, `adaln_lora_dim`, `context_dim`,
 `vidax.translator.mappings.cosmos2_5` regardless of size (the state_dict key
 structure doesn't depend on model width/depth).
 
-Architecture, at a glance (see this repo's `docs/models/cosmos.md` for the
-full writeup, and `docs/hardware_and_sharding.md`'s Cosmos section for the
+Architecture, at a glance (see this repo's `docs/models/cosmos2_5.md` for the
+full writeup, and `docs/lessons/cosmos2_5_debugging.md` for the
 debugging history of getting this port producing correct output):
 
   - Patchify: `patch_size=(1, 2, 2)` (no temporal compression at the DiT

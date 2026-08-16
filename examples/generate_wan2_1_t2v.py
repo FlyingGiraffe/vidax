@@ -123,6 +123,7 @@ def main(args):
         f"{sp_size}-way sequence parallel.")
 
     dtype = DTYPES[args.dtype]
+    dit_dtype = DTYPES[args.dit_dtype]
     sequence_parallel = sp_size > 1
 
     # --- Initialize models and scheduler ---
@@ -141,7 +142,7 @@ def main(args):
     # problem, but self-attention activation memory for a big-enough DiT
     # still doesn't shrink under Megatron TP alone).
     dit_model = WanDiT(
-        mesh=mesh, sequence_parallel=sequence_parallel,
+        mesh=mesh, sequence_parallel=sequence_parallel, compute_dtype=dit_dtype,
         **MODEL_SIZE_CONFIGS[args.model_size])
     vae_model = WanVAEDecoder()
     t5_model = T5Encoder()
@@ -176,18 +177,38 @@ def main(args):
     # multi-GB param tree on a single device. Casting itself happens on the
     # host (numpy), before any of this -- see
     # `vidax.translator.converter.convert_pt_tensor_to_jax`'s docstring for
-    # why (matters most for the DiT once it's large enough to ship as raw
-    # float32, e.g. Wan2.2's 5B/14B; Wan2.1's checkpoints are already bf16).
-    # T5 and the DiT are both tensor-parallel sharded (attention heads / FFN
-    # channels split across the 'tp' axis) regardless of
+    # why. T5 and the DiT are both tensor-parallel sharded (attention heads /
+    # FFN channels split across the 'tp' axis) regardless of
     # `sequence_parallel`: weight-sharding and token-sharding are
     # independent mesh axes now, so there's no more "replicate weights
     # instead" special case for sequence parallelism -- `shard_wan_params`
     # degenerates to full replication on its own whenever 'tp' has size 1,
     # so this one code path covers every combination. The VAE is
     # comparatively small and stays replicated regardless.
+    #
+    # `dit_params` are cast to `--dit_dtype` (default float32), independent
+    # of `--dtype`: Wan2.1's released checkpoints (DiT included) ship as raw
+    # float32 on disk (T5's `...-enc-bf16.pth` filename is the only one
+    # that's genuinely bf16-native) -- rounding the DiT's weights down to
+    # bf16 at load time, as this script used to do unconditionally,
+    # produces severely degraded (flat, hazy, low-detail) output once the
+    # video's total token count gets large enough (e.g. native 720p-scale
+    # resolution at 81 frames), while looking fine at smaller scales. The
+    # reference never rounds its stored weights either -- `amp.autocast
+    # (dtype=torch.bfloat16)` only downcasts *activations* transiently for
+    # specific ops (matmul/conv); the underlying `nn.Parameter` tensors stay
+    # float32 the whole time. See docs/models/wan2_1.md#status for the full
+    # investigation and docs/benchmarking.md for the resulting extra HBM
+    # cost at scale. `WanDiT`'s residual stream is float32 for the same
+    # reason (see `WanDiTBlock`'s docstring) -- when `--dit_dtype` is left
+    # at float32, JAX/flax's ordinary dtype promotion then keeps every DiT
+    # matmul in float32 automatically; when `--dit_dtype bfloat16` is passed
+    # instead (smaller weight footprint, verified fine at smaller scales),
+    # each block's explicit transient downcast to `compute_dtype` before
+    # each Dense/attend call takes over instead, matching the reference's
+    # autocast behavior for that case.
     replicated = get_replicated_sharding(mesh)
-    dit_params = cast_to_dtype(dit_params, dtype)
+    dit_params = cast_to_dtype(dit_params, dit_dtype)
     vae_params = cast_to_dtype(vae_params, dtype)
     t5_params = cast_to_dtype(t5_params, dtype)
 
@@ -211,8 +232,21 @@ def main(args):
 
     # Independent noise per batch slot -- when one prompt is broadcast across
     # multiple data-parallel replicas, this gives multiple distinct samples.
+    #
+    # `latents` are constructed in `dit_dtype`, not the general `--dtype`:
+    # they're the DiT's own input/output signal (fed in each step, and what
+    # the scheduler accumulates into across the whole sampling loop), not a
+    # "general pipeline" value like T5/VAE. `WanDiT.__call__` casts its
+    # output back to `latents.dtype` at the very end of every call
+    # (`input_dtype`) -- if that were bf16 while the DiT's internal weights
+    # and activations are float32 (`--dit_dtype float32`), the velocity
+    # would get re-quantized to bf16 once per denoising step regardless,
+    # and the scheduler's running latent state would too, reintroducing the
+    # same repeated-rounding corruption this whole fix is for, just at the
+    # outer sampling-loop granularity instead of the inner per-layer one.
+    # See docs/models/wan2_1.md#status.
     latents_rng, rng = jax.random.split(rng)
-    latents = jax.random.normal(latents_rng, latents_shape, dtype=dtype)
+    latents = jax.random.normal(latents_rng, latents_shape, dtype=dit_dtype)
     latents = jax.device_put(latents, get_batch_sharding(mesh, latents.ndim))
 
     logging.info(f"Encoding {batch_size} prompt(s) with T5: {prompts}")
@@ -365,7 +399,8 @@ if __name__ == "__main__":
     parser.add_argument("--guide_scale", type=float, default=5.0, help="Classifier-free guidance scale: velocity = uncond + guide_scale * (cond - uncond). The reference's default is 5.0; skipping CFG (there is no flag to do so here, matching the reference always running it) produces washed-out, low-contrast output.")
     parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to Megatron-shard each model's attention heads / FFN channels (weights) across. Must divide num_heads (12 for the 1.3B DiT, 40 for the 14B DiT, 64 for the T5 encoder) and num_devices. Composes independently with --sequence_parallel_size (see docs/hardware_and_sharding.md); num_devices must equal --tensor_parallel_size * --sequence_parallel_size * data-parallel size.")
     parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. 1 (off) by default since Megatron TP already fits the 1.3B model fine at typical resolutions; intended for the much larger 14B model at higher resolutions, where it's expected to be necessary the way it was for Wan2.2's 5B model (see WanDiT's module docstring). Also requires the DiT's patch token count to be evenly divisible by this value.")
-    parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the DiT, VAE, and T5 (and cast target for their loaded checkpoints). The reference uses bfloat16 for the DiT/T5 and float32 for the VAE; vidax uses one unified dtype for simplicity. Note: TPU's XLA backend does not implement float16 matmuls (a hardware/compiler limitation, not a vidax one) -- float16 will fail at runtime on TPU.")
+    parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the VAE and T5 (and cast target for their loaded checkpoints; also used for the DiT's activations/latents). Note: TPU's XLA backend does not implement float16 matmuls (a hardware/compiler limitation, not a vidax one) -- float16 will fail at runtime on TPU.")
+    parser.add_argument("--dit_dtype", type=str, default="float32", choices=list(DTYPES.keys()), help="Cast target for the DiT's *weights* specifically, independent of --dtype. Defaults to float32 because Wan2.1's released DiT checkpoints ship as raw float32 on disk, and rounding them down to bfloat16 produces severely degraded (flat, hazy) output once the video's total token count is large enough (e.g. native 720p at 81 frames) -- see docs/models/wan2_1.md#status. Pass --dit_dtype bfloat16 to opt back into the ~2x smaller DiT weight footprint at smaller/safer scales (verified fine at this repo's existing 480p benchmarks).")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=50, help="Number of sampling steps for the scheduler.")
     parser.add_argument("--shift", type=float, default=5.0, help="Flow-matching noise-schedule shift (see RectifiedFlowScheduler). The reference's default for t2v is 5.0 regardless of resolution.")

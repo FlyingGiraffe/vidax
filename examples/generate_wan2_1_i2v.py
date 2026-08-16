@@ -153,6 +153,11 @@ def build_i2v_conditioning(image: np.ndarray, num_frames: int, pixel_h: int, pix
 def main(args):
     """Main inference function."""
     configure_jax_cache()
+    if args.shift is None:
+        # Matches the reference's own auto-selection (Wan2.1-main/generate.py):
+        # the 480P checkpoint is trained/tuned around shift=3.0, the 720P
+        # checkpoint (and everything else) around shift=5.0.
+        args.shift = 3.0 if args.max_area <= 832 * 480 else 5.0
     num_devices = jax.device_count()
     tp_size = args.tensor_parallel_size
     sp_size = args.sequence_parallel_size
@@ -169,12 +174,15 @@ def main(args):
         f"{sp_size}-way sequence parallel.")
 
     dtype = DTYPES[args.dtype]
+    dit_dtype = DTYPES[args.dit_dtype]
     sequence_parallel = sp_size > 1
 
     # --- Initialize models and scheduler ---
     # See `generate_wan2_1_t2v.py`'s identical comment on `sequence_parallel`
     # for what this does, and how it composes with `--tensor_parallel_size`.
-    dit_model = WanDiT(mesh=mesh, sequence_parallel=sequence_parallel, **I2V_14B_CONFIG)
+    dit_model = WanDiT(
+        mesh=mesh, sequence_parallel=sequence_parallel, compute_dtype=dit_dtype,
+        **I2V_14B_CONFIG)
     vae_decoder = WanVAEDecoder()
     vae_encoder = WanVAEEncoder()
     t5_model = T5Encoder()
@@ -204,7 +212,15 @@ def main(args):
 
     # Cast on the host (numpy) before device_put -- see
     # `vidax.translator.converter.convert_pt_tensor_to_jax`'s docstring.
-    dit_params = cast_to_dtype(dit_params, dtype)
+    #
+    # `dit_params` are cast to `--dit_dtype` (default float32), independent
+    # of `--dtype` -- see the identical comment in `generate_wan2_1_t2v.py`.
+    # Wan2.1's released DiT checkpoints ship as raw float32 on disk;
+    # rounding them down to bf16 at load time (as this script used to do
+    # unconditionally) produces severely degraded output once the video's
+    # total token count is large enough, e.g. native 720p at 81 frames --
+    # see docs/models/wan2_1.md#status.
+    dit_params = cast_to_dtype(dit_params, dit_dtype)
     vae_params = cast_to_dtype(vae_params, dtype)
     t5_params = cast_to_dtype(t5_params, dtype)
     clip_params = cast_to_dtype(clip_params, dtype)
@@ -231,8 +247,13 @@ def main(args):
         f"output {pixel_w}x{pixel_h}, {args.num_frames} frames.")
 
     logging.info("Encoding conditioning image (VAE + CLIP)...")
+    # `y` gets concatenated directly onto `latents` before any Dense layer
+    # touches it (`WanDiT.__call__`'s `jnp.concatenate([latents, y], ...)`),
+    # so it needs to match `latents`'s `dit_dtype`, not the general
+    # `--dtype` -- see the identical comment on `latents`'s construction
+    # below for why.
     y = build_i2v_conditioning(
-        image, args.num_frames, pixel_h, pixel_w, latent_t, vae_encoder, vae_params, dtype)
+        image, args.num_frames, pixel_h, pixel_w, latent_t, vae_encoder, vae_params, dit_dtype)
     y = jax.device_put(jnp.broadcast_to(y, (dp_size,) + y.shape[1:]), get_batch_sharding(mesh, y.ndim))
 
     clip_input = preprocess_image_for_clip(image).astype(dtype)
@@ -242,7 +263,9 @@ def main(args):
 
     latents_shape = (dp_size, latent_t, lat_h, lat_w, dit_model.in_dim)
     latents_rng, rng = jax.random.split(rng)
-    latents = jax.random.normal(latents_rng, latents_shape, dtype=dtype)
+    # `latents` are constructed in `dit_dtype`, not the general `--dtype` --
+    # see the identical comment in `generate_wan2_1_t2v.py`.
+    latents = jax.random.normal(latents_rng, latents_shape, dtype=dit_dtype)
     latents = jax.device_put(latents, get_batch_sharding(mesh, latents.ndim))
 
     logging.info(f"Encoding prompt with T5: '{args.prompt}'")
@@ -350,12 +373,13 @@ if __name__ == "__main__":
     parser.add_argument("--negative_prompt", type=str, default=DEFAULT_NEGATIVE_PROMPT, help="Negative prompt for classifier-free guidance. Defaults to the reference's i2v `sample_neg_prompt`.")
     parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to Megatron-shard each model's attention heads / FFN channels (weights) across. Must divide num_devices and num_heads (40 for the 14B DiT, 64 for the T5 encoder). Composes independently with --sequence_parallel_size.")
     parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. See generate_wan2_1_t2v.py's identical flag for the full reasoning. Also requires the DiT's patch token count to be evenly divisible by this value.")
-    parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the DiT, VAE, T5, and CLIP. Note: TPU's XLA backend does not implement float16 matmuls -- float16 will fail at runtime on TPU.")
+    parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the VAE, T5, and CLIP (and cast target for their loaded checkpoints; also used for the DiT's activations/latents). Note: TPU's XLA backend does not implement float16 matmuls -- float16 will fail at runtime on TPU.")
+    parser.add_argument("--dit_dtype", type=str, default="float32", choices=list(DTYPES.keys()), help="Cast target for the DiT's *weights* specifically, independent of --dtype. Defaults to float32 because Wan2.1's released DiT checkpoints ship as raw float32 on disk, and rounding them down to bfloat16 produces severely degraded (flat, hazy) output once the video's total token count is large enough (e.g. native 720p at 81 frames) -- see docs/models/wan2_1.md#status. Pass --dit_dtype bfloat16 to opt back into the ~2x smaller DiT weight footprint at smaller/safer scales (verified fine at this repo's existing 480p benchmarks).")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=40, help="Number of sampling steps. The reference's i2v default is 40 (vs 50 for t2v).")
-    parser.add_argument("--shift", type=float, default=5.0, help="Flow-matching noise-schedule shift. The reference recommends 3.0 for 480p output, 5.0 otherwise.")
+    parser.add_argument("--shift", type=float, default=None, help="Flow-matching noise-schedule shift. Defaults to the reference's own auto-selection (Wan2.1-main/generate.py): 3.0 if --max_area is at the 480p checkpoint's scale (<= 832*480), 5.0 otherwise (720p checkpoint's scale). Pass explicitly to override.")
     parser.add_argument("--guide_scale", type=float, default=5.0, help="Classifier-free guidance scale: velocity = uncond + guide_scale * (cond - uncond).")
-    parser.add_argument("--max_area", type=int, default=720 * 1280, help="Target output resolution's pixel area; actual (height, width) are derived from this and the input image's aspect ratio (see compute_latent_grid).")
+    parser.add_argument("--max_area", type=int, default=720 * 1280, help="Target output resolution's pixel area; actual (height, width) are derived from this and the input image's aspect ratio (see compute_latent_grid). Use 720*1280 with the 720P checkpoint, 480*832 with the 480P checkpoint -- the two ship as separate weights trained at different resolution ranges (Wan2.1-I2V-14B-480P/720P), unlike T2V's single 14B checkpoint used at any resolution.")
     parser.add_argument("--num_frames", type=int, default=81, help="Number of frames in the output video.")
     parser.add_argument("--output_path", type=str, default="output_video.mp4", help="Path to save the output MP4 video(s). With --tensor_parallel_size < num_devices (i.e. dp_size > 1), each data-parallel replica's independent sample is saved as '<output_path>_<i>.mp4'.")
 

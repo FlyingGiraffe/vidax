@@ -45,6 +45,7 @@ def build_args(args: argparse.Namespace) -> argparse.Namespace:
             tensor_parallel_size=tp_size,
             sequence_parallel_size=sp_size,
             dtype="bfloat16",
+            dit_dtype="float32",
             seed=0,
             num_steps=50,
             shift=5.0,
@@ -53,10 +54,24 @@ def build_args(args: argparse.Namespace) -> argparse.Namespace:
             num_frames=81,
             output_path=common.output_path("wan", "2.1", args.model_size.lower(), "t2v"),
         )
-    else:  # i2v, 14B only
-        repo_dir = os.path.join(checkpoint_dir, "Wan2.1-I2V-14B-480P")
+    else:  # i2v, 14B only -- ships as two separate checkpoints (480P/720P),
+        # each trained/tuned at its own resolution range (identical
+        # architecture/config.json, different weights -- see
+        # docs/models/wan2_1.md#i2v-14b). --i2v_resolution picks which one.
+        repo_dir = os.path.join(checkpoint_dir, f"Wan2.1-I2V-14B-{args.i2v_resolution}")
+        max_area = 832 * 480 if args.i2v_resolution == "480P" else 720 * 1280
+        shift = 3.0 if args.i2v_resolution == "480P" else 5.0
+        # I2V derives its actual output resolution from the conditioning
+        # image's aspect ratio (compute_latent_grid), not a --height/--width
+        # flag -- computed here just so common.run_benchmark's result JSON
+        # records the real resolution instead of "NonexNone".
+        from PIL import Image
+        with Image.open(common.STANDARD_IMAGE_PATH) as im:
+            image_w, image_h = im.size
+        pixel_h, pixel_w, _, _ = generate_wan2_1_i2v.compute_latent_grid(
+            image_h, image_w, max_area, vae_stride=(4, 8, 8), patch_size=(1, 2, 2))
         return argparse.Namespace(
-            dit_checkpoint_path=os.path.join(repo_dir, "diffusion_pytorch_model.safetensors"),
+            dit_checkpoint_path=os.path.join(repo_dir, "diffusion_pytorch_model.safetensors.index.json"),
             vae_checkpoint_path=os.path.join(repo_dir, "Wan2.1_VAE.pth"),
             t5_checkpoint_path=os.path.join(repo_dir, "models_t5_umt5-xxl-enc-bf16.pth"),
             clip_checkpoint_path=os.path.join(
@@ -68,13 +83,17 @@ def build_args(args: argparse.Namespace) -> argparse.Namespace:
             tensor_parallel_size=tp_size,
             sequence_parallel_size=sp_size,
             dtype="bfloat16",
+            dit_dtype="float32",
             seed=0,
             num_steps=40,
-            shift=5.0,
+            shift=shift,
             guide_scale=5.0,
-            max_area=720 * 1280,
+            max_area=max_area,
             num_frames=81,
-            output_path=common.output_path("wan", "2.1", "14b", "i2v"),
+            height=pixel_h,
+            width=pixel_w,
+            output_path=common.output_path(
+                "wan", "2.1", f"14b_{args.i2v_resolution.lower()}", "i2v"),
         )
 
 
@@ -84,10 +103,14 @@ def main():
     parser.add_argument("--model_size", type=str, default="1.3B", choices=["1.3B", "14B"],
                          help="Ignored for --task i2v (Wan2.1 i2v only ships a 14B checkpoint).")
     parser.add_argument("--task", type=str, default="t2v", choices=TASKS)
+    parser.add_argument("--i2v_resolution", type=str, default="480P", choices=["480P", "720P"],
+                         help="Ignored for --task t2v. I2V-14B ships as two separate checkpoints "
+                              "(Wan2.1-I2V-14B-480P/720P), each trained/tuned at its own "
+                              "resolution range -- picks which one to load and benchmark.")
     args = parser.parse_args()
 
     run_args = build_args(args)
-    size = args.model_size.lower() if args.task == "t2v" else "14b"
+    size = args.model_size.lower() if args.task == "t2v" else f"14b_{args.i2v_resolution.lower()}"
     main_fn = generate_wan2_1_t2v.main if args.task == "t2v" else generate_wan2_1_i2v.main
     common.run_benchmark(
         model="wan", version="2.1", size=size, task=args.task, main_fn=main_fn, args=run_args,

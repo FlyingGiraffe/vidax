@@ -115,9 +115,10 @@ vidax/                          # Repository Root
 │   ├── models/
 │   │   ├── wan2_1.md           # Full CLI reference & usage for Wan2.1 scripts
 │   │   ├── wan2_2.md           # Full CLI reference & usage for Wan2.2 scripts
-│   │   ├── cosmos.md           # Full CLI reference & usage for Cosmos-Predict2.5
+│   │   ├── cosmos2_5.md         # Full CLI reference & usage for Cosmos-Predict2.5
 │   │   └── cosmos3.md          # Full CLI reference & usage for Cosmos 3 (Nano/Edge)
-│   ├── hardware_and_sharding.md # Sharding/JIT/dtype engineering notes + debugging history
+│   ├── lessons/                 # Model-specific debugging postmortems & design proposals
+│   ├── hardware_and_sharding.md # General sharding/JIT/dtype engineering notes
 │   └── benchmarking.md         # JAX vs PyTorch performance (placeholder)
 ├── examples/
 │   ├── generate_wan2_1_t2v.py     # Wan2.1 t2v, --model_size {1.3B,14B}

@@ -202,7 +202,7 @@ climbing a bamboo stalk for T2V; a stable, identity-preserving subject for
 I2V). Getting there took four real, sequentially-discovered bugs — the
 fourth (and dominant) one only surfaced after the first three were fixed and
 output was still texture, not a scene. Full diagnostic writeup in
-[`docs/hardware_and_sharding.md`](../hardware_and_sharding.md#7-cosmos-predict25-output-is-a-grid-of-random-colors-real-diffusion-bugs);
+[`docs/lessons/cosmos2_5_debugging.md`](../lessons/cosmos2_5_debugging.md);
 summary:
 
 - **`unpatchify`'s channel order didn't match the reference's** (it isn't
@@ -253,7 +253,7 @@ that silently corrupt output without ever erroring:
   a documented dead end since the diagnostic methodology itself (real-weight
   entropy/gate measurement, not just architecture re-reading) is reusable.
 
-See [`docs/hardware_and_sharding.md`](../hardware_and_sharding.md#7-cosmos-predict25-output-is-a-grid-of-random-colors-real-diffusion-bugs)
+See [`docs/lessons/cosmos2_5_debugging.md`](../lessons/cosmos2_5_debugging.md)
 for the full narrative, including the ablations that ruled out other
 hypotheses (VAE round-trip fidelity, RoPE relative-position invariants,
 weight-loading exact-match checks) before the real bug was found.

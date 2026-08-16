@@ -12,7 +12,7 @@
 # channel *and* a nonzero-but-tiny per-frame timestep for those frames
 # (`CosmosDiT`'s `condition_video_mask` + per-frame `timesteps`), not just
 # frame substitution alone. See `vidax.models.cosmos2_5.dit`'s module
-# docstring and `docs/models/cosmos.md`'s "Architecture notes" section.
+# docstring and `docs/models/cosmos2_5.md`'s "Architecture notes" section.
 #
 # Known simplification vs. the reference: the reference's `denoise()` also
 # forces the *predicted* x0 at conditioning-frame positions back to ground

@@ -54,9 +54,12 @@ generation time, rather than one blended end-to-end latency:
   are memory-bound before they're compute-bound on smaller chip counts.
 
 All numbers are for a single generation request (batch size 1, no
-concurrent requests), classifier-free guidance on (2x batch internally),
-`bfloat16` compute. The **Hardware** column names the TPU generation and
-chip count.
+concurrent requests), classifier-free guidance on (2x batch internally).
+The **Hardware** column names the TPU generation and chip count. The
+**I/O dtype** column is the compute dtype for activations/latents/VAE/text
+encoder (`--dtype`); **Weight dtype** is specifically the DiT's own weight
+dtype (`--dit_dtype` where a model exposes that flag separately, `--dtype`
+otherwise — see the note below the table for why Wan2.1 needs the split).
 
 ## Results
 
@@ -68,19 +71,20 @@ configs are genuinely identical, as documented per-row when that's the case
 (e.g. Cosmos-Predict2.5's T2V/I2V/V2V share the same resolution/frames/steps
 and only differ in which conditioning-mask/timestep values are passed in).
 
-| Model | Variant | Task | Hardware | Resolution | Frames | Steps | Compile (s) | Generation (s) | Per-step (s) | Peak HBM/chip (GB) |
-| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| Cosmos3 | Nano (16B) | T2V/I2V | v4-8 | 1280x704 | 93 | 35 | 64.2 | 249.9 | 7.1 | 29.5 |
-| Cosmos3 | Edge (4B) | T2V/I2V | v4-8 | 832x480 | 121 | 35 | 64.5 | 82.9 | 2.4 | 17.0 |
-| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | v4-8 | 1280x704 | 45\* | 35 | 92.1 | 1259.9 | 36.0 | 22.1 |
-| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | v4-8 | 1280x704 | 93 | 35 | 112.9 | 1357.3 | 38.8 | 16.0 |
-| Wan2.2 | A14B | T2V | v4-8 | 720x1280 | 81 | 50 | | | | |
-| Wan2.2 | A14B | I2V | v4-8 | 720x1280 | 81 | 40 | | | | |
-| Wan2.2 | 5B (TI2V) | T2V | v4-8 | 704x1280 | 121 | 50 | | | | |
-| Wan2.2 | 5B (TI2V) | I2V | v4-8 | 704x1280 | 121 | 40 | | | | |
-| Wan2.1 | 14B | T2V | v4-8 | 480x832 | 81 | 50 | | | | |
-| Wan2.1 | 14B (480P) | I2V | v4-8 | 720x1280 | 81 | 40 | | | | |
-| Wan2.1 | 1.3B | T2V | v4-8 | 480x832 | 81 | 50 | | | | |
+| Model | Variant | Task | Hardware | Resolution | Frames | Steps | I/O dtype | Weight dtype | Compile (s) | Generation (s) | Per-step (s) | Peak HBM/chip (GB) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| Cosmos3 | Nano (16B) | T2V | v4-8 | 1280x704 | 93 | 35 | bf16 | bf16 | 64.2 | 249.9 | 7.1 | 29.5 |
+| Cosmos3 | Edge (4B) | T2V | v4-8 | 832x480 | 121 | 35 | bf16 | bf16 | 64.5 | 82.9 | 2.4 | 17.0 |
+| Cosmos-Predict2.5 | 14B | T2V | v4-8 | 1280x704 | 45\* | 35 | bf16 | bf16 | 92.1 | 1259.9 | 36.0 | 22.1 |
+| Cosmos-Predict2.5 | 2B | T2V | v4-8 | 1280x704 | 93 | 35 | bf16 | bf16 | 112.9 | 1357.3 | 38.8 | 16.0 |
+| Wan2.2 | A14B | T2V | v4-8 | 720x1280 | 81 | 50 | | | | | | |
+| Wan2.2 | A14B | I2V | v4-8 | 720x1280 | 81 | 40 | | | | | | |
+| Wan2.2 | 5B (TI2V) | T2V | v4-8 | 704x1280 | 121 | 50 | | | | | | |
+| Wan2.2 | 5B (TI2V) | I2V | v4-8 | 704x1280 | 121 | 40 | | | | | | |
+| Wan2.1 | 14B | T2V | v4-8 | 480x832 | 81 | 50 | bf16 | bf16\*\*\* | 142.5 | 1306.8 | 26.1 | 17.2 |
+| Wan2.1 | 14B (720P)† | I2V | v4-8 | 832x1104\*\* | 81 | 40 | | | | | | |
+| Wan2.1 | 14B (480P) | I2V | v4-8 | 544x720\*\* | 81 | 40 | bf16 | bf16\*\*\* | 150.3 | 1125.3 | 28.1 | 22.1 |
+| Wan2.1 | 1.3B | T2V | v4-8 | 480x832 | 81 | 50 | bf16 | bf16\*\*\* | 85.4 | 348.3 | 7.0 | 10.2 |
 
 Resolution/frame/step columns are each model's reference default (see its
 own guide's CLI reference) — not necessarily the resolution that fits this
@@ -115,6 +119,56 @@ rows use a JSON-structured version of the standardized prompt (see
 [`docs/models/cosmos3.md#prompting`](models/cosmos3.md#prompting)) rather
 than `benchmarks/common.py`'s plain-text default — Cosmos3 is documented to
 need this format for good quality, especially Edge.
+
+† Wan2.1 I2V-14B-720P's row is empty because it currently OOMs on this
+4-chip machine at its native resolution, under the corrected `--dit_dtype
+float32` default (`RESOURCE_EXHAUSTED` during the conditioning image's VAE
+encode, before generation begins) — the extra ~7GB/chip of fp32 DiT weight
+memory (needed for correct output, see the \*\*\* footnote below) exceeds
+this machine's remaining HBM headroom at native 720P. Not a regression:
+this config was never actually verified correct before the precision fix
+either, since the old bf16-weights default produced severely corrupted
+output at exactly this token count. See
+[`docs/lessons/wan2_1_precision_debugging.md`](lessons/wan2_1_precision_debugging.md)
+for the measured OOM and why tensor+sequence parallelism doesn't resolve it
+on this hardware.
+
+\*\* Wan2.1 I2V's output resolution is derived from the standardized
+conditioning image's (`examples/assets/cat.jpg`, a 832x1104 portrait photo)
+aspect ratio and `--max_area`, not a fixed `--height`/`--width` (see
+`compute_latent_grid` in
+[`generate_wan2_1_i2v.py`](../examples/generate_wan2_1_i2v.py)) — so these
+two rows' resolutions are portrait (taller than wide), unlike every other
+row's fixed landscape resolution.
+
+Wan2.1's I2V-14B ships as two separate checkpoints tuned for different
+resolution ranges (`Wan2.1-I2V-14B-480P`/`720P`, identical architecture,
+different weights) — both rows are the same model at its own real recipe
+(`--shift` auto-selects `3.0` for 480P, `5.0` for 720P — see
+[`docs/models/wan2_1.md#i2v-14b`](models/wan2_1.md#i2v-14b-generate_wan2_1_i2vpy)),
+not a resolution choice made for this benchmark.
+
+\*\*\* **Stale relative to the current default — pending re-measurement.**
+All three of these rows were measured before a real precision bug was found
+and fixed: Wan2.1's reference implementation keeps its residual stream in
+float32 for virtually the whole network even under bf16 autocast, and
+rounding the DiT's checkpoint weights (natively float32 on disk) down to
+bf16 at load — this repo's old default — causes severe, visually obvious
+output corruption at large token counts (native 720P/81 frames; smaller
+configs like these three rows happen not to accumulate enough error to see
+it). `--dit_dtype` now defaults to `float32` for Wan2.1's DiT weights
+specifically (decoupled from `--dtype`, which still defaults to `bfloat16`
+for T5/VAE/CLIP) — see
+[`docs/lessons/wan2_1_precision_debugging.md`](lessons/wan2_1_precision_debugging.md)
+for the full investigation and
+[`docs/models/wan2_1.md`](models/wan2_1.md#precision-fp32-dit-weights) for
+the model-doc summary. These three rows' Weight dtype reflects what was
+actually measured (`--dit_dtype bfloat16`, still available as an explicit
+opt-in for memory-constrained runs), not the new default — re-measuring
+under `--dit_dtype float32` will show higher Peak HBM/chip (roughly
++7GB/chip for the 14B DiT, less for 1.3B) and is needed before these numbers
+can be compared against Wan2.2/Cosmos's bf16-throughout rows on equal
+footing.
 
 ---
 

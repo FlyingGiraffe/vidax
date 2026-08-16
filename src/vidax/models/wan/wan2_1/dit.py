@@ -35,7 +35,39 @@ from vidax.models.wan.common.dit_layers import WanHead, attend as _attend, chunk
 
 
 class WanDiTBlock(nn.Module):
-    """One transformer block: self-attn -> cross-attn -> FFN, AdaLN-modulated."""
+    """One transformer block: self-attn -> cross-attn -> FFN, AdaLN-modulated.
+
+    ``x`` is expected to already be float32 on entry, and stays float32 on
+    return -- it is the persistent residual-stream accumulator, matching the
+    reference's `amp.autocast(dtype=torch.float32)`-wrapped gated residual
+    updates (`x = x + y * e[2]` for self-attn, and the FFN's identical
+    pattern). Those two ops are the *only* place the reference explicitly
+    forces float32, but since neither ever casts the result back down, and
+    PyTorch's ordinary type promotion keeps a float32+bf16 add in float32
+    too (the un-wrapped cross-attention residual `x = x + self.cross_attn
+    (...)`), the reference's residual stream is float32 for the entire
+    network from partway through block 0 onward -- only individual sub-layer
+    matmuls (Q/K/V/O, FFN) run in bf16, via the ambient `amp.autocast
+    (dtype=torch.bfloat16)` set once outside the whole model. `WanDiT
+    .__call__` reproduces this by upcasting once before the block loop
+    starts (matching "partway through block 0" closely enough -- the only
+    difference is a few elementwise ops on the very first block's *input*
+    running in bf16 vs fp32, negligible) rather than piecemeal per block.
+
+    Getting this right matters beyond numerical parity: re-quantizing the
+    residual stream to bf16 after every one of the 80 gated residual adds
+    (2 per layer x 40 layers) -- what this module used to do -- compounds
+    into visibly corrupted (flat, hazy, low-detail) output at large token
+    counts (e.g. 720p x 81 frames), while looking fine at smaller scales;
+    see docs/models/wan2_1.md#status for the full investigation.
+
+    ``compute_dtype`` is the dtype sub-layer matmuls run in (the model's
+    overall dtype, e.g. bfloat16) -- every normalized/modulated activation
+    is explicitly downcast to it right before entering `attend`/FFN Dense
+    calls, mirroring autocast's per-op downcast of an fp32 input for a
+    lower-precision-registered op, and each sub-layer's output is cast back
+    up to float32 before being added into the residual stream.
+    """
     dim: int
     ffn_dim: int
     num_heads: int
@@ -45,6 +77,7 @@ class WanDiTBlock(nn.Module):
     mesh: Optional[Mesh] = None
     sequence_parallel: bool = False
     sp_axis_name: str = "sp"
+    compute_dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
     def __call__(
@@ -74,31 +107,30 @@ class WanDiTBlock(nn.Module):
         # --- self-attention ---
         norm_x = nn.LayerNorm(
             use_scale=False, use_bias=False, epsilon=self.eps,
-            name="norm1")(x.astype(jnp.float32))
-        norm_x = (norm_x * (1 + scale_msa) + shift_msa).astype(x.dtype)
+            name="norm1")(x)
+        norm_x = (norm_x * (1 + scale_msa) + shift_msa).astype(self.compute_dtype)
         attn_out = _attend(
             norm_x, norm_x, self.dim, self.num_heads, self.eps,
             prefix="self_attn", rope_freqs=rope_freqs, qk_norm=self.qk_norm,
             mesh=self.mesh, sequence_parallel=self.sequence_parallel,
             sp_axis_name=self.sp_axis_name)
-        x = (x.astype(jnp.float32) +
-             attn_out.astype(jnp.float32) * gate_msa).astype(x.dtype)
+        x = x + attn_out.astype(jnp.float32) * gate_msa
 
         # --- cross-attention ---
         norm_cross = nn.LayerNorm(
             use_scale=self.cross_attn_norm, use_bias=self.cross_attn_norm,
-            epsilon=self.eps, name="norm3")(x)
+            epsilon=self.eps, name="norm3")(x).astype(self.compute_dtype)
         x = x + _attend(
             norm_cross, context, self.dim, self.num_heads, self.eps,
             prefix="cross_attn", qk_norm=self.qk_norm, mesh=self.mesh,
             image_context=image_context, sequence_parallel=self.sequence_parallel,
-            sp_axis_name=self.sp_axis_name)
+            sp_axis_name=self.sp_axis_name).astype(jnp.float32)
 
         # --- feed-forward ---
         norm_h = nn.LayerNorm(
             use_scale=False, use_bias=False, epsilon=self.eps,
-            name="norm2")(x.astype(jnp.float32))
-        norm_h = (norm_h * (1 + scale_mlp) + shift_mlp).astype(x.dtype)
+            name="norm2")(x)
+        norm_h = (norm_h * (1 + scale_mlp) + shift_mlp).astype(self.compute_dtype)
         # `ffn_0` is column-parallel: under `sequence_parallel` (running
         # inside `shard_map`), its declared output width must already be
         # this device's local share -- see `vidax.models.wan.common
@@ -115,8 +147,7 @@ class WanDiTBlock(nn.Module):
         # otherwise.
         if self.sequence_parallel:
             h = jax.lax.psum(h, "tp")
-        x = (x.astype(jnp.float32) +
-             h.astype(jnp.float32) * gate_mlp).astype(x.dtype)
+        x = x + h.astype(jnp.float32) * gate_mlp
         return x
 
 
@@ -174,6 +205,20 @@ class WanDiT(nn.Module):
     image_dim: int = 1280  # CLIP ViT-H/14's vision_dim; only used if model_type == "i2v".
     sequence_parallel: bool = False
     sp_axis_name: str = "sp"
+    # dtype each `WanDiTBlock`'s sub-layer matmuls (Q/K/V/O, FFN) transiently
+    # downcast to before entering `attend`/Dense calls -- should match the
+    # DiT's *weight* dtype (`--dit_dtype` in the example scripts), not
+    # necessarily `latents`'s own dtype. Left unset (`None`), this defaults
+    # to `latents.dtype` for backward compatibility, which is only correct
+    # when weights and activations share one dtype; the moment they diverge
+    # (e.g. `--dit_dtype float32` weights with `--dtype bfloat16`
+    # latents/T5/VAE), an explicit compute_dtype here is required --
+    # otherwise every block still narrows activations down to
+    # `latents.dtype` before each matmul regardless of the wider weight
+    # precision, silently reintroducing the same repeated-bf16-rounding
+    # corruption at scale that using float32 weights was meant to fix in
+    # the first place (see docs/models/wan2_1.md#status).
+    compute_dtype: Optional[jnp.dtype] = None
 
     @nn.compact
     def __call__(
@@ -259,12 +304,23 @@ class WanDiT(nn.Module):
         freqs = (cos, sin)
 
         # --- transformer blocks ---
+        # `x` becomes the persistent float32 residual-stream accumulator
+        # from here on -- see `WanDiTBlock`'s docstring for why (matches the
+        # reference's `amp.autocast(dtype=torch.float32)`-wrapped gated
+        # residual updates, which never cast back down to bf16, so its
+        # residual stream is float32 for virtually the whole network).
+        # Individual sub-layer matmuls still run in `input_dtype` (bf16);
+        # only the accumulator itself stays wide.
+        x = x.astype(jnp.float32)
+        _effective_compute_dtype = self.compute_dtype if self.compute_dtype is not None else input_dtype
         for i in range(self.num_layers):
             x = WanDiTBlock(
                 dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
                 qk_norm=self.qk_norm, cross_attn_norm=self.cross_attn_norm,
                 eps=self.eps, mesh=self.mesh, sequence_parallel=self.sequence_parallel,
-                sp_axis_name=self.sp_axis_name, name=f"blocks_{i}")(
+                sp_axis_name=self.sp_axis_name,
+                compute_dtype=_effective_compute_dtype,
+                name=f"blocks_{i}")(
                     x, context, e0, freqs, image_context=context_img)
 
         # --- head + unpatchify ---

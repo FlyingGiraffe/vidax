@@ -333,265 +333,29 @@ image's encoded latent and masks were *also* device-resident alongside the
 immediately after decoding, instead of keeping all of them device-resident
 for one big on-device concatenate at the end.
 
-## 6. Cosmos-Predict2.5: bugs that only surfaced against real checkpoints
+## 6. Model-specific debugging postmortems
 
-The Cosmos-Predict2.5 2B DiT/VAE/UniPC-scheduler/Reason1-text-encoder port
-was initially built and verified with a mix of real-weight shape/forward
-checks and synthetic conditioning (no local Reason1 checkpoint existed yet).
-Once all three real checkpoints (DiT, VAE, and — from a separate
-`nvidia/Cosmos-Reason1-7B` download — the text encoder) became available and
-the actual `generate_cosmos2_5.py` script was run end-to-end against them,
-six real bugs surfaced that no amount of architecture-level review or
-synthetic-weight testing had caught. None of them were exotic — every one
-is a good instance of a class of bug worth watching for generally.
+Bug-by-bug narratives for specific models (Cosmos-Predict2.5's real-
+checkpoint bugs, the Wan2.1 fp32/bf16 precision corruption) have moved to
+[`docs/lessons/`](lessons/) to keep this file focused on general, reusable
+sharding/JIT/dtype engineering conventions rather than growing without
+bound as more models are ported. See:
 
-### `apply_chat_template` returning a `BatchEncoding`, not a bare list
-
-`Reason1Tokenizer.__call__` called
-`tokenizer.apply_chat_template(conversation, tokenize=True,
-add_generation_prompt=False)` expecting a plain `list[int]` back (matching
-older `transformers` behavior/most examples in the wild). Against the
-`transformers` version actually installed, this returns a `BatchEncoding`
-(dict-like, `{"input_ids": [...], "attention_mask": [...]}`) instead —
-`ids + [pad_id] * n` then fails with a `TypeError` (`BatchEncoding` doesn't
-support `+` with a list). Fixed by unwrapping `ids["input_ids"]` when the
-return value is dict-like. A synthetic-tokenizer test would never catch
-this — it only shows up against a real `AutoTokenizer.from_pretrained(...)`.
-
-### RoPE dtype: float32 cos/sin tables silently upcast q/k but not v
-
-Reason1's RoPE (`_apply_rotary_pos_emb` in
-`vidax.models.cosmos2_5.reason1`) computed `cos`/`sin` tables in
-float32 (needed for numerical range/precision) and applied them via `x *
-cos + rotate_half(x) * sin` *without* casting the result back to `x`'s
-original dtype. Under bf16 (the real checkpoint's native dtype), this
-silently upcast `q`/`k` to float32 after RoPE while `v` — never touched by
-RoPE — stayed bf16. `jax.nn.dot_product_attention` hard-requires `q`/`k`/`v`
-to share one dtype and raises (`"value dtype should be float32, but got
-bfloat16"`) rather than promoting for you. Every earlier synthetic test used
-float32 throughout, so this never triggered. Fixed by explicitly casting
-back to the input's original dtype at the end of `_apply_rotary_pos_emb`
-(the same convention `vidax.core.rope3d.apply_rope3d` and
-`vidax.models.cosmos2_5.rope.apply_cosmos_rope3d` already followed
-correctly — this was an inconsistency between two independently-written
-RoPE implementations in the same repo, not a new idea to invent).
-
-### `UniPCState` wasn't a registered JAX pytree
-
-`vidax.schedulers.unipc.UniPCState` is a plain `@dataclasses.dataclass` —
-which is *not* automatically a JAX pytree. Passing one as an argument to a
-`jax.jit`-wrapped function (`single_step` in `generate_cosmos2_5.py`) fails
-immediately: `"...was not marked as static using the static_argnums..."`.
-Every earlier test of the scheduler called `.step()` eagerly, outside any
-`jax.jit`, so this never came up until the real end-to-end script (which
-jits the whole per-step DiT-forward-plus-scheduler-step for speed, like
-every other example script in this repo) was actually run. Fixed with
-`jax.tree_util.register_dataclass(UniPCState, data_fields=[...],
-meta_fields=["this_order"])` — `this_order` specifically has to be a *meta*
-(static, hashed-not-traced) field, not a data field, because it's consumed
-by genuine Python-level branching inside the predictor/corrector math (see
-the next bug for why that distinction matters).
-
-### UniPC's `step_index` needs `static_argnums`, unlike Wan's Euler scheduler
-
-Once `UniPCState` could cross the `jit` boundary, the next failure was a
-`step_index` concretization error. Wan's `RectifiedFlowScheduler.step` only
-ever *indexes* an array with `step_index` (`self.sigmas[step_index]`), which
-works fine whether `step_index` is a concrete Python int or a traced value —
-so the existing example scripts never needed to mark it static.
-`FlowUniPCMultistepScheduler.step`, by contrast, has genuine Python-level
-control flow keyed on `step_index`'s *value* (`if step_index > 0:` to decide
-whether to run the corrector, `min(self.num_steps - step_index, ...)` for
-the `lower_order_final` ramp) — tracing it as an abstract value hits
-`jax.jit` head-on. Fixed by adding `step_index` to `static_argnums` in
-`generate_cosmos2_5.py`'s `single_step`. Costs at most `num_steps`-many
-retraces per run (one per distinct `step_index`), the same cost class the
-per-value-not-per-shape reasoning elsewhere in this repo already accepts.
-
-### A float32 conditioning mask silently upcast the whole DiT to float32
-
-`generate_cosmos2_5.py` built its image2world/video2world conditioning mask
-(`cond_mask`/`cond_mask_full`) as plain float32 (convenient for the
-timestep-blending arithmetic elsewhere), then passed it straight into
-`CosmosDiT`'s `condition_video_mask` input and into the sampling loop's
-latent re-clamp arithmetic — both of which mix it with bf16 tensors
-(`latents`, VAE-encoded conditioning frames). `jnp.concatenate` and ordinary
-elementwise ops silently promote to the *widest* operand dtype, so the
-DiT's entire input `x` (and therefore every downstream activation) became
-float32 for the whole forward pass, and the sampling loop's `latents`
-buffer's dtype flipped from bf16 to float32 after the very first
-conditioning-frame re-clamp (which would additionally have broken
-`single_step`'s `donate_argnums=(0,)`, which requires a donated buffer's
-dtype to stay fixed across calls). The failure that actually surfaced first
-was indirect and confusing: a cross-attention dtype mismatch between query
-(derived from the now-float32 `x`) and key (derived from `context`, which
-was never touched by this bug and stayed properly bf16) — nothing about the
-error pointed at the mask. Fixed two ways: defensively inside
-`CosmosDiT.__call__` (cast `padding_mask`/`condition_video_mask` to
-`latents.dtype` before concatenating, protecting any future caller) and at
-the source in the script (build `cond_mask_full` in the target compute
-`dtype` directly, keeping a separate float32 `cond_frame_mask` only for the
-timestep arithmetic that actually needs it).
-
-### Conflating the VAE's compression with the VAE+patch combined compression
-
-The image2world/video2world resolution-derivation code computed the
-*latent tensor's* spatial size as `pixel_size // 16`, copying Wan2.2 TI2V's
-own `dw, dh = pw * 16, ph * 16` divisibility-target constant verbatim. That
-constant is correct *for Wan2.2*, whose own VAE already compresses spatially
-16x (an 8x causal encoder plus an internal 2x pixel-patchify wrapper) before
-the DiT's patch_size divides it further — but Cosmos-Predict2.5 reuses
-**Wan2.1's** VAE, which only compresses 8x; the DiT's own `patch_size=(1,2,2)`
-is a separate, later factor that must *not* be pre-baked into the latent
-tensor's own shape (it's applied internally, inside `CosmosDiT.__call__`,
-to the already-VAE-compressed latent). The bug was silent for pure
-text2video (no crash — the script just self-consistently allocated,
-sampled, and decoded a latent tensor at *half* the intended resolution,
-producing a 64x64 video when 128x128 was requested, with nothing to flag
-the discrepancy) and only turned into a hard crash for image2world, where
-the independently-VAE-encoded conditioning frame (correctly at `pixel/8`)
-no longer matched the wrongly-`pixel/16`-sized latent tensor it was being
-inserted into. Fixed by using `pixel_size // 8` (the VAE's actual stride)
-for the latent tensor's shape, and `pw * 8, ph * 8` (not `* 16`) for the
-pixel-resolution divisibility target, so the resulting latent grid still
-comes out evenly divisible by `patch_size` as intended. The lesson: a
-silently-wrong-but-self-consistent resolution is much harder to catch than
-a crash — this one shipped through an earlier real-checkpoint text2video
-smoke test undetected because nothing in that test compared the *output*
-shape against the *requested* one.
-
-## 7. Cosmos-Predict2.5: "output is a grid of random colors" (real diffusion bugs)
-
-Everything in section 6 was found by running the pipeline and checking for
-crashes/NaNs/shapes — none of it touches whether the *generated video
-actually looks right*, since none of those checks decode and look at a
-frame. Once a full real-checkpoint run was visually inspected for the first
-time, the output was a rigid, perfectly regular grid of small scrambled
-color blobs — not noise, not a blurry-but-recognizable scene, a literal grid.
-Diagnosing this took a different kind of verification than section 6's bugs:
-line-by-line comparison against the actual reference PyTorch source (not
-just the earlier architecture research notes), plus a series of ablations
-run against the real checkpoint to narrow down which stage of the pipeline
-was responsible, since none of the individual pieces (RoPE, attention
-dispatch, checkpoint mapping) showed anything wrong under isolated unit
-tests with synthetic inputs.
-
-### Bug 1: `unpatchify`'s channel order isn't the inverse of `patchify`'s
-
-The reference's `PatchEmbed` flattens each patch as `"b c (t r)(h m)(w n)
--> b t h w (c r m n)"` (channel outermost, then temporal-patch, height-
-patch, width-patch) — this port replicated that correctly. But the
-reference's `unpatchify` uses a *different, non-symmetric* order:
-`"B T H W (p1 p2 t C) -> B C (T t)(H p1)(W p2)"` — height-patch, width-patch,
-temporal-patch, **channel innermost**. An earlier version of this code
-assumed unpatchify was simply patchify's inverse (same channel order) —
-a reasonable-looking assumption that happens to be wrong for this specific
-reference implementation, and was explicitly flagged as an unconfirmed risk
-in `CosmosDiT`'s module docstring before it was checked against source.
-Getting this wrong scrambles which of the final layer's 64 output values
-maps to which (channel, row-in-patch, col-in-patch) position — every patch
-still decodes to *something* locally smooth (each patch's own values are
-self-consistent), but adjacent patches don't relate to each other in image
-space at all, which is exactly what a literal grid of unrelated blobs looks
-like. **Necessary but not sufficient** — fixing this alone made only a
-modest per-pixel numerical difference and the output still looked like the
-same kind of grid, which in hindsight should have been the tell that a
-second, larger bug was still present (see Bug 3).
-
-### Bug 2: `single_step` recompiled the entire 2B-parameter DiT every sampling step
-
-`step_index` was passed as a `static_argnums` of the single `jax.jit`-wrapped
-function that *also* contained both DiT forward passes (conditional +
-unconditional) — necessary because UniPC's `step()` has genuine Python-level
-branching on `step_index`'s value (unlike Wan's Euler scheduler, which only
-ever indexes an array with it). Marking any argument of a jitted function
-static forces a full retrace — and recompile — of the *entire* function
-every time that argument's value changes, not just the small piece of code
-that reads it. Since `step_index` changes every step, this meant `num_steps
-* 2` full recompiles of a 28-block 2B-parameter model per run (confirmed:
-30 low-resolution steps took 16+ minutes wall-clock before the fix, almost
-entirely compile time). Fixed by splitting the per-step work: the DiT
-forward pass (`compute_velocity`) is its own `jax.jit` with *no*
-static/step-dependent argument at all (compiles exactly once, reused for
-every step), while `scheduler.step(...)`'s cheap UniPC arithmetic runs
-eagerly outside any `jit`, where a static `step_index` costs nothing.
-
-### Bug 3 (the dominant one): missing EDM-style preconditioning wrapper
-
-Cosmos-Predict2.5 is trained with `RectifiedFlowScaling` (`cosmos_predict2/
-_src/imaginaire/modules/denoiser_scaling.py`), an EDM-style preconditioning
-wrapper around the raw network, confirmed directly in the reference's
-`denoise()` (`models/text2world_model.py`):
-
-```python
-t = sigma / (sigma + 1)                      # NOT sigma itself
-c_skip, c_out, c_in = 1 - t, -t, 1 - t
-c_noise = t * t_scaling_factor                # t_scaling_factor = 1.0 (confirmed default, unset for this checkpoint)
-net_output = net(xt * c_in, timesteps=c_noise, ...)   # scaled input, remapped timestep
-x0_pred = c_skip * xt + c_out * net_output            # NOT `xt - sigma * net_output`
-```
-
-This repo's implementation never applied any of it: the raw noisy latent
-was fed to the DiT unscaled, and `sigma * num_train_timesteps` (Wan's own
-convention, `[0, 1000]`) was used as the timestep instead of `c_noise`
-(`t`, which is in `[0, 1)`) — roughly a **1000x scale error** on the
-timestep the model was told it was at, at every single step of every
-sampling run, plus a missing input rescale and a wrong raw-output-to-x0
-combination formula. A sinusoidal timestep embedding is extremely sensitive
-to the absolute scale of its input; being off by ~1000x means the model
-received essentially arbitrary, out-of-distribution noise-level
-conditioning throughout the entire trajectory, and could never correctly
-gauge how much to denoise. This was flagged as an open question in the
-architecture's original research notes ("confirm exact default
-`t_scaling_factor` if bit-exactness matters") but was never actually
-resolved before this port was first wired end-to-end — a reminder that a
-documented uncertainty left unresolved is still a live bug, not a footnote.
-
-Fixed by implementing the wrapper in `generate_cosmos2_5.py`'s
-`compute_velocity` (sampling-loop orchestration, not DiT architecture — same
-reasoning as why Wan's `y`/mask construction lives in its example scripts,
-not its model file), applied per-*frame* (broadcasting `t`/`c_in` etc. over
-`(B, T, 1, 1, 1)`) so image2world/video2world's differently-noised
-conditioning frames still get their own correct preconditioning. Since
-`FlowUniPCMultistepScheduler.step` internally assumes the simpler plain
-flow-matching convention (`x0 = sample - sigma_t * model_output`) and wasn't
-worth complicating just for this, the value passed to it as "model_output"
-is instead back-solved algebraically so that formula reproduces the correct
-EDM `x0_pred` exactly: `model_output := (xt + net_output) / (1 + sigma)`
-(substitute into `sample - sigma_t * model_output` and simplify — it reduces
-to precisely `c_skip * xt + c_out * net_output`).
-
-**Effect confirmed real and large**: before this fix, output was a rigid,
-perfectly regular grid at every resolution/step-count/guidance-scale tried.
-After, the grid artifact is completely gone, replaced by a qualitatively
-different, spatially organic (if, as of this writing, not yet fully
-photorealistic) texture — confirming the fix's *direction* and *mechanism*
-are correct. Full convergence to a clearly recognizable scene wasn't
-achieved even at the model's native 704x1280 resolution and the reference's
-own 35-step/`guide_scale=7` defaults in the runs done so far; whether that
-needs further investigation (a remaining smaller bug), more steps, or is
-simply a real limitation of testing with `bfloat16` weights and a handful of
-frames is not yet resolved — see [`docs/models/cosmos2_5.md`](models/cosmos2_5.md)'s
-status section for the current, honest state.
-
-### A note on diagnostic method
-
-Several plausible-looking hypotheses were tested and ruled out along the
-way, each cheaply (via ablation against the real checkpoint) before
-committing to a deeper investigation: VAE decoding pure random noise (rules
-out the VAE decoder itself — its output looks like fine chaotic static, not
-a regular grid); running with `--tensor_parallel_size 1` vs `4` (rules out
-the Megatron-sharded flash-attention dispatch path); `--guide_scale 1.0`
-(rules out classifier-free-guidance amplification of a miscalibrated
-unconditional branch); and directly instrumenting a real block's attention
-score matrix and AdaLN gate values with real weights (inconclusive on its
-own, but useful groundwork). The bug was ultimately found not by any single
-clever test but by re-reading the actual reference source end-to-end a
-second time, line by line, rather than trusting an earlier research
-summary's paraphrase of it — the summary wasn't wrong about the *existence*
-of the preconditioning wrapper (it's described in section 4.1 of this
-repo's original Cosmos architecture research), but the port's implementation
-never actually followed through on it.
+- [`docs/lessons/cosmos2_5_debugging.md`](lessons/cosmos2_5_debugging.md) —
+  six bugs found only against real Cosmos-Predict2.5 checkpoints (tokenizer,
+  RoPE dtype, JAX pytree registration, `jit` static args, dtype promotion,
+  resolution-divisibility), plus three deeper diffusion-correctness bugs
+  behind a "grid of random colors" symptom (unpatchify channel order,
+  per-step recompilation, a missing EDM preconditioning wrapper).
+- [`docs/lessons/wan2_1_precision_debugging.md`](lessons/wan2_1_precision_debugging.md) —
+  three compounding bugs (checkpoint weight rounding, `compute_dtype`/
+  `dit_dtype` decoupling, latents/output re-quantization) behind severely
+  corrupted Wan2.1 I2V output at large token counts, and why it only showed
+  up at scale.
+- [`docs/lessons/weight_streaming_proposal.md`](lessons/weight_streaming_proposal.md) —
+  an implementation-ready design for streaming DiT block weights from host
+  RAM into a small fixed-shape HBM buffer per layer, for running larger
+  models than fit fully resident in device memory.
 
 ## Summary of hard-won lessons
 
@@ -604,12 +368,7 @@ never actually followed through on it.
 | DiT weight cast OOMs on-device | float32 + bfloat16 copies coexist during an on-device cast | Cast on the host (numpy) before `device_put` |
 | i2v sequence-parallel chunking fails for some images | Image-derived resolution doesn't guarantee divisible token count | Grow width in 32px steps until divisible |
 | Final decode OOMs only when i2v conditioning is also present | On-device concatenate of all chunks competes with other device-resident state | Move each chunk to host immediately, concatenate on host |
-| Reason1 tokenizer crashes with a `TypeError` on `+` | `apply_chat_template` returns a `BatchEncoding`, not a bare list, in the installed `transformers` version | Unwrap `ids["input_ids"]` when the return value is dict-like |
-| Reason1 cross-attention raises a q/k/v dtype mismatch under bf16 | RoPE's float32 cos/sin tables upcast q/k but the result was never cast back | Cast RoPE output back to the input's original dtype |
-| `single_step` raises "not marked as static" the first time UniPC is jitted | `UniPCState` is a plain dataclass, not a registered JAX pytree | `jax.tree_util.register_dataclass(...)`, with `this_order` as a static meta field |
-| UniPC raises a concretization error on `if step_index > 0` | Unlike Euler, UniPC's `step()` has real Python control flow keyed on `step_index`'s value | Add `step_index` to `static_argnums` |
-| Cross-attention dtype mismatch that has nothing to do with cross-attention | A float32 conditioning mask upcasts the whole DiT input via `jnp.concatenate`'s dtype promotion | Cast masks to the compute dtype both defensively (in `CosmosDiT`) and at the source (in the script) |
-| image2world output resolution silently half of what was requested (t2v version: no error at all) | Latent tensor shape computed as `pixel // 16` (Wan2.2's VAE+patch combined compression), but Cosmos reuses Wan2.1's 8x-only VAE | `pixel // 8` for the latent shape; `patch_size * 8` (not `* 16`) for the resolution divisibility target |
-| Generated video is a rigid, perfectly regular grid of scrambled color blobs | `unpatchify`'s channel-flatten order assumed symmetric with `patchify`'s; reference uses a genuinely different order for the two | Reorder unpatchify's reshape/transpose to `(height-patch, width-patch, temporal-patch, channel)`, matching the reference exactly |
-| 30 low-resolution sampling steps takes 16+ minutes wall-clock | `step_index` as `static_argnums` of a jit containing both full DiT forward passes forces a full recompile every step | Split into a step-independent jitted DiT forward + an eagerly-run (unjitted) UniPC scheduler step |
-| Grid artifact persists after the unpatchify fix, at every resolution/step-count/guidance-scale | Missing EDM-style preconditioning wrapper (`c_skip`/`c_out`/`c_in`/`c_noise`) — DiT received an ~1000x-wrong-scale timestep and an unscaled input at every step | Implement the wrapper in the sampling loop; back-solve UniPC's expected "model_output" convention algebraically so the existing scheduler needs no changes |
+
+Model-specific postmortems (Cosmos-Predict2.5's real-checkpoint bugs, the
+Wan2.1 fp32/bf16 precision corruption) have their own summary tables in
+[`docs/lessons/`](lessons/) — see the section above.

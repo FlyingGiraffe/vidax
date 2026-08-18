@@ -110,6 +110,8 @@ python examples/generate_wan2_1_t2v.py \
 | `--sequence_parallel_size` | `1` | Devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of `--tensor_parallel_size`'s weight-sharding — the two compose freely (see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s "Combining with Megatron TP"). Not needed at 1.3B scale; may help the 14B model at higher resolutions. |
 | `--dtype` | `bfloat16` | `float32` \| `float16` \| `bfloat16`. Compute dtype for T5/VAE, and for the DiT's *activations* specifically (not its weights — see `--dit_dtype`). `float16` will fail at runtime — TPU's XLA backend doesn't implement `float16` matmuls. |
 | `--dit_dtype` | `float32` | Cast target for the DiT's *weights*, independent of `--dtype`. Defaults to `float32` because the reference keeps its residual stream in float32 for virtually the entire network even under bf16 autocast, and the released checkpoints ship natively float32 — rounding them to bf16 (the old default here) causes real, visually obvious corruption at large token counts. See [Precision: fp32 DiT weights](#precision-fp32-dit-weights) below. Pass `--dit_dtype bfloat16` to opt back into the old, cheaper-but-lossy-at-scale behavior. |
+| `--offload_dit_weights` | off | Keep the DiT's per-block weights host-resident, offloading `--offload_chunk_size` blocks' worth into HBM at a time during the sampling loop, instead of the whole tree staying HBM-resident for the entire script (the same idea as DeepSpeed's ZeRO-Offload / diffusers' `enable_sequential_cpu_offload`, applied per-layer here). Needed at native 720P on this repo's 4-chip machine (the DiT's own compute already fits fully resident there; a fully-resident DiT just leaves no headroom for VAE decode right after). Not needed at 480P. Has a real throughput cost even at the best-measured chunk size (~5x slower per step than 480P) — see [`docs/weight_offloading.md`](../weight_offloading.md). Not implemented together with `--sequence_parallel_size > 1`. |
+| `--offload_chunk_size` | `1` | Number of consecutive DiT blocks grouped into one offloaded HBM buffer / `jax.jit` compile, when `--offload_dit_weights` is set. Must divide `num_layers` (30 for 1.3B, 40 for 14B). Raising it trades some resident-memory headroom for fewer, larger transfers — `docs/benchmarking.md`'s own native-720P rows use `20` (confirmed with the full 5-run methodology: ~5-8% faster than the default `1`, at 23.0GB/chip for T2V and 32.7GB/chip for I2V — the latter close to this chip's real ceiling), see [`docs/weight_offloading.md`](../weight_offloading.md)'s chunk-size sweep for the full picture and every chunk size measured. |
 | `--seed` | `0` | Initial noise seed. |
 | `--num_steps` | `50` | Sampling steps. |
 | `--shift` | `5.0` | Flow-matching noise-schedule shift. Reference default for t2v regardless of resolution. |
@@ -210,6 +212,8 @@ projection (`WanDiT`'s `model_type="i2v"` path).
 | `--sequence_parallel_size` | `1` | Same DeepSpeed-Ulysses flag as the t2v script, independent of `--tensor_parallel_size` — the one to reach for once actually running this 14B model at higher resolution, where self-attention activation memory is the more likely bottleneck than at 1.3B scale. Verified to work correctly with the CLIP image cross-attention branch too, as long as `--tensor_parallel_size 1` (combining both with i2v's CLIP branch isn't supported yet — see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s "Combining with Megatron TP"). |
 | `--dtype` | `bfloat16` | Same choices/caveats as t2v. |
 | `--dit_dtype` | `float32` | Same as t2v — cast target for the DiT's weights specifically, decoupled from `--dtype`. Also applies to the I2V conditioning tensor `y` and the sampling loop's `latents`, since both are concatenated directly into the DiT's own input. See [Precision: fp32 DiT weights](#precision-fp32-dit-weights). |
+| `--offload_dit_weights` | off | Same as t2v. Needed for the 720P checkpoint at native resolution (fixes the OOM described in Status below); not needed for 480P. |
+| `--offload_chunk_size` | `1` | Same as t2v. |
 | `--seed` | `0` | Initial noise seed. |
 | `--num_steps` | `40` | Reference i2v default (vs. 50 for t2v). |
 | `--shift` | auto (`None`) | Flow-matching noise-schedule shift. When left unset, auto-selects the reference's own default: `3.0` if `--max_area <= 832*480` (480P checkpoint's scale), `5.0` otherwise (720P checkpoint's scale). Pass explicitly to override either way. |
@@ -241,15 +245,18 @@ trained/tuned at — `--shift` now auto-selects `3.0` at 480P scale (see the
 CLI reference below), and the 480P usage example explicitly passes
 `--max_area 480*832`.
 
-Both checkpoints' "verified coherent" status above predates the fp32-DiT-
-weights fix described next; 480P remains verified under the new default
-(smaller token count, fits comfortably), but native 720P (81 frames) now
-OOMs on this repo's 4-chip machine during the conditioning image's VAE
-encode, before generation even starts, since the extra weight memory the
-fix requires exceeds available HBM headroom at that scale — see
-[Precision: fp32 DiT weights](#precision-fp32-dit-weights) and
-[`docs/benchmarking.md`](../benchmarking.md) for the measured error and
-current status.
+480P is verified coherent under the fp32-DiT-weights default with no
+special handling (smaller token count, fits comfortably fully resident).
+Native 720P (81 frames) needs `--offload_dit_weights`: a fully-resident fp32
+DiT otherwise leaves no HBM headroom for the conditioning image's VAE
+encode, right before generation starts, on this repo's 4-chip machine (the
+DiT's own per-step compute already fits fine fully resident at this scale —
+the OOM is specifically from the DiT staying resident *outside* the
+sampling loop too). With `--offload_dit_weights`, native 720P is verified
+coherent — see [Precision: fp32 DiT weights](#precision-fp32-dit-weights),
+[`docs/weight_offloading.md`](../weight_offloading.md)
+for the mechanism and its real (non-trivial) throughput cost, and
+[`docs/benchmarking.md`](../benchmarking.md) for measured numbers.
 
 ### Precision: fp32 DiT weights
 
@@ -280,8 +287,8 @@ the corruption doesn't show up), decoupled from the general `--dtype` flag
 (still `bfloat16` by default, governing T5/VAE/CLIP, which really are
 cheap and correct to run in bf16). The memory cost of the new default is
 real: roughly double the DiT's resident weight memory versus bf16, which is
-the direct cause of I2V-14B-720P's current OOM at native resolution (see
-above). Full investigation, including why this took three compounding bugs
+the direct cause of I2V-14B-720P's OOM at native resolution before
+`--offload_dit_weights` (see above). Full investigation, including why this took three compounding bugs
 rather than one to actually fix (checkpoint rounding, a
 `compute_dtype`/`dit_dtype` decoupling bug, and per-step latent
 re-quantization), in

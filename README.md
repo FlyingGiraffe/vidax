@@ -53,7 +53,7 @@ I2V, Wan2.2's A14B).
 | Wan2.2 | 5B | T2V/I2V | ✅ | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) |
 | Wan2.1 | 14B | T2V | ✅ | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B) |
 | Wan2.1 | 14B (720P) | I2V | ✅ | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P) |
-| Wan2.1 | 14B (480P) | I2V | ❌ | ❌/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P) |
+| Wan2.1 | 14B (480P) | I2V | ✅ | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P) |
 | Wan2.1 | 1.3B | T2V | ✅ | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) |
 | LTX-Video | 13B | T2V/I2V | ❌ | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
 | LTX-Video | 2B | T2V/I2V | ❌ | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
@@ -117,8 +117,9 @@ vidax/                          # Repository Root
 │   │   ├── wan2_2.md           # Full CLI reference & usage for Wan2.2 scripts
 │   │   ├── cosmos2_5.md         # Full CLI reference & usage for Cosmos-Predict2.5
 │   │   └── cosmos3.md          # Full CLI reference & usage for Cosmos 3 (Nano/Edge)
-│   ├── lessons/                 # Model-specific debugging postmortems & design proposals
+│   ├── lessons/                 # Model-specific debugging postmortems
 │   ├── hardware_and_sharding.md # General sharding/JIT/dtype engineering notes
+│   ├── weight_offloading.md    # Per-layer DiT weight offloading (host RAM -> HBM)
 │   └── benchmarking.md         # JAX vs PyTorch performance (placeholder)
 ├── examples/
 │   ├── generate_wan2_1_t2v.py     # Wan2.1 t2v, --model_size {1.3B,14B}

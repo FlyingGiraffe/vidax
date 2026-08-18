@@ -177,8 +177,9 @@ as a way around this and directly ruled out for this specific problem:
 weight memory is only reduced by the (already-maxed) tensor-parallel axis,
 so trading tensor-parallel width for sequence-parallel width would *reduce*
 available weight sharding while token-activation memory was never the
-actual bottleneck here — it would make the OOM worse, not better. The
-[weight-streaming proposal](weight_streaming_proposal.md) is a genuinely
+actual bottleneck here — it would make the OOM worse, not better. [Per-layer weight offloading](../weight_offloading.md) is a genuinely
 different approach (reduce *resident* weight memory per step, not shard it
-further across chips this machine doesn't have) aimed at this exact
-problem.
+further across chips this machine doesn't have) that fixes this exact
+problem — implemented and confirmed working (`--offload_dit_weights`), see
+that doc and [`docs/benchmarking.md`](../benchmarking.md) for the measured
+result.

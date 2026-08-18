@@ -33,6 +33,12 @@ def build_args(args: argparse.Namespace) -> argparse.Namespace:
         dit_checkpoint_path = (
             os.path.join(repo_dir, "diffusion_pytorch_model.safetensors") if args.model_size == "1.3B"
             else os.path.join(repo_dir, "diffusion_pytorch_model.safetensors.index.json"))
+        # T2V-14B ships as a single checkpoint used at any resolution
+        # (unlike I2V's two separately-tuned 480P/720P checkpoints below) --
+        # `--t2v_resolution` just picks which (height, width) to benchmark
+        # it at, defaulting to this repo's existing 480P row.
+        height, width = (720, 1280) if args.t2v_resolution == "720P" else (480, 832)
+        size_slug = args.model_size.lower() if args.t2v_resolution == "480P" else f"{args.model_size.lower()}_720p"
         return argparse.Namespace(
             model_size=args.model_size,
             dit_checkpoint_path=dit_checkpoint_path,
@@ -46,13 +52,15 @@ def build_args(args: argparse.Namespace) -> argparse.Namespace:
             sequence_parallel_size=sp_size,
             dtype="bfloat16",
             dit_dtype="float32",
+            offload_dit_weights=args.offload_dit_weights,
+            offload_chunk_size=args.offload_chunk_size,
             seed=0,
             num_steps=50,
             shift=5.0,
-            height=480,
-            width=832,
+            height=height,
+            width=width,
             num_frames=81,
-            output_path=common.output_path("wan", "2.1", args.model_size.lower(), "t2v"),
+            output_path=common.output_path("wan", "2.1", size_slug, "t2v"),
         )
     else:  # i2v, 14B only -- ships as two separate checkpoints (480P/720P),
         # each trained/tuned at its own resolution range (identical
@@ -84,6 +92,8 @@ def build_args(args: argparse.Namespace) -> argparse.Namespace:
             sequence_parallel_size=sp_size,
             dtype="bfloat16",
             dit_dtype="float32",
+            offload_dit_weights=args.offload_dit_weights,
+            offload_chunk_size=args.offload_chunk_size,
             seed=0,
             num_steps=40,
             shift=shift,
@@ -107,10 +117,27 @@ def main():
                          help="Ignored for --task t2v. I2V-14B ships as two separate checkpoints "
                               "(Wan2.1-I2V-14B-480P/720P), each trained/tuned at its own "
                               "resolution range -- picks which one to load and benchmark.")
+    parser.add_argument("--t2v_resolution", type=str, default="480P", choices=["480P", "720P"],
+                         help="Ignored for --task i2v. T2V-14B/1.3B ship as a single checkpoint "
+                              "used at any resolution (unlike i2v's two separate checkpoints) -- "
+                              "picks (height, width) to benchmark it at: 480x832 (this repo's "
+                              "existing default row) or native 720x1280.")
+    parser.add_argument("--offload_dit_weights", action="store_true",
+                         help="Passed through to generate_wan2_1_t2v.py/_i2v.py's identical flag: "
+                              "offload the DiT's per-block weights into HBM one chunk at a time "
+                              "instead of keeping the whole tree resident. Needed at native 720P "
+                              "(see docs/weight_offloading.md); not needed at 480P.")
+    parser.add_argument("--offload_chunk_size", type=int, default=1,
+                         help="Passed through to generate_wan2_1_t2v.py/_i2v.py's identical flag: "
+                              "number of consecutive DiT blocks offloaded together. Ignored unless "
+                              "--offload_dit_weights is also set.")
     args = parser.parse_args()
 
     run_args = build_args(args)
-    size = args.model_size.lower() if args.task == "t2v" else f"14b_{args.i2v_resolution.lower()}"
+    if args.task == "t2v":
+        size = args.model_size.lower() if args.t2v_resolution == "480P" else f"{args.model_size.lower()}_720p"
+    else:
+        size = f"14b_{args.i2v_resolution.lower()}"
     main_fn = generate_wan2_1_t2v.main if args.task == "t2v" else generate_wan2_1_i2v.main
     common.run_benchmark(
         model="wan", version="2.1", size=size, task=args.task, main_fn=main_fn, args=run_args,

@@ -352,10 +352,11 @@ bound as more models are ported. See:
   `dit_dtype` decoupling, latents/output re-quantization) behind severely
   corrupted Wan2.1 I2V output at large token counts, and why it only showed
   up at scale.
-- [`docs/lessons/weight_streaming_proposal.md`](lessons/weight_streaming_proposal.md) —
-  an implementation-ready design for streaming DiT block weights from host
-  RAM into a small fixed-shape HBM buffer per layer, for running larger
-  models than fit fully resident in device memory.
+- [`docs/weight_offloading.md`](weight_offloading.md) — per-layer weight
+  offloading (host RAM, streamed into a small fixed-shape HBM buffer one
+  block at a time), implemented for Wan2.1's 14B DiT to fix native-720P
+  OOMs; the measured throughput cost and when it's actually worth reaching
+  for.
 
 ## Summary of hard-won lessons
 

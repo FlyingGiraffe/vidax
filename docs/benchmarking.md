@@ -22,7 +22,14 @@ Every row is the average of `--num_runs` independent end-to-end runs
 is a genuine cold start, not just the first) — `benchmarks/results/*.json`
 keeps every individual run's raw metrics alongside the average. Each run's
 output video is saved to `out/<slug>/<slug>_<run>.mp4` (e.g.
-`out/cosmos_3_nano_t2v/cosmos_3_nano_t2v_1.mp4`).
+`out/cosmos_3_nano_t2v/cosmos_3_nano_t2v_1.mp4`). This includes both
+native-720P Wan2.1 rows (`--offload_dit_weights --offload_chunk_size 20`,
+see the `‡` footnote below) — each run there takes well over an hour, so
+the full 5-run average took a long time to collect (multiple sequential
+hours per model), but was worth it for a fair, consistent comparison against
+every other row in this table (the chunk-size sweep below, which only needs
+relative not absolute numbers, still uses a cheaper 1-run/5-step
+methodology, noted separately there).
 
 ## Metrics
 
@@ -81,10 +88,11 @@ and only differ in which conditioning-mask/timestep values are passed in).
 | Wan2.2 | A14B | I2V | v4-8 | 720x1280 | 81 | 40 | | | | | | |
 | Wan2.2 | 5B (TI2V) | T2V | v4-8 | 704x1280 | 121 | 50 | | | | | | |
 | Wan2.2 | 5B (TI2V) | I2V | v4-8 | 704x1280 | 121 | 40 | | | | | | |
-| Wan2.1 | 14B | T2V | v4-8 | 480x832 | 81 | 50 | bf16 | bf16\*\*\* | 142.5 | 1306.8 | 26.1 | 17.2 |
-| Wan2.1 | 14B (720P)† | I2V | v4-8 | 832x1104\*\* | 81 | 40 | | | | | | |
-| Wan2.1 | 14B (480P) | I2V | v4-8 | 544x720\*\* | 81 | 40 | bf16 | bf16\*\*\* | 150.3 | 1125.3 | 28.1 | 22.1 |
-| Wan2.1 | 1.3B | T2V | v4-8 | 480x832 | 81 | 50 | bf16 | bf16\*\*\* | 85.4 | 348.3 | 7.0 | 10.2 |
+| Wan2.1 | 14B‡ | T2V | v4-8 | 720x1280 | 81 | 50 | bf16 | fp32 | 108.2 | 6150.5 | 123.0 | 23.0 |
+| Wan2.1 | 14B | T2V | v4-8 | 480x832 | 81 | 50 | bf16 | fp32 | 142.5 | 1306.8 | 26.1 | 17.2 |
+| Wan2.1 | 14B (720P)‡ | I2V | v4-8 | 832x1104\*\* | 81 | 40 | bf16 | fp32 | 131.3 | 5090.0 | 127.2 | 32.7 |
+| Wan2.1 | 14B (480P) | I2V | v4-8 | 544x720\*\* | 81 | 40 | bf16 | fp32 | 150.3 | 1125.3 | 28.1 | 22.1 |
+| Wan2.1 | 1.3B | T2V | v4-8 | 480x832 | 81 | 50 | bf16 | fp32 | 85.4 | 348.3 | 7.0 | 10.2 |
 
 Resolution/frame/step columns are each model's reference default (see its
 own guide's CLI reference) — not necessarily the resolution that fits this
@@ -120,18 +128,31 @@ rows use a JSON-structured version of the standardized prompt (see
 than `benchmarks/common.py`'s plain-text default — Cosmos3 is documented to
 need this format for good quality, especially Edge.
 
-† Wan2.1 I2V-14B-720P's row is empty because it currently OOMs on this
-4-chip machine at its native resolution, under the corrected `--dit_dtype
-float32` default (`RESOURCE_EXHAUSTED` during the conditioning image's VAE
-encode, before generation begins) — the extra ~7GB/chip of fp32 DiT weight
-memory (needed for correct output, see the \*\*\* footnote below) exceeds
-this machine's remaining HBM headroom at native 720P. Not a regression:
-this config was never actually verified correct before the precision fix
-either, since the old bf16-weights default produced severely corrupted
-output at exactly this token count. See
+‡ Both native-720P rows require `--offload_dit_weights` (`--offload_chunk_size
+20`, the empirically-chosen value for these rows — see
+[`docs/weight_offloading.md`](weight_offloading.md#chunk-size-sweep)):
+on this 4-chip machine, under the correct `--dit_dtype float32` default, a
+fully-resident DiT otherwise leaves no HBM headroom for an unrelated
+phase's own activation memory at this token count — VAE decode right after
+T2V's sampling loop ends, or the conditioning image's VAE encode right
+before I2V's sampling loop starts (confirmed via direct probing: the DiT's
+own per-step compute already fits fine fully resident at native 720P; these
+OOMs happen outside the sampling loop entirely). `--offload_dit_weights`
+keeps the DiT's per-block weights host-resident, offloading `--offload_
+chunk_size` blocks' worth into HBM at a time, which avoids ever having the
+full tree resident outside the brief window each chunk needs it. This isn't
+free even at the faster chunk size 20 used here: measured 123.0s/step for
+T2V vs. 26.1s/step at 480P (more tokens too — see the "why 480P is faster"
+reasoning in `docs/weight_offloading.md` — but a real per-layer-transfer/
+compute-overlap cost remains on top of that). Peak HBM/chip differs
+notably between the two rows at this chunk size — 23.0GB for T2V, comfortably
+under budget, vs. **32.7GB for I2V**, close to this chip's real ceiling (the
+extra CLIP/portrait-resolution/VAE-encode residency I2V carries on top of
+the DiT leaves much less headroom at the same chunk size) — worth keeping in
+mind before pushing I2V's chunk size any higher, or combining with anything
+else that needs HBM. See
 [`docs/lessons/wan2_1_precision_debugging.md`](lessons/wan2_1_precision_debugging.md)
-for the measured OOM and why tensor+sequence parallelism doesn't resolve it
-on this hardware.
+for the original OOM this fixes.
 
 \*\* Wan2.1 I2V's output resolution is derived from the standardized
 conditioning image's (`examples/assets/cat.jpg`, a 832x1104 portrait photo)
@@ -148,27 +169,93 @@ different weights) — both rows are the same model at its own real recipe
 [`docs/models/wan2_1.md#i2v-14b`](models/wan2_1.md#i2v-14b-generate_wan2_1_i2vpy)),
 not a resolution choice made for this benchmark.
 
-\*\*\* **Stale relative to the current default — pending re-measurement.**
-All three of these rows were measured before a real precision bug was found
-and fixed: Wan2.1's reference implementation keeps its residual stream in
-float32 for virtually the whole network even under bf16 autocast, and
-rounding the DiT's checkpoint weights (natively float32 on disk) down to
-bf16 at load — this repo's old default — causes severe, visually obvious
-output corruption at large token counts (native 720P/81 frames; smaller
-configs like these three rows happen not to accumulate enough error to see
-it). `--dit_dtype` now defaults to `float32` for Wan2.1's DiT weights
-specifically (decoupled from `--dtype`, which still defaults to `bfloat16`
-for T5/VAE/CLIP) — see
+All five Wan2.1 rows' Weight dtype is `fp32`, reflecting the current
+`--dit_dtype float32` default: Wan2.1's reference implementation keeps its
+residual stream in float32 for virtually the whole network even under bf16
+autocast, and rounding the DiT's checkpoint weights (natively float32 on
+disk) down to bf16 at load — this repo's old default — causes severe,
+visually obvious output corruption at large token counts (native 720P/81
+frames; smaller configs happen not to accumulate enough error to see it).
+`--dit_dtype` is decoupled from `--dtype` (still `bfloat16` for T5/VAE/CLIP)
+— see
 [`docs/lessons/wan2_1_precision_debugging.md`](lessons/wan2_1_precision_debugging.md)
 for the full investigation and
 [`docs/models/wan2_1.md`](models/wan2_1.md#precision-fp32-dit-weights) for
-the model-doc summary. These three rows' Weight dtype reflects what was
-actually measured (`--dit_dtype bfloat16`, still available as an explicit
-opt-in for memory-constrained runs), not the new default — re-measuring
-under `--dit_dtype float32` will show higher Peak HBM/chip (roughly
-+7GB/chip for the 14B DiT, less for 1.3B) and is needed before these numbers
-can be compared against Wan2.2/Cosmos's bf16-throughout rows on equal
-footing.
+the model-doc summary. `--dit_dtype bfloat16` remains available as an
+explicit opt-in for memory-constrained runs at smaller/safer token counts,
+but isn't what any row above measures.
+
+## Weight-offloading chunk-size sweep
+
+`--offload_dit_weights` (see the `‡` footnote above and
+[`docs/weight_offloading.md`](weight_offloading.md)) offloads
+`--offload_chunk_size` consecutive DiT blocks per HBM buffer at a time,
+default 1 (a fresh host-to-device transfer and `jax.jit` dispatch per
+block, every block, every step). Grouping more blocks per chunk trades some
+of the memory this technique frees back for fewer, larger transfers and
+more within-chunk operator fusion — first swept cheaply with
+[`benchmarks/sweep_offload_chunks.py`](../benchmarks/sweep_offload_chunks.py)
+(reuses `generate_wan2_1_t2v.py`'s real `main(args)`, same as every
+`run_*.py` script) on Wan2.1 14B T2V at native 720P, `--num_runs 1` and
+`--num_steps 5` per chunk size instead of this doc's usual 5 runs / full
+step count — only steady-state per-step time and peak HBM were of interest
+for the initial sweep (final-output coherence was already verified
+separately at `--offload_chunk_size 1`, see `docs/weight_offloading.md`):
+
+| `--offload_chunk_size` | Per-step (s) | Peak HBM/chip (GB) |
+| ---: | ---: | ---: |
+| 1 | 141.7 | 15.2 |
+| 2 | 136.3 | 15.2 |
+| 4 | 133.8 | 15.2 |
+| 8 | 131.3 | 15.3 |
+| 20 | 123.7 | 23.0 |
+| 40 (whole model) | 111.3 | 26.1 |
+
+Larger chunks help, but only modestly (~21% faster from 1 to 40 -- the
+whole 40-layer DiT offloaded as a single chunk, i.e. the entire tree
+re-transferred fresh every step), while peak HBM grows roughly
+proportionally with chunk size once it's no longer small relative to the
+non-weight baseline (jumping from ~15GB to 23GB going from 8 to 20, since
+20 blocks is already half the model). Even `--offload_chunk_size 40` stays
+far short of this table's non-offloaded ~26-30s/step baseline (see the 480P
+rows above) -- grouping more blocks per transfer isn't the main lever here.
+Two likely reasons, neither investigated further in this round: (1) a chunk
+never needs re-transferring if its weights never change between steps, but
+this implementation's `jax.device_put` runs fresh every step regardless of
+chunk size, wastefully re-paying the transfer even at `--offload_chunk_size
+40` where the "chunk" is just the whole static DiT; (2) splitting the
+forward pass into three separately-`jax.jit`-compiled pieces
+(`pre_process`/chunk loop/`post_process`, needed so the outer chunk loop
+stays untraced -- see `docs/weight_offloading.md`) loses end-to-end operator
+fusion across those boundaries regardless of chunk granularity, unlike the
+non-offloaded path's single fused `single_step`.
+
+**`--offload_chunk_size 20` was then confirmed with the full standard
+methodology** (`--num_runs 5`, full step count) for both models, to give a
+fair apples-to-apples comparison against every other row in this table
+(not just T2V's quick sweep) -- these are exactly the numbers in the two
+native-720P rows above:
+
+| Model | `--offload_chunk_size` | Per-step (s) | Peak HBM/chip (GB) |
+| --- | ---: | ---: | ---: |
+| T2V | 1 | 130.0 | 15.2 |
+| T2V | 20 | 123.0 | 23.0 |
+| I2V | 1 | 137.9 | 19.1 |
+| I2V | 20 | 127.2 | 32.7 |
+
+T2V's full-run result (123.0s/step) matches the quick sweep's 5-step
+estimate (123.7s/step) closely, validating that shorter/`--num_runs 1`
+sweeps are a reasonable way to screen chunk sizes before committing to a
+full 5-run measurement. Both models get a modest, consistent win from
+`--offload_chunk_size 20` over the default (~5.4% for T2V, ~7.8% for I2V)
+at a real HBM cost -- but that cost lands very differently: T2V's 23.0GB
+still leaves comfortable headroom, while I2V's 32.7GB is close to this
+chip's real ceiling (I2V's extra CLIP/portrait-resolution/VAE-encode
+residency leaves much less room to begin with, see the `‡` footnote). This
+doc's two native-720P rows use `--offload_chunk_size 20` given that
+confirmed, modest-but-real win; `--offload_chunk_size 1` remains the safer
+choice if you're combining `--offload_dit_weights` with anything else that
+also needs HBM headroom, especially for I2V.
 
 ---
 

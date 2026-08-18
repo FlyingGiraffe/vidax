@@ -25,7 +25,7 @@ from vidax.core.sharding import (
 )
 from vidax.core.rope3d import create_rope3d_freqs
 from vidax.models.wan.wan2_1.configs import T2V_1_3B_CONFIG, T2V_14B_CONFIG
-from vidax.models.wan.wan2_1.dit import WanDiT
+from vidax.models.wan.wan2_1.dit import WanDiT, WanDiTBlock
 from vidax.models.wan.wan2_1.vae import WanVAEDecoder, Decoder3d, _count_causal_convs
 from vidax.models.wan.common.t5 import T5Encoder, Umt5Tokenizer
 from vidax.schedulers.flow_match import RectifiedFlowScheduler
@@ -213,7 +213,47 @@ def main(args):
     t5_params = cast_to_dtype(t5_params, dtype)
 
     dit_shardings = shard_wan_params(dit_params, mesh)
-    dit_params = jax.device_put(dit_params, dit_shardings)
+    # `--offload_dit_weights`: keep the DiT's per-layer ("blocks_*") params
+    # as a host-resident numpy pytree instead of `device_put`-ing the whole
+    # tree -- only offloaded into a small HBM buffer, `--offload_chunk_size`
+    # consecutive blocks at a time, inside the sampling loop itself (see
+    # `single_step_offloaded` below and docs/weight_offloading.md). The
+    # rest of the DiT's params (patch/time/text-embed, head) are a tiny
+    # fraction of the ~40-block total, so they're still `device_put` once,
+    # same as always. This isn't needed for the DiT's own compute to fit
+    # (at native 720P/14B it already does, fully resident) -- it's needed
+    # because a fully-resident DiT otherwise leaves no HBM headroom for VAE
+    # decode's own activation memory right after the sampling loop ends, at
+    # that same scale (see docs/models/wan2_1.md#status).
+    if args.offload_dit_weights:
+        assert sp_size == 1, (
+            "--offload_dit_weights + --sequence_parallel_size > 1 isn't "
+            "implemented -- neither native-720P target this flag was built "
+            "for needs sequence parallelism (the DiT's own compute already "
+            "fits fully resident; only cross-phase HBM residency was the "
+            "problem), so this combination is left for future work.")
+        chunk_size = args.offload_chunk_size
+        assert dit_model.num_layers % chunk_size == 0, (
+            f"--offload_chunk_size ({chunk_size}) must divide WanDiT.num_layers "
+            f"({dit_model.num_layers}) -- see docs/weight_offloading.md.")
+        # Chunks of `chunk_size` consecutive blocks' params, each chunk a
+        # plain Python list (a valid pytree) so `chunk_forward` below can
+        # `jax.jit`-compile once against one chunk's shape/sharding and
+        # reuse it for every chunk -- exactly the single-block case's own
+        # reasoning, generalized. All blocks share identical shapes, so
+        # every chunk (including the sharding below) is interchangeable.
+        num_layers = dit_model.num_layers
+        chunk_params_host = [
+            [dit_params["params"][f"blocks_{i}"] for i in range(c, c + chunk_size)]
+            for c in range(0, num_layers, chunk_size)
+        ]
+        layer_sharding = dit_shardings["params"]["blocks_0"]
+        chunk_sharding = [layer_sharding] * chunk_size
+        nonblock_params = {k: v for k, v in dit_params["params"].items() if not k.startswith("blocks_")}
+        nonblock_shardings = {k: v for k, v in dit_shardings["params"].items() if not k.startswith("blocks_")}
+        dit_params = jax.device_put({"params": nonblock_params}, {"params": nonblock_shardings})
+    else:
+        dit_params = jax.device_put(dit_params, dit_shardings)
     t5_params = jax.device_put(t5_params, shard_wan_params(t5_params, mesh))
     vae_params = jax.device_put(vae_params, replicated)
     logging.info("Weights loaded, cast, and sharded across devices.")
@@ -298,6 +338,91 @@ def main(args):
     else:
         dit_apply = _dit_apply
 
+    if args.offload_dit_weights:
+        # `pre_apply`/`post_apply`/`chunk_forward` are each their own
+        # `jax.jit`, compiled once and reused for every chunk and every
+        # step (identical shape/dtype/sharding signature throughout) --
+        # `chunk_forward` in particular must NOT be part of one big jitted
+        # `single_step` the way the non-offloaded path's is: jit-tracing the
+        # `range(num_chunks)` Python loop below would unroll every chunk's
+        # weights into one HLO program's buffer space, defeating the entire
+        # point of offloading (same reasoning as the VAE decode chunk loop
+        # and the sampling loop itself not being one big jit -- see the
+        # comments below and docs/hardware_and_sharding.md). Calling
+        # `jax.device_put` from a plain Python loop instead is what lets
+        # only one chunk's worth of weights be HBM-resident at a time.
+        # `chunk_forward` itself *does* jit-trace a Python loop internally
+        # (over the chunk's `chunk_size` blocks) -- that's deliberate:
+        # within one chunk, XLA is free to fuse/schedule across those few
+        # layers, which is exactly the point of grouping them; only the
+        # *outer*, cross-chunk loop must stay untraced.
+        # `pre_apply`/`post_apply` can't return `input_dtype`/`grid` as-is
+        # from inside `jax.jit` -- a bare numpy dtype and a tuple of plain
+        # ints aren't valid jitted-function *outputs* (unlike *inputs*,
+        # where static Python values are fine) -- so they're recomputed
+        # directly from `latents_2b`'s own (static) shape/dtype in
+        # `single_step_offloaded` below instead, identical to what
+        # `WanDiT.pre_process` computes internally (i2v's `y` concatenation
+        # only changes the channel axis, never T/H/W, so this is exact, not
+        # an approximation).
+        def _pre_process_body(params, latents, t, freqs, context):
+            x, ctx, e0, fr, cimg, _input_dtype, e, _grid = dit_model.apply(
+                params, latents=latents, t=t, freqs=freqs, context=context,
+                method=dit_model.pre_process)
+            return x, ctx, e0, fr, cimg, e
+
+        pre_apply = jax.jit(_pre_process_body)
+        # `input_dtype`/`grid` must be `static_argnums`, not ordinary jitted
+        # arguments: a bare dtype isn't an abstractable array at all, and
+        # `grid`'s ints feed a `reshape` inside `post_process`, which needs
+        # concrete (not traced) target shapes -- both are constant across
+        # every call here anyway (this script always uses one fixed
+        # resolution/dtype per run), so this never triggers a retrace.
+        post_apply = jax.jit(
+            lambda params, x, e, input_dtype, grid: dit_model.apply(
+                params, x, e, input_dtype, grid, method=dit_model.post_process),
+            static_argnums=(3, 4))
+        # `mesh=mesh` here is not optional: `attend`'s flash-attention
+        # dispatch (`vidax.core.attention.dot_product_attention`) requires a
+        # mesh to run its multi-device Pallas kernel via `shard_map`
+        # internally -- without it, multi-device q/k/v silently falls back
+        # to `jax.nn.dot_product_attention`'s O(S^2)-materializing path,
+        # which is fine at small token counts but a ~400GB HLO temporary at
+        # native 720P's ~75,600-token self-attention (confirmed by hitting
+        # exactly that OOM before this was caught).
+        def _chunk_forward_body(chunk_params, x, context, e0, freqs, image_context):
+            for layer_params in chunk_params:
+                x = WanDiTBlock(
+                    dim=dit_model.dim, ffn_dim=dit_model.ffn_dim, num_heads=dit_model.num_heads,
+                    qk_norm=dit_model.qk_norm, cross_attn_norm=dit_model.cross_attn_norm,
+                    eps=dit_model.eps, compute_dtype=dit_dtype, mesh=mesh,
+                ).apply({"params": layer_params}, x, context, e0, freqs, image_context=image_context)
+            return x
+
+        chunk_forward = jax.jit(_chunk_forward_body, donate_argnums=(0,))
+
+        def single_step_offloaded(current_latents, step_index, prompt_embeds, negative_embeds, freqs,
+                                   nonblock_params, guide_scale):
+            b_size = current_latents.shape[0]
+            t_val = scheduler.timesteps[step_index]
+            t_vec = jnp.full((b_size,), t_val, dtype=jnp.float32)
+            latents_2b = jnp.concatenate([current_latents, current_latents], axis=0)
+            t_vec_2b = jnp.concatenate([t_vec, t_vec], axis=0)
+            context_2b = jnp.concatenate([prompt_embeds, negative_embeds], axis=0)
+
+            input_dtype = latents_2b.dtype
+            grid = (latents_2b.shape[0],) + tuple(
+                latents_2b.shape[1 + i] // dit_model.patch_size[i] for i in range(3))
+            x, ctx, e0, fr, cimg, e = pre_apply(nonblock_params, latents_2b, t_vec_2b, freqs, context_2b)
+            for chunk_host in chunk_params_host:
+                chunk_params = jax.device_put(chunk_host, chunk_sharding)
+                x = chunk_forward(chunk_params, x, ctx, e0, fr, cimg)
+            v_2b = post_apply(nonblock_params, x, e, input_dtype, grid)
+
+            v_cond, v_uncond = v_2b[:b_size], v_2b[b_size:]
+            velocity = v_uncond + guide_scale * (v_cond - v_uncond)
+            return scheduler.step(velocity, step_index, current_latents)
+
     # --- Euler sampling loop ---
     # `single_step` is jit-compiled once (t_val varies by *value*, not shape
     # or dtype, so this never recompiles) and called from a plain Python
@@ -343,8 +468,12 @@ def main(args):
         f"Running sampling for {args.num_steps} steps "
         f"(shift={args.shift}, guide_scale={args.guide_scale})...")
     for step_index in range(scheduler.num_steps):
-        latents = single_step(
-            latents, step_index, prompt_embeds, negative_embeds, freqs, dit_params, args.guide_scale)
+        if args.offload_dit_weights:
+            latents = single_step_offloaded(
+                latents, step_index, prompt_embeds, negative_embeds, freqs, dit_params, args.guide_scale)
+        else:
+            latents = single_step(
+                latents, step_index, prompt_embeds, negative_embeds, freqs, dit_params, args.guide_scale)
 
     # --- Decode latents to video frames ---
     logging.info("Decoding final latents into video frames...")
@@ -401,6 +530,8 @@ if __name__ == "__main__":
     parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. 1 (off) by default since Megatron TP already fits the 1.3B model fine at typical resolutions; intended for the much larger 14B model at higher resolutions, where it's expected to be necessary the way it was for Wan2.2's 5B model (see WanDiT's module docstring). Also requires the DiT's patch token count to be evenly divisible by this value.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the VAE and T5 (and cast target for their loaded checkpoints; also used for the DiT's activations/latents). Note: TPU's XLA backend does not implement float16 matmuls (a hardware/compiler limitation, not a vidax one) -- float16 will fail at runtime on TPU.")
     parser.add_argument("--dit_dtype", type=str, default="float32", choices=list(DTYPES.keys()), help="Cast target for the DiT's *weights* specifically, independent of --dtype. Defaults to float32 because Wan2.1's released DiT checkpoints ship as raw float32 on disk, and rounding them down to bfloat16 produces severely degraded (flat, hazy) output once the video's total token count is large enough (e.g. native 720p at 81 frames) -- see docs/models/wan2_1.md#status. Pass --dit_dtype bfloat16 to opt back into the ~2x smaller DiT weight footprint at smaller/safer scales (verified fine at this repo's existing 480p benchmarks).")
+    parser.add_argument("--offload_dit_weights", action="store_true", help="Keep the DiT's per-block weights host-resident and offload one --offload_chunk_size-block group's worth into HBM at a time during the sampling loop, instead of the whole DiT tree staying HBM-resident for the entire script (the same idea as DeepSpeed's ZeRO-Offload / diffusers' enable_sequential_cpu_offload, applied per-layer here). Needed at native 720P/14B: the DiT's own compute already fits fully resident there, but a fully-resident DiT leaves no HBM headroom for VAE decode's own activation memory right after the sampling loop ends -- see docs/weight_offloading.md. Not needed (and unlikely to help) at smaller/already-fitting configs. Not implemented in combination with --sequence_parallel_size > 1.")
+    parser.add_argument("--offload_chunk_size", type=int, default=1, help="Number of consecutive DiT blocks grouped into one offloaded HBM buffer / one jax.jit compile when --offload_dit_weights is set (ignored otherwise). Must divide the DiT's num_layers (30 for 1.3B, 40 for 14B). 1 (the default) offloads one block at a time -- the smallest HBM footprint but the most separate host-to-device transfers and jax.jit dispatches per step; raising it trades some of that resident-memory headroom (measured plenty to spare at native 720P, see docs/weight_offloading.md) for fewer, larger transfers and more within-chunk operator fusion.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=50, help="Number of sampling steps for the scheduler.")
     parser.add_argument("--shift", type=float, default=5.0, help="Flow-matching noise-schedule shift (see RectifiedFlowScheduler). The reference's default for t2v is 5.0 regardless of resolution.")

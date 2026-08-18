@@ -27,7 +27,7 @@ from vidax.core.sharding import (
 )
 from vidax.core.rope3d import create_rope3d_freqs
 from vidax.models.wan.wan2_1.configs import I2V_14B_CONFIG
-from vidax.models.wan.wan2_1.dit import WanDiT
+from vidax.models.wan.wan2_1.dit import WanDiT, WanDiTBlock
 from vidax.models.wan.wan2_1.vae import (
     WanVAEDecoder, WanVAEEncoder, Decoder3d, Encoder3d, _count_causal_convs,
     _count_causal_convs_encoder,
@@ -230,7 +230,34 @@ def main(args):
     # comment -- weight-sharding and token-sharding are independent axes now).
     replicated = get_replicated_sharding(mesh)
     dit_shardings = shard_wan_params(dit_params, mesh)
-    dit_params = jax.device_put(dit_params, dit_shardings)
+    # `--offload_dit_weights`: see `generate_wan2_1_t2v.py`'s identical
+    # comment for the full reasoning. Doubly relevant here: at native 720P
+    # I2V's known OOM happens *before* generation even starts, during the
+    # conditioning image's VAE encode (a fully-resident DiT already
+    # competing with that encode's own activation memory for the same HBM
+    # budget) -- deferring the DiT's weights to host residency until the
+    # sampling loop needs them fixes that as a direct byproduct, not just
+    # the sampling loop's own memory use.
+    if args.offload_dit_weights:
+        assert sp_size == 1, (
+            "--offload_dit_weights + --sequence_parallel_size > 1 isn't "
+            "implemented -- see generate_wan2_1_t2v.py's identical assertion.")
+        chunk_size = args.offload_chunk_size
+        assert dit_model.num_layers % chunk_size == 0, (
+            f"--offload_chunk_size ({chunk_size}) must divide WanDiT.num_layers "
+            f"({dit_model.num_layers}) -- see docs/weight_offloading.md.")
+        num_layers = dit_model.num_layers
+        chunk_params_host = [
+            [dit_params["params"][f"blocks_{i}"] for i in range(c, c + chunk_size)]
+            for c in range(0, num_layers, chunk_size)
+        ]
+        layer_sharding = dit_shardings["params"]["blocks_0"]
+        chunk_sharding = [layer_sharding] * chunk_size
+        nonblock_params = {k: v for k, v in dit_params["params"].items() if not k.startswith("blocks_")}
+        nonblock_shardings = {k: v for k, v in dit_shardings["params"].items() if not k.startswith("blocks_")}
+        dit_params = jax.device_put({"params": nonblock_params}, {"params": nonblock_shardings})
+    else:
+        dit_params = jax.device_put(dit_params, dit_shardings)
     t5_params = jax.device_put(t5_params, shard_wan_params(t5_params, mesh))
     vae_params = jax.device_put(vae_params, replicated)
     clip_params = jax.device_put(clip_params, replicated)
@@ -301,6 +328,62 @@ def main(args):
     else:
         dit_apply = _dit_apply
 
+    if args.offload_dit_weights:
+        # See `generate_wan2_1_t2v.py`'s identical block for the full
+        # reasoning (per-layer plain-Python-loop offloading, why
+        # `input_dtype`/`grid` need `static_argnums`, etc.) -- this is the
+        # same pattern with `y`/`clip_fea` threaded through `pre_process`.
+        def _pre_process_body(params, latents, t, freqs, context, y, clip_fea):
+            x, ctx, e0, fr, cimg, _input_dtype, e, _grid = dit_model.apply(
+                params, latents=latents, t=t, freqs=freqs, context=context, y=y, clip_fea=clip_fea,
+                method=dit_model.pre_process)
+            return x, ctx, e0, fr, cimg, e
+
+        pre_apply = jax.jit(_pre_process_body)
+        post_apply = jax.jit(
+            lambda params, x, e, input_dtype, grid: dit_model.apply(
+                params, x, e, input_dtype, grid, method=dit_model.post_process),
+            static_argnums=(3, 4))
+        # `mesh=mesh` here is not optional -- see generate_wan2_1_t2v.py's
+        # identical comment (without it, multi-device attention silently
+        # falls back to an O(S^2)-materializing path instead of the flash
+        # kernel, OOMing at native 720P's large token count).
+        def _chunk_forward_body(chunk_params, x, context, e0, freqs, image_context):
+            for layer_params in chunk_params:
+                x = WanDiTBlock(
+                    dim=dit_model.dim, ffn_dim=dit_model.ffn_dim, num_heads=dit_model.num_heads,
+                    qk_norm=dit_model.qk_norm, cross_attn_norm=dit_model.cross_attn_norm,
+                    eps=dit_model.eps, compute_dtype=dit_dtype, mesh=mesh,
+                ).apply({"params": layer_params}, x, context, e0, freqs, image_context=image_context)
+            return x
+
+        chunk_forward = jax.jit(_chunk_forward_body, donate_argnums=(0,))
+
+        def single_step_offloaded(current_latents, step_index, prompt_embeds, negative_embeds, y, clip_fea,
+                                   freqs, nonblock_params, guide_scale):
+            b_size = current_latents.shape[0]
+            t_val = scheduler.timesteps[step_index]
+            t_vec = jnp.full((b_size,), t_val, dtype=jnp.float32)
+            latents_2b = jnp.concatenate([current_latents, current_latents], axis=0)
+            t_vec_2b = jnp.concatenate([t_vec, t_vec], axis=0)
+            context_2b = jnp.concatenate([prompt_embeds, negative_embeds], axis=0)
+            y_2b = jnp.concatenate([y, y], axis=0)
+            clip_fea_2b = jnp.concatenate([clip_fea, clip_fea], axis=0)
+
+            input_dtype = latents_2b.dtype
+            grid = (latents_2b.shape[0],) + tuple(
+                latents_2b.shape[1 + i] // dit_model.patch_size[i] for i in range(3))
+            x, ctx, e0, fr, cimg, e = pre_apply(
+                nonblock_params, latents_2b, t_vec_2b, freqs, context_2b, y_2b, clip_fea_2b)
+            for chunk_host in chunk_params_host:
+                chunk_params = jax.device_put(chunk_host, chunk_sharding)
+                x = chunk_forward(chunk_params, x, ctx, e0, fr, cimg)
+            v_2b = post_apply(nonblock_params, x, e, input_dtype, grid)
+
+            v_cond, v_uncond = v_2b[:b_size], v_2b[b_size:]
+            velocity = v_uncond + guide_scale * (v_cond - v_uncond)
+            return scheduler.step(velocity, step_index, current_latents)
+
     # --- Euler sampling loop (see generate_wan2_1.py for why this isn't one big jax.jit) ---
     @partial(jax.jit, donate_argnums=(0,))
     def single_step(current_latents, step_index, prompt_embeds, negative_embeds, y, clip_fea,
@@ -328,9 +411,14 @@ def main(args):
         f"Running sampling for {args.num_steps} steps "
         f"(shift={args.shift}, guide_scale={args.guide_scale})...")
     for step_index in range(scheduler.num_steps):
-        latents = single_step(
-            latents, step_index, prompt_embeds, negative_embeds, y, clip_fea, freqs,
-            dit_params, args.guide_scale)
+        if args.offload_dit_weights:
+            latents = single_step_offloaded(
+                latents, step_index, prompt_embeds, negative_embeds, y, clip_fea, freqs,
+                dit_params, args.guide_scale)
+        else:
+            latents = single_step(
+                latents, step_index, prompt_embeds, negative_embeds, y, clip_fea, freqs,
+                dit_params, args.guide_scale)
 
     # --- Decode latents to video frames ---
     logging.info("Decoding final latents into video frames...")
@@ -375,6 +463,8 @@ if __name__ == "__main__":
     parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. See generate_wan2_1_t2v.py's identical flag for the full reasoning. Also requires the DiT's patch token count to be evenly divisible by this value.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the VAE, T5, and CLIP (and cast target for their loaded checkpoints; also used for the DiT's activations/latents). Note: TPU's XLA backend does not implement float16 matmuls -- float16 will fail at runtime on TPU.")
     parser.add_argument("--dit_dtype", type=str, default="float32", choices=list(DTYPES.keys()), help="Cast target for the DiT's *weights* specifically, independent of --dtype. Defaults to float32 because Wan2.1's released DiT checkpoints ship as raw float32 on disk, and rounding them down to bfloat16 produces severely degraded (flat, hazy) output once the video's total token count is large enough (e.g. native 720p at 81 frames) -- see docs/models/wan2_1.md#status. Pass --dit_dtype bfloat16 to opt back into the ~2x smaller DiT weight footprint at smaller/safer scales (verified fine at this repo's existing 480p benchmarks).")
+    parser.add_argument("--offload_dit_weights", action="store_true", help="Keep the DiT's per-block weights host-resident and offload one --offload_chunk_size-block group's worth into HBM at a time during the sampling loop, instead of the whole DiT tree staying HBM-resident for the entire script (the same idea as DeepSpeed's ZeRO-Offload / diffusers' enable_sequential_cpu_offload, applied per-layer here). Needed at native 720P: the DiT's own compute already fits fully resident there, but a fully-resident DiT leaves no HBM headroom for the conditioning image's VAE-encode step right before generation starts (this script's native-720P OOM without it) -- see docs/weight_offloading.md. Not needed (and unlikely to help) at 480P. Not implemented in combination with --sequence_parallel_size > 1.")
+    parser.add_argument("--offload_chunk_size", type=int, default=1, help="Number of consecutive DiT blocks grouped into one offloaded HBM buffer / one jax.jit compile when --offload_dit_weights is set (ignored otherwise). Must divide the 14B DiT's num_layers (40). See generate_wan2_1_t2v.py's identical flag.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=40, help="Number of sampling steps. The reference's i2v default is 40 (vs 50 for t2v).")
     parser.add_argument("--shift", type=float, default=None, help="Flow-matching noise-schedule shift. Defaults to the reference's own auto-selection (Wan2.1-main/generate.py): 3.0 if --max_area is at the 480p checkpoint's scale (<= 832*480), 5.0 otherwise (720p checkpoint's scale). Pass explicitly to override.")

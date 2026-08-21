@@ -1,7 +1,17 @@
 # Per-layer weight offloading
 
-Implemented (`--offload_dit_weights` on `generate_wan2_1_t2v.py`/
-`generate_wan2_1_i2v.py`), for Wan2.1's `WanDiT` only. The technique itself
+Implemented for Wan2.1's `WanDiT` (`--offload_dit_weights` on
+`generate_wan2_1_t2v.py`/`generate_wan2_1_i2v.py`) and for Wan2.2 A14B's
+`WanDiT` (`--offload_dit_weights` on `generate_wan2_2_i2v_a14b.py` — see
+"A14B (Wan2.2)" below; A14B T2V isn't wired up yet, its weights aren't
+downloaded on this machine). A14B's offloading also composes with
+`--sequence_parallel_size` (needed to reach native 720P there) — this
+combination was corrupted by a real, separate, pre-existing bug in Wan's
+`sequence_parallel` path (found while debugging why offloading's output
+looked wrong at real-checkpoint scale, though it turned out to have nothing
+to do with offloading itself), now root-caused and fixed — see
+`vidax.models.wan.common.dit_layers.psum_row_parallel`'s docstring and "A14B
+(Wan2.2)" below for the full story. The technique itself
 isn't novel — it's the same idea as DeepSpeed's ZeRO-Offload/ZeRO-Infinity
 (offload parameter/optimizer state to host memory, stream it back to the
 accelerator on demand) and, closer to this exact use case, HuggingFace
@@ -328,12 +338,190 @@ fixes, but that investigation wasn't done here.
    unmeasured) chunk-20 numbers — see "Chunk size is flexible" above.
    `docs/benchmarking.md`'s two native-720P rows now report these numbers.
 
-**Not done, left for future work**: applying this to Wan2.2 A14B (its
-weights aren't downloaded on this machine yet — out of scope for this
-round); investigating why even a whole-model single chunk still falls well
-short of non-offloaded throughput (the two candidate causes named above —
-redundant per-step re-transfer of unchanged weights, and fusion lost across
-the three-way `jax.jit` split — neither confirmed nor fixed this round);
-finding a chunk size for I2V with more HBM headroom than chunk size 20's
-32.7GB while keeping some of its throughput win, if I2V is ever combined
-with something else that also needs HBM.
+**Not done, left for future work**: investigating why even a whole-model
+single chunk still falls well short of non-offloaded throughput (the two
+candidate causes named above — redundant per-step re-transfer of unchanged
+weights, and fusion lost across the three-way `jax.jit` split — neither
+confirmed nor fixed this round); finding a chunk size for I2V with more HBM
+headroom than chunk size 20's 32.7GB while keeping some of its throughput
+win, if I2V is ever combined with something else that also needs HBM.
+
+## A14B (Wan2.2)
+
+Implemented (`--offload_dit_weights`/`--offload_chunk_size` on
+`generate_wan2_2_i2v_a14b.py`), reusing the same `WanDiT` `setup()`/
+`pre_process`/`post_process` split described above (`vidax.models.wan.wan2_2
+.dit.WanDiT` was refactored identically to Wan2.1's, verified bit-exact —
+see "Verification" below). Composes with A14B's existing whole-expert host/
+device swap (`docs/models/wan2_2.md`'s A14B sections) with no extra
+bookkeeping: since a chunk's weights get a fresh `device_put` every step
+regardless anyway (see "Real cost" above), each step just offloads whichever
+expert's chunks the current timestep calls for, picked fresh every step from
+host memory — there's no separate "did the expert change" branch the way
+the non-offloaded whole-expert swap needs.
+
+**The real difference from Wan2.1, and why this needed more than a port**:
+Wan2.2's `WanDiT` computes AdaLN modulation **per token**, not per sample
+(`vidax.models.wan.wan2_2.dit`'s module docstring) — its `e0` tensor is
+`(B, seq_len, 6, dim)` instead of Wan2.1's `(B, 6, dim)`. At native 720P's
+~75k patch tokens, that tensor alone is multiple GB, and it's *activation*
+memory, not weight residency — offloading alone (`--sequence_parallel_size
+1`) cannot shrink it, no matter the chunk size. Measured directly: at native
+720P/81 frames (`--tensor_parallel_size 4`), the non-offloaded baseline
+needs ~61.7GB/chip of HLO temporaries and offloading alone needs ~56.6GB —
+both far over this chip's ~30.75GB budget, and offloading's ~8% reduction
+alone was nowhere near enough. This is why `--offload_dit_weights` was
+extended to compose with `--sequence_parallel_size` for this model — unlike
+Wan2.1, where activation memory was never the binding constraint (see
+"Implementation status" above), so composing with sequence parallelism was
+never needed there.
+
+**Sequence parallelism sharding, and why it only partially helps**:
+`WanDiT.pre_process` (patchify, time-embedding, text-embedding) computes
+`e0`/`x` at *full* (unsharded) token length, and only chunks them across
+`sp_axis_name` at the very end, right before returning — this is inherited,
+unchanged behavior from the original fused `__call__` (confirmed bit-exact
+against it), not something the offloading split introduced. That means the
+single biggest activation (`e0`) is still briefly full-size even under
+`sequence_parallel`, so `--sequence_parallel_size` shrinks *most* but not
+*all* of `pre_process`'s peak memory. Measured progression at native
+720P/81 frames, all with `--offload_dit_weights --offload_chunk_size 1`:
+
+| `--tensor_parallel_size` | `--sequence_parallel_size` | HLO temporaries required | Fits in ~30.75GB? |
+| ---: | ---: | ---: | :---: |
+| 4 | 1 | 56.6GB | No |
+| 2 | 2 | 45.8GB | No |
+| 1 | 4 | 40.4GB | No |
+
+None of these fit at the reference's full 81 frames. `--tensor_parallel_size
+1` (no Megatron weight-sharding at all) still wins overall despite giving up
+T5's tensor-parallel sharding (T5's ~4.8B params go from ~4.8GB/chip at
+`tp=2` to ~9.6GB/chip fully resident at `tp=1`) — `sequence_parallel`'s
+activation savings outweigh that cost at this scale.
+
+**A separate, pre-existing correctness bug found while testing this — root-
+caused and fixed**: reducing frame count at `--tensor_parallel_size 2
+--sequence_parallel_size 2 --offload_dit_weights --offload_chunk_size 1`
+gets a native-832x1104 (720P-class), 33-frame config to run end-to-end
+without OOMing (binary-searched down from 81 frames: 61 still overshoots
+HBM by a small margin, 41 is close, 33 fits) — but the *output itself* was
+visibly wrong: a blocky/tiled, spatially-discontinuous artifact, confirmed
+at both a quick 4-step check and the full reference 40 steps, and
+reproducible at a tiny (96x144) resolution too, so this was never a scale-
+specific numerical-noise issue (contrast with the ~1-4% JIT-fusion
+divergence documented as harmless elsewhere in this doc).
+
+Isolating the cause: `--tensor_parallel_size 4` with `--offload_dit_weights`
+alone (`--sequence_parallel_size 1`) produced clean, sharp, coherent output
+at the same tiny resolution, so the bug tracked specifically to
+`--sequence_parallel_size > 1`, not to offloading — a **pre-existing** bug
+in `WanDiT`'s `sequence_parallel` path itself (predates this round's
+offloading work), affecting Wan2.1 too (same shared code), not something the
+offload/`shard_map` composition introduced. A small-dummy-model bit-exact
+check of `sequence_parallel=True` against `sequence_parallel=False` passed
+cleanly, and random-init weights at *real* dimensions (`dim=5120`,
+`num_heads=40`) up to 16 layers stayed within ~0.36% relative divergence
+(normal noise, not compounding) — the bug only showed up with **real
+trained weights**, and specifically got *worse with more layers*: a single
+real block diverged by only ~3%, but the full 40-layer real checkpoint
+diverged by ~83%. That "small per-layer error that compounds with real
+weights but not random ones" signature pointed at a *systematic* (not
+random-noise) per-layer error — and systematic errors that vanish for
+near-zero random-init values but appear for real (non-zero) trained values
+are the classic signature of a **missing/duplicated additive term**, not a
+structural indexing bug.
+
+**Root cause**: `vidax.models.wan.common.dit_layers.attend`'s output
+projection (`{prefix}_o`) and `Wan22DiTBlock`/`WanDiTBlock`'s FFN
+down-projection (`ffn_2`) are both *row-parallel* under `sequence_parallel`
+— each device holds a slice of the contraction (input) dimension, computes
+its own partial output, and the code sums those partial outputs across
+devices via `jax.lax.psum`. But `nn.Dense`'s own bias is *replicated*
+(the same full bias value lives on every device) and gets added *inside*
+each device's own `nn.Dense` call, before the `psum` — so summing `tp_size`
+devices' outputs summed `tp_size` copies of the bias instead of one. With
+Flax's zero-initialized bias (every synthetic/random-init test in this
+repo), that's invisible; with real *trained* (non-zero) biases, it's a real
+per-layer additive error, injected at 3 row-parallel calls per block (2 from
+`attend`'s two `{prefix}_o` calls — self- and cross-attention — plus 1 from
+`ffn_2`) × 40 blocks, compounding through the residual stream into the ~83%
+divergence measured above.
+
+**The fix**: `vidax.models.wan.common.dit_layers.psum_row_parallel` (new)
+subtracts the bias before the `psum` and adds exactly one copy back after —
+a true no-op whenever `sequence_parallel` is off or `tp` has size 1
+(subtract-then-add is an identity, and `psum` over one device is a no-op),
+so it's safe to use unconditionally in place of the old bare `jax.lax.psum`
+calls. Applied to `attend`'s `{prefix}_o` (shared by Wan2.1 and Wan2.2) and
+to both `WanDiTBlock.ffn_2` (Wan2.1) and `Wan22DiTBlock.ffn_2` (Wan2.2).
+Verified fixed: the same real-checkpoint isolated-forward-pass check that
+showed ~3% divergence at 1 layer now shows ~0.18% (a ~17x reduction, back in
+the normal-noise range), and 8 real layers now shows ~1.65% — no longer
+compounding explosively. Re-running the exact end-to-end config that
+previously produced blocky output (`--tensor_parallel_size 2
+--sequence_parallel_size 2 --offload_dit_weights --offload_chunk_size 1`,
+full 40 steps) now produces clean, coherent output at both a tiny
+(`--max_area 16384`) resolution and, more importantly, at native 720P with
+33 frames (`--max_area 921600 --num_frames 33`) — sharp, high-detail output
+matching the source conditioning image's quality, no blocky artifacts, no
+speckle. This is the config `docs/benchmarking.md`'s A14B I2V row uses.
+
+Cosmos-Predict2.5's DiT was checked too and is unaffected: its own
+row-parallel `output_proj`/`mlp_layer2` are declared `use_bias=False`
+entirely (no bias to double-count), matching why its `sequence_parallel`
+rows in `docs/benchmarking.md` were never observed to have this problem.
+
+**Correctness, verified**: (1) the `WanDiT` `setup()`/`pre_process`/
+`post_process` refactor reproduces the original fused `__call__` bit-exactly
+(`max diff = 0.0`, small dummy config, matches Wan2.1's identical check).
+(2) The full offloaded+sequence-parallel split (`pre_apply`/`chunk_forward`
+loop/`post_apply`, each wrapped in `shard_map`) reproduces a single
+shard_map-wrapped fused reference call bit-exactly on a small dummy config
+at `--tensor_parallel_size 2 --sequence_parallel_size 2` — the offloading
+*mechanics* (splitting, per-chunk `device_put`, `shard_map` wiring) were
+never the problem. (3) `--offload_dit_weights --offload_chunk_size 1` at
+`--tensor_parallel_size 4` (no sequence parallelism) produces clean, sharp,
+coherent real-checkpoint output. (4) With the `psum_row_parallel` fix, a
+real-checkpoint single-forward-pass comparison (`--tensor_parallel_size 2
+--sequence_parallel_size 2` vs. non-SP) dropped from ~83% to ~0.18% relative
+divergence at 1 real block and stayed small (~1.65%) at 8 real blocks — no
+longer compounding. (5) End-to-end generation at
+`--tensor_parallel_size 2 --sequence_parallel_size 2 --offload_dit_weights
+--offload_chunk_size 1`, full 40 steps, now produces coherent, sharp output
+instead of the blocky artifact from before the fix — confirmed at both a
+tiny resolution and at native 720P/33 frames (`--max_area 921600
+--num_frames 33`), matching the source conditioning image's detail level
+with no blocky or speckled artifacts.
+
+**480P fits the reference's full 81 frames, with real chunk-size headroom
+to spare**: unlike native 720P, 480P's smaller token count (`--max_area
+480*832`, resolving to 544x720 for this repo's standard portrait
+conditioning image — same resolution as Wan2.1's own 480P I2V row) leaves
+enough HBM margin that the reference's full 81 frames fit even with
+`--tensor_parallel_size 2 --sequence_parallel_size 2
+--offload_dit_weights`. Swept `--offload_chunk_size` over every divisor of
+40 at this config: `1`, `2`, `4`, and `10` all fit; `20` OOMs (needs 5.8GB
+against only 3.7GB free at that point) — so `10` is the largest chunk size
+that fits, and (mirroring Wan2.1's "bigger chunks help, up to the memory
+ceiling" finding) it's also the fastest measured: 44.5s/step, vs. native
+720P's 49.1s/step at `--offload_chunk_size 1`. Note the direction of the
+peak-HBM comparison between the two rows is *reversed* from what resolution
+alone would predict: 480P (more weight resident per chunk, `chunk_size=10`)
+measures **28.3GB** peak HBM, higher than native 720P's (more per-token
+activation memory, but `chunk_size=1`) **20.5GB** — a clean empirical
+confirmation that at this scale, chunk size (how many blocks' worth of fp32
+weights stay resident at once) dominates over resolution's effect on
+per-token activation memory, not the other way around.
+
+**Confirmed with the full 5-run benchmark methodology**
+(`--num_runs 5`, full 40 steps, matching every other row in
+`docs/benchmarking.md`):
+
+| Config | `--offload_chunk_size` | Frames | Compile (s) | Per-step (s) | Peak HBM/chip (GB) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 480P (544x720) | 10 | 81 (full reference) | 146.1 | 44.5 | 28.3 |
+| Native 720P (832x1104) | 1 | 33 (reduced from 81) | 102.9 | 49.1 | 20.5 |
+
+See `docs/benchmarking.md`'s `§` footnote for the full reasoning behind
+these two configurations, and `docs/models/wan2_2.md`'s A14B I2V section for
+the CLI reference.

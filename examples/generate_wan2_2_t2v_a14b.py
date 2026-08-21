@@ -129,10 +129,13 @@ def main(args):
         f"{sp_size}-way sequence parallel.")
 
     dtype = DTYPES[args.dtype]
+    dit_dtype = DTYPES[args.dit_dtype]
     sequence_parallel = sp_size > 1
 
     # --- Initialize models and scheduler ---
-    dit_model = WanDiT(mesh=mesh, sequence_parallel=sequence_parallel, **T2V_A14B_CONFIG)
+    dit_model = WanDiT(
+        mesh=mesh, sequence_parallel=sequence_parallel, compute_dtype=dit_dtype,
+        **T2V_A14B_CONFIG)
     vae_model = WanVAEDecoder()
     t5_model = T5Encoder()
     scheduler = RectifiedFlowScheduler(num_steps=args.num_steps, shift=args.shift)
@@ -189,8 +192,13 @@ def main(args):
     # "Combining both" section) -- worth trying if even one expert alone
     # doesn't fit at the resolution you want.
     replicated = get_replicated_sharding(mesh)
-    high_dit_params = cast_to_dtype(high_dit_params, dtype)
-    low_dit_params = cast_to_dtype(low_dit_params, dtype)
+    # `dit_dtype` (default float32), independent of `--dtype` -- see
+    # generate_wan2_1_t2v.py's identical comment, and
+    # generate_wan2_2_i2v_a14b.py's identical comment for why Wan2.2's
+    # `WanDiT` needs this too (it never had this repo's Wan2.1 precision fix
+    # ported over until now).
+    high_dit_params = cast_to_dtype(high_dit_params, dit_dtype)
+    low_dit_params = cast_to_dtype(low_dit_params, dit_dtype)
     vae_params = cast_to_dtype(vae_params, dtype)
     t5_params = cast_to_dtype(t5_params, dtype)
 
@@ -210,7 +218,9 @@ def main(args):
     latents_shape = (batch_size, latent_t, latent_h, latent_w, dit_model.in_dim)
 
     latents_rng, rng = jax.random.split(rng)
-    latents = jax.random.normal(latents_rng, latents_shape, dtype=dtype)
+    # `latents` are constructed in `dit_dtype`, not the general `--dtype` --
+    # see generate_wan2_1_t2v.py's identical comment.
+    latents = jax.random.normal(latents_rng, latents_shape, dtype=dit_dtype)
     latents = jax.device_put(latents, get_batch_sharding(mesh, latents.ndim))
 
     logging.info(f"Encoding {batch_size} prompt(s) with T5: {prompts}")
@@ -319,7 +329,8 @@ if __name__ == "__main__":
     parser.add_argument("--boundary", type=float, default=0.875, help="Fraction of num_train_timesteps (1000) above which the high_noise_model expert is used instead of low_noise_model. Reference default for T2V is 0.875 (0.900 for I2V).")
     parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to Megatron-shard the (single device-resident) DiT expert's attention heads / FFN channels (weights) across. Must divide num_heads (40 per expert, 64 for T5) and num_devices. Composes independently with --sequence_parallel_size.")
     parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. See generate_wan2_1_t2v.py's identical flag for the full reasoning; worth trying together with --tensor_parallel_size if even one A14B expert alone doesn't fit HBM at the resolution you want (see this script's header comment). Also requires the DiT's patch token count to be evenly divisible by this value.")
-    parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for both DiT experts, VAE, and T5. Note: TPU's XLA backend does not implement float16 matmuls -- float16 will fail at runtime on TPU.")
+    parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for VAE and T5 (and cast target for their loaded checkpoints). Note: TPU's XLA backend does not implement float16 matmuls -- float16 will fail at runtime on TPU.")
+    parser.add_argument("--dit_dtype", type=str, default="float32", choices=list(DTYPES.keys()), help="Cast target for both DiT experts' *weights* specifically, independent of --dtype. Defaults to float32 -- see generate_wan2_2_i2v_a14b.py's identical flag for why.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=50, help="Number of sampling steps for the scheduler.")
     parser.add_argument("--shift", type=float, default=12.0, help="Flow-matching noise-schedule shift. Reference default for A14B T2V is 12.0 (5.0 for I2V).")

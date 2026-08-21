@@ -31,7 +31,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from vidax.core.rope3d import sinusoidal_embedding_1d
-from vidax.models.wan.common.dit_layers import WanHead, attend as _attend, chunk_by_rank
+from vidax.models.wan.common.dit_layers import WanHead, attend as _attend, chunk_by_rank, psum_row_parallel
 
 
 class WanDiTBlock(nn.Module):
@@ -140,13 +140,15 @@ class WanDiTBlock(nn.Module):
         tp_size = self.mesh.shape["tp"] if (self.sequence_parallel and self.mesh is not None) else 1
         h = nn.Dense(self.ffn_dim // tp_size, name="ffn_0")(norm_h)
         h = nn.gelu(h, approximate=True)
-        h = nn.Dense(self.dim, name="ffn_2")(h)
+        ffn2_dense = nn.Dense(self.dim, name="ffn_2")
+        h = ffn2_dense(h)
         # `ffn_2` is row-parallel -- see `vidax.models.wan.common.dit_layers
         # .attend`'s identical comment for why this manual reduce is only
         # needed under `sequence_parallel`, and why it's a safe no-op
-        # otherwise.
-        if self.sequence_parallel:
-            h = jax.lax.psum(h, "tp")
+        # otherwise. Uses `psum_row_parallel` (not a plain `jax.lax.psum`)
+        # -- see that function's docstring for the bias-double-counting bug
+        # it fixes.
+        h = psum_row_parallel(ffn2_dense, h, self.sequence_parallel)
         x = x + h.astype(jnp.float32) * gate_mlp
         return x
 

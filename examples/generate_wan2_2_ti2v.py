@@ -12,19 +12,26 @@
 # of this and the reference's `WanTI2V.i2v` for the sampling-loop mechanics
 # this mirrors (`masks_like`'s frame-0 mask, reapplied after every step).
 #
-# Unlike `generate_wan2_1_t2v.py`'s default path, this script needs
-# *sequence* parallelism (`--sequence_parallel_size > 1`), not just
-# Megatron-style tensor parallelism: at TI2V-5B's only supported resolution
-# (704x1280, 121 frames) the patch-token sequence is ~27k long, and Wan2.2's
-# per-token modulation tensors scale with that directly -- sharding
-# attention heads/FFN channels alone (`--tensor_parallel_size`) doesn't
-# shrink them, so that alone doesn't fit a 4-chip v4 slice's HBM even after
-# quartering weight memory. Sequence parallelism instead shards the token
-# sequence itself between blocks, which is what actually cuts the memory
-# that was overflowing; see `vidax.models.wan.wan2_2.dit`'s module
-# docstring for the full mechanism, including how it composes with
-# `--tensor_parallel_size`'s weight-sharding (independent mesh axes -- see
-# `docs/hardware_and_sharding.md`'s "Combining both" section). T5 (whose
+# At TI2V-5B's only supported resolution (704x1280, 121 frames) the
+# patch-token sequence is ~27k long, and Wan2.2's per-token modulation
+# tensors scale with that directly. With the correct `--dit_dtype float32`
+# default (see `vidax.models.wan.wan2_2.dit`'s module docstring), the ~5B
+# DiT's weights (~20GB at fp32) dominate HBM more than that per-token
+# activation memory does on this 4-chip machine: `--tensor_parallel_size 4
+# --sequence_parallel_size 1` (all 4 chips shard weights, none go to
+# sequence-parallel) is the config that actually fits end-to-end at the
+# full reference resolution/frame count -- confirmed via direct probing
+# (`--sequence_parallel_size 4 --tensor_parallel_size 1` OOMs during T5
+# prompt encoding, before the DiT even runs, because the fully-unsharded
+# fp32 DiT already consumes nearly the whole HBM budget; `tp=2/sp=2` gets
+# past T5 encoding but still OOMs inside the DiT sampling step itself, ~39GB
+# of HLO temporaries needed vs. ~30.75GB available). See
+# `docs/benchmarking.md`'s Wan2.2 5B footnote for the full comparison.
+# `--sequence_parallel_size` and `--tensor_parallel_size` remain independent
+# mesh axes (see `docs/hardware_and_sharding.md`'s "Combining both"
+# section) and both flags are still exposed below for flexibility -- e.g. a
+# larger chip count, or a smaller `--dit_dtype`, would likely shift this
+# tradeoff back toward needing sequence parallelism again. T5 (whose
 # sequence length, 512, was never the bottleneck) always uses the ordinary
 # Megatron tensor-parallel path, driven by `--tensor_parallel_size` alone.
 
@@ -224,6 +231,7 @@ def main(args):
         f"{sp_size}-way sequence parallel.")
 
     dtype = DTYPES[args.dtype]
+    dit_dtype = DTYPES[args.dit_dtype]
     sequence_parallel = sp_size > 1
     has_image = args.image_path is not None
     num_steps = args.num_steps if args.num_steps is not None else 50
@@ -233,7 +241,9 @@ def main(args):
     # `vidax.models.wan.wan2_2.dit`'s module docstring) requires every
     # `WanDiT.apply(...)` call to run inside `shard_map(..., mesh=mesh)` --
     # done below via `dit_apply`, not by calling `dit_model.apply` directly.
-    dit_model = WanDiT(mesh=mesh, sequence_parallel=sequence_parallel, **TI2V_5B_CONFIG)
+    dit_model = WanDiT(
+        mesh=mesh, sequence_parallel=sequence_parallel, compute_dtype=dit_dtype,
+        **TI2V_5B_CONFIG)
     vae_decoder = WanVAEDecoder()
     vae_encoder = WanVAEEncoder() if has_image else None
     t5_model = T5Encoder()
@@ -273,8 +283,15 @@ def main(args):
     # cast, which is what was actually OOM-ing (the steady-state bf16
     # weights alone fit
     # fine). See `cast_numpy_tree_to_dtype`'s docstring.
+    #
+    # The DiT specifically casts to `dit_dtype` (default float32), independent
+    # of `--dtype` -- see generate_wan2_2_i2v_a14b.py's identical comment for
+    # why (Wan2.2's `WanDiT` never had this repo's Wan2.1 precision fix
+    # ported over until now; the checkpoint already ships as raw float32, so
+    # this is a no-op cast at the default).
     np_dtype = NUMPY_DTYPES[args.dtype]
-    dit_params = cast_numpy_tree_to_dtype(dit_params, np_dtype)
+    dit_np_dtype = NUMPY_DTYPES[args.dit_dtype]
+    dit_params = cast_numpy_tree_to_dtype(dit_params, dit_np_dtype)
     vae_params = cast_numpy_tree_to_dtype(vae_params, np_dtype)
     t5_params = cast_numpy_tree_to_dtype(t5_params, np_dtype)
 
@@ -359,14 +376,16 @@ def main(args):
     # Independent noise per batch slot -- when one prompt is broadcast across
     # multiple data-parallel replicas, this gives multiple distinct samples.
     latents_rng, rng = jax.random.split(rng)
-    latents = jax.random.normal(latents_rng, latents_shape, dtype=dtype)
+    # `latents`/`z_cond` are constructed in `dit_dtype`, not the general
+    # `--dtype` -- see generate_wan2_1_t2v.py's identical comment.
+    latents = jax.random.normal(latents_rng, latents_shape, dtype=dit_dtype)
 
     token_mask_flat = None
     frame_mask = None
     if has_image:
         logging.info("Encoding conditioning image...")
         z_cond = build_i2v_conditioning(
-            image, pixel_h, pixel_w, latent_t, vae_encoder, vae_params, dtype)
+            image, pixel_h, pixel_w, latent_t, vae_encoder, vae_params, dit_dtype)
         z_cond = jax.device_put(
             jnp.broadcast_to(z_cond, (batch_size,) + z_cond.shape[1:]),
             get_batch_sharding(mesh, z_cond.ndim))
@@ -382,7 +401,7 @@ def main(args):
         token_mask = token_mask.at[0].set(0.0)
         token_mask_flat = token_mask.reshape(-1)  # (seq_len,)
 
-        frame_mask = jnp.ones((1, latent_t, 1, 1, 1), dtype=dtype)
+        frame_mask = jnp.ones((1, latent_t, 1, 1, 1), dtype=dit_dtype)
         frame_mask = frame_mask.at[:, 0].set(0.0)
         frame_mask = jax.device_put(frame_mask, replicated)
 
@@ -574,7 +593,8 @@ if __name__ == "__main__":
     parser.add_argument("--guide_scale", type=float, default=5.0, help="Classifier-free guidance scale: velocity = uncond + guide_scale * (cond - uncond). The reference's default is 5.0; skipping CFG (there is no flag to do so here, matching the reference always running it) produces washed-out, low-contrast output.")
     parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to Megatron-shard each model's attention heads / FFN channels (weights) across. Must divide num_heads (24 for the 5B DiT, 64 for the T5 encoder) and num_devices. Composes independently with --sequence_parallel_size -- at TI2V-5B's default resolution, --sequence_parallel_size is what actually fits the model in HBM (see this script's header comment); --tensor_parallel_size alone doesn't shrink the ~27k-token patch sequence's per-device memory.")
     parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's ~27k-token patch sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. This is the flag that actually fits TI2V-5B in HBM at its default resolution -- e.g. --sequence_parallel_size 4 on this repo's 4-chip v4 slice. Must divide num_heads together with --tensor_parallel_size (their product is the real constraint -- DeepSpeed-Ulysses reshuffles across whatever heads Megatron sharding already left each device with), and the DiT's patch token count must be evenly divisible by it too (true by construction at the default 704x1280x121 resolution on 1/2/4/5/8-way splits; i2v's image-derived resolution grows the derived width as needed, see this script's header comment). Increase this if you hit HBM OOM.")
-    parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the DiT, VAE, and T5 (and cast target for their loaded checkpoints). The reference uses bfloat16 for the DiT/T5 and float32 for the VAE; vidax uses one unified dtype for simplicity. Note: TPU's XLA backend does not implement float16 matmuls (a hardware/compiler limitation, not a vidax one) -- float16 will fail at runtime on TPU.")
+    parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for VAE and T5 (and cast target for their loaded checkpoints). Note: TPU's XLA backend does not implement float16 matmuls (a hardware/compiler limitation, not a vidax one) -- float16 will fail at runtime on TPU.")
+    parser.add_argument("--dit_dtype", type=str, default="float32", choices=list(DTYPES.keys()), help="Cast target for the DiT's *weights* specifically, independent of --dtype. Defaults to float32 (the checkpoint's own on-disk dtype, so this is a no-op cast by default) -- see generate_wan2_2_i2v_a14b.py's identical flag for why bfloat16 DiT weights produce visibly degraded output at large token counts.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=None, help="Number of sampling steps for the scheduler. Defaults to the reference's own per-mode default: 50 for text-to-video, 40 for image-to-video (WanTI2V.generate / .i2v).")
     parser.add_argument("--shift", type=float, default=5.0, help="Flow-matching noise-schedule shift (see RectifiedFlowScheduler). The reference's default for TI2V-5B is 5.0.")

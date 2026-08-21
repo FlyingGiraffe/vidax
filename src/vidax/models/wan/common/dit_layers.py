@@ -25,7 +25,38 @@ from vidax.core.rope3d import apply_rope3d
 # imports `chunk_by_rank` from here (or from `vidax.models.cosmos2_5
 # .dit`, which imports the same underlying function directly from
 # `vidax.core.attention`, its natural model-family-agnostic home).
-__all__ = ["chunk_by_rank", "attend", "WanHead"]
+__all__ = ["chunk_by_rank", "attend", "WanHead", "psum_row_parallel"]
+
+
+def psum_row_parallel(dense_module: nn.Dense, h: jnp.ndarray, sequence_parallel: bool,
+                        tp_axis_name: str = "tp") -> jnp.ndarray:
+    """Sums a row-parallel `nn.Dense` layer's per-device partial outputs
+    across the mesh's `tp` axis via `jax.lax.psum`.
+
+    Real bug, found and fixed while debugging Wan2.2 A14B's
+    `sequence_parallel` producing corrupted output at real (trained-weight)
+    scale despite being bit-exact on random-init weights: `nn.Dense` adds
+    its bias *inside* its own call, once per device -- for a row-parallel
+    layer under `sequence_parallel`, every device calls that same `nn.Dense`
+    with its own local kernel shard but the *same, fully-replicated* bias,
+    so naively summing the per-device outputs via `psum` adds `tp_size`
+    copies of the bias instead of one. Invisible with near-zero
+    (e.g. Flax's own zero-initialized) biases -- which is exactly why this
+    passed every synthetic/random-init correctness check -- but a real,
+    systematic per-layer error with real trained (non-zero) biases,
+    compounding across many blocks. Subtracting the bias before the `psum`
+    and adding exactly one copy back after cancels out to a true no-op
+    whenever `sequence_parallel` is off or `tp` has size 1 (subtract-then-
+    add is an identity, and `psum` over one device is a no-op), so this is
+    safe to call unconditionally alongside the existing "always psum
+    under sequence_parallel" pattern.
+    """
+    if not sequence_parallel:
+        return h
+    bias = dense_module.variables["params"].get("bias")
+    if bias is None:
+        return jax.lax.psum(h, tp_axis_name)
+    return jax.lax.psum(h - bias, tp_axis_name) + bias
 
 
 def attend(
@@ -146,7 +177,8 @@ def attend(
             img_out = dot_product_attention(q, k_img, v_img, mesh=mesh).reshape(b, -1, dim)
         out = out + img_out
 
-    out = nn.Dense(dim, name=f"{prefix}_o")(out)
+    o_dense = nn.Dense(dim, name=f"{prefix}_o")
+    out = o_dense(out)
     # `{prefix}_o` is row-parallel (its input, `out`, is already TP-split
     # across attention heads): outside `sequence_parallel`, GSPMD's ordinary
     # auto-partitioner inserts the cross-device sum this needs automatically;
@@ -154,9 +186,10 @@ def attend(
     # that for us, so it must be requested by hand. A no-op when the 'tp'
     # axis has size 1 (weights not actually split), so this is safe to
     # always include whenever `sequence_parallel` is on, regardless of
-    # whether TP weight-sharding is also in use.
-    if sequence_parallel:
-        out = jax.lax.psum(out, "tp")
+    # whether TP weight-sharding is also in use. See `psum_row_parallel`'s
+    # docstring for why the bias needs special handling here, not just a
+    # plain `jax.lax.psum`.
+    out = psum_row_parallel(o_dense, out, sequence_parallel)
     return out
 
 

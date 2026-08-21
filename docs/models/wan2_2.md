@@ -98,33 +98,44 @@ python examples/generate_wan2_2_ti2v.py \
 | `--fps` | `24` | Reference `sample_fps` for TI2V-5B (vs. 16 for Wan2.1/A14B). |
 | `--output_path` | `output_video.mp4` | With multiple prompts, each saved as `<output_path>_<i>.mp4`. |
 
-**`--tensor_parallel_size` note:** at TI2V-5B's only supported resolution
-(704x1280, 121 frames), the patch-token sequence is ~27k long, and Wan2.2's
-per-token AdaLN modulation tensors scale with that directly — Megatron-style
-tensor parallelism keeps the *full* sequence on every device and doesn't
-shrink those, so it doesn't fit a 4-chip v4 slice's HBM even after
-quartering weight memory. This script therefore **always** uses
-`WanDiT(sequence_parallel=True)` internally when `--tensor_parallel_size >
-1`, sharding the token sequence itself between blocks instead (DeepSpeed-
-Ulysses — see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)).
-`--tensor_parallel_size` sets both the DiT's sequence-parallel size and T5's
-ordinary Megatron tensor-parallel size (T5's sequence length, 512, was never
-the bottleneck) — it must divide both `num_heads` (24 for the DiT, 64 for T5)
-and the DiT's patch token count. This is true by construction at the default
-704x1280x121 resolution for 1/2/4/5/8-way splits; for i2v's image-derived
-resolution it isn't guaranteed, so the script grows the derived width in
-32px steps (up to `tensor_parallel_size - 1` times — guaranteed to find a
-divisible value) and logs when it does, rather than failing outright.
+**`--tensor_parallel_size`/`--sequence_parallel_size` note:** at TI2V-5B's
+only supported resolution (704x1280, 121 frames), the patch-token sequence
+is ~27k long, and Wan2.2's per-token AdaLN modulation tensors scale with
+that directly. `--tensor_parallel_size` (Megatron-style weight-sharding)
+and `--sequence_parallel_size` (DeepSpeed-Ulysses token-sharding) are
+independent mesh axes (see [hardware
+doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)),
+and which one this model actually needs depends on `--dit_dtype`: with the
+correct `--dit_dtype float32` default, the ~5B DiT's fp32 weights (~20GB)
+dominate this 4-chip machine's HBM more than the per-token activation
+memory does, so `--tensor_parallel_size 4 --sequence_parallel_size 1` (full
+weight-sharding, no sequence-parallel) is the config that actually fits
+end-to-end — confirmed via direct probing (`sp=4/tp=1` OOMs during T5
+prompt encoding before the DiT even runs, since the fully-unsharded fp32
+DiT already consumes nearly the whole budget; `tp=2/sp=2` gets past T5
+encoding but still OOMs inside the DiT sampling step itself). See
+[`docs/benchmarking.md`](../benchmarking.md)'s Wan2.2 5B footnote for the
+full comparison. The product of both flags must divide `num_heads` (24 for
+the DiT, 64 for T5) and the DiT's patch token count — true by construction
+at the default 704x1280x121 resolution for 1/2/4/5/8-way splits; for i2v's
+image-derived resolution it isn't guaranteed, so the script grows the
+derived width in 32px steps (up to `tensor_parallel_size - 1` times —
+guaranteed to find a divisible value) and logs when it does, rather than
+failing outright.
 
 **Status:** verified end-to-end on the real TI2V-5B checkpoint for **both**
-t2v and i2v, on a v4-8 (4 chips), `--tensor_parallel_size 4` (3 sampling
-steps, to keep smoke-test compile time reasonable — output at 3 steps is a
-coherent but heavily under-denoised blur, as expected that far from
-convergence; that confirms the pipeline runs correctly end-to-end, not final
-output quality, which needs the full step count to judge). See the
-[hardware doc](../hardware_and_sharding.md) for the bugs found and fixed
-getting this far (dtype-casting OOM, VAE decode compile time, i2v
-resolution-divisibility, host-transfer for decoded chunks).
+t2v and i2v, at the reference's full resolution/frame count (704x1280, 121
+frames) and full step count (50 t2v / 40 i2v), on a v4-8 (4 chips),
+`--tensor_parallel_size 4 --sequence_parallel_size 1`, `--dit_dtype
+float32` — 5 full benchmark runs each, no OOM, ~18.3GB peak HBM/chip; see
+[`docs/benchmarking.md`](../benchmarking.md)'s Wan2.2 5B rows for the
+numbers. (An earlier smoke test only ran 3 sampling steps at the harness's
+now-superseded `--tensor_parallel_size 1 --sequence_parallel_size 4`
+default, which OOMs at the full step count once `--dit_dtype float32` is
+applied — see the note above.) See the [hardware
+doc](../hardware_and_sharding.md) for the bugs found and fixed getting this
+far (dtype-casting OOM, VAE decode compile time, i2v resolution-divisibility,
+host-transfer for decoded chunks).
 
 ---
 
@@ -268,20 +279,40 @@ python examples/generate_wan2_2_i2v_a14b.py \
 | `--seed` | `0` | Initial noise seed. |
 | `--num_steps` | `40` | Reference i2v default (vs. 50 for t2v). |
 | `--shift` | `5.0` | Reference default for A14B I2V (vs. 12.0 for T2V). |
-| `--max_area` | `720*1280` | Bounds output pixel count; same `compute_latent_grid` as Wan2.1 I2V. |
-| `--num_frames` | `81` | Output frame count. |
+| `--max_area` | `720*1280` | Bounds output pixel count; same `compute_latent_grid` as Wan2.1 I2V. At 480P (`480*832`) the full reference 81 frames fits this repo's 4-chip machine; at native 720P, only a reduced 33 frames does — see the `--num_frames` row. |
+| `--num_frames` | `81` | Output frame count. At 480P, the full reference count (`81`) fits with `--offload_dit_weights --offload_chunk_size 10 --tensor_parallel_size 2 --sequence_parallel_size 2` — measured row in [`docs/benchmarking.md`](../benchmarking.md). At native 720P, the full 81 doesn't fit even with offloading + sequence parallelism — reduce to `33` (the largest that does; verified working, see Status below and [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22) for the memory analysis). |
 | `--output_path` | `output_video.mp4` | With `dp_size > 1`, each replica's sample is saved as `<output_path>_<i>.mp4`. |
+| `--offload_dit_weights` | off | Per-layer weight offloading (see `generate_wan2_1_t2v.py`'s identical flag), composed with the two-expert MoE switch above **and** with `--sequence_parallel_size > 1` (unlike Wan2.1's identical flag) — needed here because A14B's per-*token* modulation makes activation memory, not just weight residency, a real constraint at native resolutions. See [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22) for the full memory analysis, and for a real bug (bias double-counted under `sequence_parallel`'s row-parallel layers, found and fixed while building this) worth knowing about if you're extending this pattern elsewhere. |
+| `--offload_chunk_size` | `1` | Number of consecutive blocks grouped per offloaded HBM buffer when `--offload_dit_weights` is set. Must divide 40. Swept at 480P/81 frames: `1`, `2`, `4`, `10` all fit, `20` OOMs (needs 5.8GB against 3.7GB free) — `10` is the largest that fits and is what the 480P benchmarking row uses. At native 720P/33 frames, HBM headroom is much tighter (per-token activation memory dominates there) and only `1` fits. See [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22). |
 
 **Status:** verified end-to-end against the real I2V-A14B checkpoints (both
 experts, weight shapes/keys confirmed to exactly match
 `I2V_A14B_CONFIG`'s param tree, including the channel-concat conditioning
 path) on a 4-chip v4 slice, at `--tensor_parallel_size 4` (`--max_area
 16384`, 96x144, 9 frames) and at `--tensor_parallel_size 2
---sequence_parallel_size 2` (`--max_area 65536`, 208x288, 9 frames — 4x the
-pixel count), both confirming both experts engage correctly
+--sequence_parallel_size 2` (`--max_area 16384`, both with and without
+`--offload_dit_weights`), confirming both experts engage correctly
 (high_noise_model for the earlier steps, low_noise_model for the rest,
-matching `boundary=0.900` at `shift=5.0`). Same reduced-resolution caveat as
-T2V-A14B above — not yet run at full resolution.
+matching `boundary=0.900` at `shift=5.0`) and clean, sharp, coherent output
+at the full reference 40 steps — including with `--sequence_parallel_size
+2`, previously corrupted by a real row-parallel bias-double-counting bug
+(found and fixed, see [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22)
+for the full story; affected Wan2.1 too, also fixed).
+
+Two full-scale configurations are now measured (5-run average, see
+[`docs/benchmarking.md`](../benchmarking.md) for the table): **480P, full 81
+frames** (`--tensor_parallel_size 2 --sequence_parallel_size 2
+--offload_dit_weights --offload_chunk_size 10`) — 146.1s compile, 1780.0s
+generation, 44.5s/step, 28.3GB peak HBM/chip; and **native 720P, reduced to
+33 frames** (same flags, `--offload_chunk_size 1 --num_frames 33`) — 102.9s
+compile, 1962.5s generation, 49.1s/step, 20.5GB peak HBM/chip. Despite the
+smaller chunk size, native 720P's peak HBM is *lower* than 480P's — chunk
+size (how many blocks' worth of fp32 weights stay resident at once), not
+resolution, is the dominant HBM cost at this scale; see
+[`docs/benchmarking.md`](../benchmarking.md#results)'s `§` footnote for the
+full reasoning. Full 81-frame native 720P remains out of reach on this
+4-chip machine even with offloading and sequence parallelism combined — see
+[`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22) for why.
 
 ---
 

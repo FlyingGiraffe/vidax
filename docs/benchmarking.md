@@ -80,19 +80,20 @@ and only differ in which conditioning-mask/timestep values are passed in).
 
 | Model | Variant | Task | Hardware | Resolution | Frames | Steps | I/O dtype | Weight dtype | Compile (s) | Generation (s) | Per-step (s) | Peak HBM/chip (GB) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| Cosmos3 | Nano (16B) | T2V | v4-8 | 1280x704 | 93 | 35 | bf16 | bf16 | 64.2 | 249.9 | 7.1 | 29.5 |
-| Cosmos3 | Edge (4B) | T2V | v4-8 | 832x480 | 121 | 35 | bf16 | bf16 | 64.5 | 82.9 | 2.4 | 17.0 |
-| Cosmos-Predict2.5 | 14B | T2V | v4-8 | 1280x704 | 45\* | 35 | bf16 | bf16 | 92.1 | 1259.9 | 36.0 | 22.1 |
-| Cosmos-Predict2.5 | 2B | T2V | v4-8 | 1280x704 | 93 | 35 | bf16 | bf16 | 112.9 | 1357.3 | 38.8 | 16.0 |
+| Cosmos3 | Nano (16B) | T2V | v4-8 | 704x1280 | 93 | 35 | bf16 | bf16 | 64.2 | 249.9 | 7.1 | 29.5 |
+| Cosmos3 | Edge (4B) | T2V | v4-8 | 480x832 | 121 | 35 | bf16 | bf16 | 64.5 | 82.9 | 2.4 | 17.0 |
+| Cosmos-Predict2.5 | 14B | T2V | v4-8 | 704x1280 | 45\* | 35 | bf16 | bf16 | 92.1 | 1259.9 | 36.0 | 22.1 |
+| Cosmos-Predict2.5 | 2B | T2V | v4-8 | 704x1280 | 93 | 35 | bf16 | bf16 | 112.9 | 1357.3 | 38.8 | 16.0 |
 | Wan2.2 | A14B | T2V | v4-8 | 720x1280 | 81 | 50 | | | | | | |
-| Wan2.2 | A14B | I2V | v4-8 | 720x1280 | 81 | 40 | | | | | | |
-| Wan2.2 | 5B (TI2V) | T2V | v4-8 | 704x1280 | 121 | 50 | | | | | | |
-| Wan2.2 | 5B (TI2V) | I2V | v4-8 | 704x1280 | 121 | 40 | | | | | | |
+| Wan2.2 | A14B§ | I2V | v4-8 | 544x720\*\* | 81 | 40 | bf16 | fp32 | 146.1 | 1780.0 | 44.5 | 28.3 |
+| Wan2.2 | A14B§ | I2V | v4-8 | 832x1104\*\* | 33 | 40 | bf16 | fp32 | 102.9 | 1962.5 | 49.1 | 20.5 |
+| Wan2.2 | 5B¶ | T2V | v4-8 | 704x1280 | 121 | 50 | bf16 | fp32 | 87.3 | 525.9 | | 18.3 |
+| Wan2.2 | 5B¶ | I2V | v4-8 | 704x1280 | 121 | 40 | bf16 | fp32 | 145.8 | 482.7 | | 18.3 |
 | Wan2.1 | 14B‡ | T2V | v4-8 | 720x1280 | 81 | 50 | bf16 | fp32 | 108.2 | 6150.5 | 123.0 | 23.0 |
-| Wan2.1 | 14B | T2V | v4-8 | 480x832 | 81 | 50 | bf16 | fp32 | 142.5 | 1306.8 | 26.1 | 17.2 |
+| Wan2.1 | 14B | T2V | v4-8 | 480x832 | 81 | 50 | bf16 | bf16 | 142.5 | 1306.8 | 26.1 | 17.2 |
 | Wan2.1 | 14B (720P)‡ | I2V | v4-8 | 832x1104\*\* | 81 | 40 | bf16 | fp32 | 131.3 | 5090.0 | 127.2 | 32.7 |
-| Wan2.1 | 14B (480P) | I2V | v4-8 | 544x720\*\* | 81 | 40 | bf16 | fp32 | 150.3 | 1125.3 | 28.1 | 22.1 |
-| Wan2.1 | 1.3B | T2V | v4-8 | 480x832 | 81 | 50 | bf16 | fp32 | 85.4 | 348.3 | 7.0 | 10.2 |
+| Wan2.1 | 14B (480P) | I2V | v4-8 | 544x720\*\* | 81 | 40 | bf16 | bf16 | 150.3 | 1125.3 | 28.1 | 22.1 |
+| Wan2.1 | 1.3B | T2V | v4-8 | 480x832 | 81 | 50 | bf16 | bf16 | 85.4 | 348.3 | 7.0 | 10.2 |
 
 Resolution/frame/step columns are each model's reference default (see its
 own guide's CLI reference) — not necessarily the resolution that fits this
@@ -154,13 +155,71 @@ else that needs HBM. See
 [`docs/lessons/wan2_1_precision_debugging.md`](lessons/wan2_1_precision_debugging.md)
 for the original OOM this fixes.
 
-\*\* Wan2.1 I2V's output resolution is derived from the standardized
-conditioning image's (`examples/assets/cat.jpg`, a 832x1104 portrait photo)
-aspect ratio and `--max_area`, not a fixed `--height`/`--width` (see
-`compute_latent_grid` in
-[`generate_wan2_1_i2v.py`](../examples/generate_wan2_1_i2v.py)) — so these
-two rows' resolutions are portrait (taller than wide), unlike every other
-row's fixed landscape resolution.
+§ Both A14B I2V rows need `--offload_dit_weights` **and**
+`--sequence_parallel_size 2` (unlike Wan2.1, where offloading alone was
+enough) — A14B computes AdaLN modulation per *token* rather than per
+*sample* (see [`vidax.models.wan.wan2_2.dit`](../src/vidax/models/wan/wan2_2/dit.py)'s
+module docstring), so at native resolutions its own activation memory, not
+just DiT weight residency, is a real constraint that offloading alone can't
+address; `--sequence_parallel_size` shards that per-token activation memory
+across chips the same way it does for Wan2.1's sequence length. Composing
+the two exposed a real, separate bug along the way — `nn.Dense`'s bias
+getting double-counted under `sequence_parallel`'s row-parallel `psum`
+reduction, invisible with near-zero random-init weights but a large,
+compounding error with real trained (non-zero) biases — found and fixed in
+[`vidax.models.wan.common.dit_layers.psum_row_parallel`](../src/vidax/models/wan/common/dit_layers.py)
+(affected Wan2.1 too, also fixed there); see
+[`docs/weight_offloading.md`](weight_offloading.md#a14b-wan22) for the full
+investigation. `--offload_chunk_size` differs sharply between the two rows
+because the two constraints (weight residency vs. per-token activation
+memory) trade off differently at each token count: at 480P's smaller token
+count there's HBM headroom to spare, so `--offload_chunk_size 10` (the
+largest divisor of 40 that still fits — `20` OOMs, needing 5.8GB against
+3.7GB free) both fits and measurably speeds up the per-chunk transfer/
+compute pattern (44.5s/step here vs. what chunk size 1 would cost, mirroring
+Wan2.1's identical "bigger chunks help, up to the memory ceiling" finding).
+At native 720P, per-token activation memory alone already consumes most of
+the budget, leaving no room to also hold more than `--offload_chunk_size 1`
+resident, and even then the reference's full 81 frames don't fit — 33
+frames is the largest that does (binary-searched: 41 frames needs ~18.1GB
+against ~17.6GB free). Despite 720P's smaller `--offload_chunk_size`, its
+**lower** peak HBM (20.5GB vs. 480P's 28.3GB) confirms chunk size, not
+resolution, is the dominant HBM cost here — 480P's `--offload_chunk_size 10`
+keeps 10 blocks' worth of fp32 weights resident at once (~10/40 of a full
+~29GB/chip expert), while 720P's `--offload_chunk_size 1` keeps only 1/40
+resident, more than offsetting 720P's larger per-token activation cost. Full
+81-frame native 720P A14B I2V remains out of reach on this 4-chip machine
+even with offloading and sequence parallelism combined; see
+[`docs/weight_offloading.md`](weight_offloading.md#a14b-wan22) for why (it
+would need chunking `WanDiT.pre_process` itself across the token axis, not
+just the block loop — a bigger change than implemented so far).
+
+¶ Both 5B rows use `--tensor_parallel_size 4 --sequence_parallel_size 1`
+(all 4 chips shard weights, none go to sequence-parallel) despite TI2V-5B
+having this repo's largest Wan token count (704x1280, 121 frames) — the
+opposite tradeoff from A14B's rows above. `--sequence_parallel_size 4
+--tensor_parallel_size 1` was tried first (5B's weights are small enough
+that sharding activations instead of weights looked appealing), but at
+`--dit_dtype float32` the ~5B DiT (~20GB) ends up fully unsharded/replicated
+per chip under `tp=1`, consuming nearly the entire ~30.75GB HBM budget
+before T5 prompt encoding even runs (`RESOURCE_EXHAUSTED` allocating a mere
+64MB, with only 8.87MB free). `--tensor_parallel_size 2
+--sequence_parallel_size 2` gets past T5 encoding but still OOMs inside the
+DiT sampling step itself (39.4GB of HLO temporaries needed vs. 30.75GB
+available) — at this frame count, per-token activation memory dominates
+enough that even 2-way weight sharding isn't sufficient headroom. Only
+`tp=4/sp=1` (full weight sharding, no sequence parallel) fits end-to-end at
+the reference's full 121 frames/704x1280 — confirms 5B's real constraint is
+DiT weight residency, not sequence length, unlike A14B's per-token-activation
+-dominated rows above. No `--offload_dit_weights` needed at this size/config.
+
+\*\* I2V output resolution is derived from the standardized conditioning
+image's (`examples/assets/cat.jpg`, a 832x1104 portrait photo) aspect ratio
+and `--max_area`, not a fixed `--height`/`--width` (see `compute_latent_grid`
+in [`generate_wan2_1_i2v.py`](../examples/generate_wan2_1_i2v.py)/
+[`generate_wan2_2_i2v_a14b.py`](../examples/generate_wan2_2_i2v_a14b.py)) —
+so these rows' resolutions are portrait (taller than wide), unlike every
+other row's fixed landscape resolution.
 
 Wan2.1's I2V-14B ships as two separate checkpoints tuned for different
 resolution ranges (`Wan2.1-I2V-14B-480P`/`720P`, identical architecture,

@@ -71,13 +71,36 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from vidax.core.rope3d import sinusoidal_embedding_1d
-from vidax.models.wan.common.dit_layers import attend, chunk_by_rank as _chunk_by_rank
+from vidax.models.wan.common.dit_layers import attend, chunk_by_rank as _chunk_by_rank, psum_row_parallel
 
 
 class Wan22DiTBlock(nn.Module):
     """One transformer block: self-attn -> cross-attn -> FFN, AdaLN-modulated
     per-token (see this module's docstring for why, vs. Wan2.1's per-sample
     modulation).
+
+    ``x`` is expected to already be float32 on entry, and stays float32 on
+    return -- it is the persistent residual-stream accumulator, matching
+    `vidax.models.wan.wan2_1.dit.WanDiTBlock`'s identical convention and the
+    same reasoning: the reference's `amp.autocast(dtype=torch.float32)`-
+    wrapped gated residual updates never cast back down to bf16, so its
+    residual stream is float32 for virtually the whole network, with only
+    individual sub-layer matmuls (Q/K/V/O, FFN) running in bf16 via the
+    ambient `amp.autocast(dtype=torch.bfloat16)`.
+
+    This module used to re-quantize `x` down to its input dtype after every
+    gated residual add (self-attention and FFN, 2 of 40 layers) instead of
+    keeping it float32 throughout -- exactly the anti-pattern
+    `vidax.models.wan.wan2_1.dit.WanDiTBlock`'s docstring documents as
+    compounding into visibly corrupted (flat, hazy, low-detail) output at
+    large token counts (e.g. native 720p), while looking fine at smaller
+    scales. See docs/models/wan2_2.md#status for the investigation.
+
+    ``compute_dtype`` is the dtype sub-layer matmuls run in (the model's
+    *weight* dtype, e.g. `--dit_dtype`) -- every normalized/modulated
+    activation is explicitly downcast to it right before entering
+    `attend`/FFN Dense calls, and each sub-layer's output is cast back up to
+    float32 before being added into the residual stream.
     """
     dim: int
     ffn_dim: int
@@ -88,6 +111,7 @@ class Wan22DiTBlock(nn.Module):
     mesh: Optional[Mesh] = None
     sequence_parallel: bool = False
     sp_axis_name: str = "sp"
+    compute_dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
     def __call__(
@@ -99,7 +123,7 @@ class Wan22DiTBlock(nn.Module):
     ) -> jnp.ndarray:
         """
         Args:
-            x: (B, L, dim).
+            x: (B, L, dim), float32.
             context: (B, text_len, dim).
             t_mod: (B, L, 6, dim) -- per-token time projection (`e0` in the
                 reference), one of 6 modulation vectors per token.
@@ -119,30 +143,30 @@ class Wan22DiTBlock(nn.Module):
         # --- self-attention ---
         norm_x = nn.LayerNorm(
             use_scale=False, use_bias=False, epsilon=self.eps,
-            name="norm1")(x.astype(jnp.float32))
-        norm_x = (norm_x * (1 + scale_msa) + shift_msa).astype(x.dtype)
+            name="norm1")(x)
+        norm_x = (norm_x * (1 + scale_msa) + shift_msa).astype(self.compute_dtype)
         attn_out = attend(
             norm_x, norm_x, self.dim, self.num_heads, self.eps,
             prefix="self_attn", rope_freqs=rope_freqs, qk_norm=self.qk_norm,
             mesh=self.mesh, sequence_parallel=self.sequence_parallel,
             sp_axis_name=self.sp_axis_name)
-        x = (x.astype(jnp.float32) +
-             attn_out.astype(jnp.float32) * gate_msa).astype(x.dtype)
+        x = x + attn_out.astype(jnp.float32) * gate_msa
 
         # --- cross-attention ---
         norm_cross = nn.LayerNorm(
             use_scale=self.cross_attn_norm, use_bias=self.cross_attn_norm,
-            epsilon=self.eps, name="norm3")(x)
+            epsilon=self.eps, name="norm3")(x).astype(self.compute_dtype)
         x = x + attend(
             norm_cross, context, self.dim, self.num_heads, self.eps,
             prefix="cross_attn", qk_norm=self.qk_norm, mesh=self.mesh,
-            sequence_parallel=self.sequence_parallel, sp_axis_name=self.sp_axis_name)
+            sequence_parallel=self.sequence_parallel,
+            sp_axis_name=self.sp_axis_name).astype(jnp.float32)
 
         # --- feed-forward ---
         norm_h = nn.LayerNorm(
             use_scale=False, use_bias=False, epsilon=self.eps,
-            name="norm2")(x.astype(jnp.float32))
-        norm_h = (norm_h * (1 + scale_mlp) + shift_mlp).astype(x.dtype)
+            name="norm2")(x)
+        norm_h = (norm_h * (1 + scale_mlp) + shift_mlp).astype(self.compute_dtype)
         # `ffn_0` is column-parallel -- see `vidax.models.wan.common
         # .dit_layers.attend`'s identical comment for why its declared
         # output width must be halved under `sequence_parallel` (a no-op
@@ -150,15 +174,18 @@ class Wan22DiTBlock(nn.Module):
         tp_size = self.mesh.shape["tp"] if (self.sequence_parallel and self.mesh is not None) else 1
         h = nn.Dense(self.ffn_dim // tp_size, name="ffn_0")(norm_h)
         h = nn.gelu(h, approximate=True)
-        h = nn.Dense(self.dim, name="ffn_2")(h)
+        ffn2_dense = nn.Dense(self.dim, name="ffn_2")
+        h = ffn2_dense(h)
         # `ffn_2` is row-parallel -- see `vidax.models.wan.common.dit_layers
         # .attend`'s identical comment for why this manual reduce is only
         # needed under `sequence_parallel`, and why it's a safe no-op
-        # otherwise.
-        if self.sequence_parallel:
-            h = jax.lax.psum(h, "tp")
-        x = (x.astype(jnp.float32) +
-             h.astype(jnp.float32) * gate_mlp).astype(x.dtype)
+        # otherwise. Uses `_psum_row_parallel` (not a plain `jax.lax.psum`)
+        # -- see that function's docstring for the bias-double-counting bug
+        # it fixes, found via this exact `ffn_2` call while debugging why
+        # A14B's `sequence_parallel` corrupted output at real-checkpoint
+        # scale.
+        h = psum_row_parallel(ffn2_dense, h, self.sequence_parallel)
+        x = x + h.astype(jnp.float32) * gate_mlp
         return x
 
 
@@ -168,12 +195,13 @@ class Wan22Head(nn.Module):
     out_dim: int
     patch_size: Tuple[int, int, int]
     eps: float = 1e-6
+    compute_dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
     def __call__(self, x: jnp.ndarray, e: jnp.ndarray) -> jnp.ndarray:
         """
         Args:
-            x: (B, L, dim).
+            x: (B, L, dim), float32 (the residual-stream accumulator).
             e: (B, L, dim) -- the plain (unprojected) per-token time embedding.
         """
         modulation = self.param(
@@ -184,8 +212,8 @@ class Wan22Head(nn.Module):
 
         x = nn.LayerNorm(
             use_scale=False, use_bias=False, epsilon=self.eps,
-            name="norm")(x.astype(jnp.float32))
-        x = (x * (1 + scale) + shift).astype(e.dtype)
+            name="norm")(x)
+        x = (x * (1 + scale) + shift).astype(self.compute_dtype)
 
         out_dim = math.prod(self.patch_size) * self.out_dim
         return nn.Dense(out_dim, name="head")(x)
@@ -197,6 +225,17 @@ class WanDiT(nn.Module):
     Only text-to-video generation is exercised end-to-end so far (see this
     module's docstring); the architecture itself has no CLIP/i2v-specific
     parameters at all, unlike `vidax.models.wan.wan2_1.dit.WanDiT`.
+
+    Built with ``setup()`` (not ``@nn.compact``), mirroring
+    `vidax.models.wan.wan2_1.dit.WanDiT`'s identical split, specifically so
+    `pre_process`, each block, and `post_process` can each be called
+    independently outside a single `__call__` -- this is what lets A14B's
+    `--offload_dit_weights` (`examples/generate_wan2_2_i2v_a14b.py`) offload
+    one block's parameters into HBM at a time instead of requiring an entire
+    14B expert resident at once, composing with A14B's existing whole-expert
+    host/device swap (see `docs/weight_offloading.md`). `__call__` itself
+    still just chains `pre_process` -> the block loop -> `post_process` in
+    one call, unchanged behavior/output from before this split.
     """
     dim: int = 3072
     ffn_dim: int = 14336
@@ -214,8 +253,137 @@ class WanDiT(nn.Module):
     mesh: Optional[Mesh] = None
     sequence_parallel: bool = False
     sp_axis_name: str = "sp"
+    # dtype each `Wan22DiTBlock`'s sub-layer matmuls (Q/K/V/O, FFN) transiently
+    # downcast to before entering `attend`/Dense calls -- should match the
+    # DiT's *weight* dtype (`--dit_dtype` in the example scripts), not
+    # necessarily `latents`'s own dtype. See `Wan22DiTBlock`'s docstring for
+    # why keeping this distinct from the float32 residual stream matters at
+    # large token counts.
+    compute_dtype: jnp.dtype = jnp.bfloat16
 
-    @nn.compact
+    def setup(self):
+        self.patch_embedding = nn.Conv(
+            self.dim, self.patch_size, strides=self.patch_size,
+            padding="VALID", name="patch_embedding")
+        self.time_embedding_0 = nn.Dense(self.dim, name="time_embedding_0")
+        self.time_embedding_2 = nn.Dense(self.dim, name="time_embedding_2")
+        self.time_projection_1 = nn.Dense(self.dim * 6, name="time_projection_1")
+        self.text_embedding_0 = nn.Dense(self.dim, name="text_embedding_0")
+        self.text_embedding_2 = nn.Dense(self.dim, name="text_embedding_2")
+        self.blocks = [
+            Wan22DiTBlock(
+                dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
+                qk_norm=self.qk_norm, cross_attn_norm=self.cross_attn_norm,
+                eps=self.eps, mesh=self.mesh, sequence_parallel=self.sequence_parallel,
+                sp_axis_name=self.sp_axis_name, compute_dtype=self.compute_dtype,
+                name=f"blocks_{i}")
+            for i in range(self.num_layers)
+        ]
+        self.head = Wan22Head(
+            self.dim, self.out_dim, self.patch_size, self.eps,
+            compute_dtype=self.compute_dtype, name="head")
+
+    def pre_process(
+        self,
+        latents: jnp.ndarray,
+        t: jnp.ndarray,
+        freqs: Tuple[jnp.ndarray, jnp.ndarray],
+        context: jnp.ndarray,
+    ):
+        """Everything before the block loop: patchify, per-token timestep/text
+        embedding, and (under `sequence_parallel`) the token-sequence chunk.
+        Split out from `__call__` so `--offload_dit_weights` can run this
+        once, then loop the (offloaded) blocks externally, then call
+        `post_process` -- see `examples/generate_wan2_2_i2v_a14b.py`.
+
+        Returns `(x, context, e0, freqs, input_dtype, e, grid)` -- `e` (the
+        plain, unprojected per-token time embedding) and `grid` (`(b, t_p,
+        h_p, w_p)`, the unpatchified token-grid shape) are only needed by
+        `post_process`, not by the block loop itself.
+        """
+        input_dtype = latents.dtype
+        b, t_p, h_p, w_p = latents.shape[0], *[
+            latents.shape[1 + i] // self.patch_size[i] for i in range(3)
+        ]
+
+        # --- patchify ---
+        x = self.patch_embedding(latents)
+        x = x.reshape(b, -1, self.dim)
+        seq_len = x.shape[1]
+
+        if t.ndim == 1:
+            t = jnp.broadcast_to(t[:, None], (b, seq_len))
+
+        # --- timestep embedding (float32, matching reference amp.autocast) ---
+        t_freq = sinusoidal_embedding_1d(self.freq_dim, t.reshape(-1))
+        e = self.time_embedding_0(t_freq)
+        e = nn.silu(e)
+        e = self.time_embedding_2(e)
+        e = e.reshape(b, seq_len, self.dim)
+        e0 = self.time_projection_1(nn.silu(e))
+        e0 = e0.reshape(b, seq_len, 6, self.dim)
+
+        # --- text context embedding (zero-padded to text_len, like the ref) ---
+        text_pad = self.text_len - context.shape[1]
+        assert text_pad >= 0, "context length exceeds text_len"
+        if text_pad > 0:
+            context = jnp.pad(context, ((0, 0), (0, text_pad), (0, 0)))
+        context = self.text_embedding_0(context)
+        context = nn.gelu(context, approximate=True)
+        context = self.text_embedding_2(context)
+
+        # --- sequence-parallel chunk: split the token sequence itself across
+        # `sp_axis_name`, so every block's per-token activations (x, e, e0,
+        # and every intermediate inside Wan22DiTBlock) only ever cover this
+        # device's local share -- see this module's docstring. Self-
+        # attention alone reshuffles back to a full-sequence view internally
+        # (`attend`'s `sequence_parallel` path), so `context`/`freqs` need no
+        # special handling: `context` is already small and fully replicated,
+        # and `freqs` is chunked the same way as `x`/`e`/`e0` since RoPE
+        # angles are position-indexed identically to the token sequence.
+        cos, sin = freqs
+        if self.sequence_parallel:
+            sp_size = self.mesh.shape[self.sp_axis_name]
+            assert seq_len % sp_size == 0, (
+                f"sequence_parallel requires the patch token count ({seq_len}) "
+                f"to be evenly divisible by the sequence-parallel size ({sp_size})")
+            rank = jax.lax.axis_index(self.sp_axis_name)
+            x = _chunk_by_rank(x, 1, sp_size, rank)
+            e = _chunk_by_rank(e, 1, sp_size, rank)
+            e0 = _chunk_by_rank(e0, 1, sp_size, rank)
+            cos = _chunk_by_rank(cos, 1, sp_size, rank)
+            sin = _chunk_by_rank(sin, 1, sp_size, rank)
+        freqs = (cos, sin)
+
+        # `x` becomes the persistent float32 residual-stream accumulator
+        # from here on -- see `Wan22DiTBlock`'s docstring for why. Individual
+        # sub-layer matmuls still run at `compute_dtype`; only the
+        # accumulator itself stays wide.
+        x = x.astype(jnp.float32)
+        return x, context, e0, freqs, input_dtype, e, (b, t_p, h_p, w_p)
+
+    def post_process(self, x: jnp.ndarray, e: jnp.ndarray, input_dtype: jnp.dtype, grid: Tuple[int, int, int, int]):
+        """Everything after the block loop: head projection + unpatchify
+        (and, under `sequence_parallel`, re-assembling the full token
+        sequence first). See `pre_process`'s docstring for why this is
+        split out.
+        """
+        b, t_p, h_p, w_p = grid
+        x = self.head(x, e)
+        x = x.astype(input_dtype)
+
+        if self.sequence_parallel:
+            # Re-assemble the full token sequence (every device's local
+            # output chunk, in rank order) before unpatchify -- matches the
+            # reference's `gather_forward` in `sp_dit_forward`.
+            x = jax.lax.all_gather(x, self.sp_axis_name, axis=1, tiled=True)
+
+        pt, ph, pw = self.patch_size
+        x = x.reshape(b, t_p, h_p, w_p, pt, ph, pw, self.out_dim)
+        x = x.transpose(0, 1, 4, 2, 5, 3, 6, 7)
+        x = x.reshape(b, t_p * pt, h_p * ph, w_p * pw, self.out_dim)
+        return x
+
     def __call__(
         self,
         latents: jnp.ndarray,
@@ -242,85 +410,8 @@ class WanDiT(nn.Module):
         Returns:
             (B, T, H, W, C_out) denoised/velocity prediction.
         """
-        input_dtype = latents.dtype
-        b, t_p, h_p, w_p = latents.shape[0], *[
-            latents.shape[1 + i] // self.patch_size[i] for i in range(3)
-        ]
-
-        # --- patchify ---
-        x = nn.Conv(
-            self.dim, self.patch_size, strides=self.patch_size,
-            padding="VALID", name="patch_embedding")(latents)
-        x = x.reshape(b, -1, self.dim)
-        seq_len = x.shape[1]
-
-        if t.ndim == 1:
-            t = jnp.broadcast_to(t[:, None], (b, seq_len))
-
-        # --- timestep embedding (float32, matching reference amp.autocast) ---
-        t_freq = sinusoidal_embedding_1d(self.freq_dim, t.reshape(-1))
-        e = nn.Dense(self.dim, name="time_embedding_0")(t_freq)
-        e = nn.silu(e)
-        e = nn.Dense(self.dim, name="time_embedding_2")(e)
-        e = e.reshape(b, seq_len, self.dim)
-        e0 = nn.Dense(self.dim * 6, name="time_projection_1")(nn.silu(e))
-        e0 = e0.reshape(b, seq_len, 6, self.dim)
-
-        # --- text context embedding (zero-padded to text_len, like the ref) ---
-        text_pad = self.text_len - context.shape[1]
-        assert text_pad >= 0, "context length exceeds text_len"
-        if text_pad > 0:
-            context = jnp.pad(context, ((0, 0), (0, text_pad), (0, 0)))
-        context = nn.Dense(self.dim, name="text_embedding_0")(context)
-        context = nn.gelu(context, approximate=True)
-        context = nn.Dense(self.dim, name="text_embedding_2")(context)
-
-        # --- sequence-parallel chunk: split the token sequence itself across
-        # `sp_axis_name`, so every block's per-token activations (x, e, e0,
-        # and every intermediate inside Wan22DiTBlock) only ever cover this
-        # device's local share -- see this module's docstring. Self-
-        # attention alone reshuffles back to a full-sequence view internally
-        # (`attend`'s `sequence_parallel` path), so `context`/`freqs` need no
-        # special handling: `context` is already small and fully replicated,
-        # and `freqs` is chunked the same way as `x`/`e`/`e0` since RoPE
-        # angles are position-indexed identically to the token sequence.
-        cos, sin = freqs
-        if self.sequence_parallel:
-            sp_size = self.mesh.shape[self.sp_axis_name]
-            assert seq_len % sp_size == 0, (
-                f"sequence_parallel requires the patch token count ({seq_len}) "
-                f"to be evenly divisible by the sequence-parallel size ({sp_size})")
-            rank = jax.lax.axis_index(self.sp_axis_name)
-            x = _chunk_by_rank(x, 1, sp_size, rank)
-            e = _chunk_by_rank(e, 1, sp_size, rank)
-            e0 = _chunk_by_rank(e0, 1, sp_size, rank)
-            cos = _chunk_by_rank(cos, 1, sp_size, rank)
-            sin = _chunk_by_rank(sin, 1, sp_size, rank)
-        freqs = (cos, sin)
-
-        # --- transformer blocks ---
-        for i in range(self.num_layers):
-            x = Wan22DiTBlock(
-                dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
-                qk_norm=self.qk_norm, cross_attn_norm=self.cross_attn_norm,
-                eps=self.eps, mesh=self.mesh, sequence_parallel=self.sequence_parallel,
-                sp_axis_name=self.sp_axis_name, name=f"blocks_{i}")(
-                    x, context, e0, freqs)
-
-        # --- head + unpatchify ---
-        x = Wan22Head(
-            self.dim, self.out_dim, self.patch_size, self.eps,
-            name="head")(x, e)
-        x = x.astype(input_dtype)
-
-        if self.sequence_parallel:
-            # Re-assemble the full token sequence (every device's local
-            # output chunk, in rank order) before unpatchify -- matches the
-            # reference's `gather_forward` in `sp_dit_forward`.
-            x = jax.lax.all_gather(x, self.sp_axis_name, axis=1, tiled=True)
-
-        pt, ph, pw = self.patch_size
-        x = x.reshape(b, t_p, h_p, w_p, pt, ph, pw, self.out_dim)
-        x = x.transpose(0, 1, 4, 2, 5, 3, 6, 7)
-        x = x.reshape(b, t_p * pt, h_p * ph, w_p * pw, self.out_dim)
+        x, context, e0, freqs, input_dtype, e, grid = self.pre_process(latents, t, freqs, context)
+        for block in self.blocks:
+            x = block(x, context, e0, freqs)
+        x = self.post_process(x, e, input_dtype, grid)
         return x

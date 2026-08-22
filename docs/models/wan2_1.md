@@ -225,25 +225,14 @@ projection (`WanDiT`'s `model_type="i2v"` path).
 **Status:** verified end-to-end against the real I2V-14B/VAE/T5/CLIP
 checkpoints for **both** the 480P and 720P checkpoints, output confirmed
 coherent for each at its own resolution (see
-[`docs/benchmarking.md`](../benchmarking.md) for measured numbers). Fixed
-two bugs found during the first real run, both pre-existing and specific to
-the image-conditioning path (never exercised against real weights before):
-`build_i2v_conditioning` called a `pre_process` method that doesn't exist on
-Wan2.1's `WanVAEEncoder` (that's a Wan2.2-only pixel-unshuffle step —
-Wan2.1's `encode_chunk` takes raw RGB pixels directly); and
-`Encoder3d`/`WanVAEEncoder`'s `temperal_downsample` default was
-`(True, True, False)` (the class's own default) instead of the released
-checkpoint's actual `(False, True, True)` (confirmed against the reference's
-`_video_vae` config and the checkpoint's own weight keys) — the decoder-side
-`temperal_upsample` default happened to already be correct, which is why
-this went undetected until the encoder path was actually exercised. A third
-issue, specific to running the 480P checkpoint, was caught while adding
-proper benchmark coverage for it: earlier code loaded it with `--max_area`
-and `--shift` left at their 720P-scale defaults (`720*1280`/`5.0`), which
-runs the 480P checkpoint well outside the resolution range it was actually
-trained/tuned at — `--shift` now auto-selects `3.0` at 480P scale (see the
-CLI reference below), and the 480P usage example explicitly passes
-`--max_area 480*832`.
+[`docs/benchmarking.md`](../benchmarking.md) for measured numbers). The
+first real run against these checkpoints surfaced and fixed three
+pre-existing bugs specific to the image-conditioning path, never before
+exercised against real weights: a wrong `WanVAEEncoder` method call, a wrong
+`temperal_downsample` default (Wan2.1's actual `(False, True, True)` vs. the
+class default's `(True, True, False)`), and the 480P checkpoint silently
+running at the 720P checkpoint's `--shift`/`--max_area` defaults — `--shift`
+now auto-selects `3.0` at 480P scale (see the CLI reference below).
 
 480P is verified coherent under the fp32-DiT-weights default with no
 special handling (smaller token count, fits comfortably fully resident).
@@ -288,10 +277,10 @@ the corruption doesn't show up), decoupled from the general `--dtype` flag
 cheap and correct to run in bf16). The memory cost of the new default is
 real: roughly double the DiT's resident weight memory versus bf16, which is
 the direct cause of I2V-14B-720P's OOM at native resolution before
-`--offload_dit_weights` (see above). Full investigation, including why this took three compounding bugs
-rather than one to actually fix (checkpoint rounding, a
-`compute_dtype`/`dit_dtype` decoupling bug, and per-step latent
-re-quantization), in
+`--offload_dit_weights` (see above). Full investigation — including why
+this took three compounding bugs (checkpoint rounding, a `compute_dtype`/
+`dit_dtype` decoupling bug, and per-step latent re-quantization) rather than
+one to actually fix — in
 [`docs/lessons/wan2_1_precision_debugging.md`](../lessons/wan2_1_precision_debugging.md).
 
 ---

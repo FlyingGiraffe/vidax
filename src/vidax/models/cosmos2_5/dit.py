@@ -204,6 +204,16 @@ class CosmosDiT(nn.Module):
     checkpoint; pass `**configs.BASE_14B_CONFIG` for the 14B checkpoint (see
     `configs.py` for exactly which fields differ).
 
+    Built with ``setup()`` (not ``@nn.compact``), mirroring
+    `vidax.models.wan.wan2_2.dit.WanDiT`'s identical split, specifically so
+    `pre_process`, each block, and `post_process` can each be called
+    independently outside a single `__call__` -- this is what lets
+    `--offload_dit_weights` (`examples/generate_cosmos2_5.py`) offload one
+    block's parameters into HBM at a time instead of requiring the entire
+    14B DiT resident at once (see `docs/weight_offloading.md`). `__call__`
+    itself still just chains `pre_process` -> the block loop -> `post_process`
+    in one call, unchanged behavior/output from before this split.
+
     Two parallelism strategies, both ported directly from Wan's DiTs (see
     `vidax.models.wan.wan2_1.dit`/`wan2_2.dit`'s module docstrings for the
     fuller mechanism writeups -- the reasoning is identical here, just
@@ -255,40 +265,42 @@ class CosmosDiT(nn.Module):
     sequence_parallel: bool = False
     sp_axis_name: str = "sp"
 
-    @nn.compact
-    def __call__(
+    def setup(self):
+        self.x_embedder_proj_1 = nn.Dense(self.dim, use_bias=False, name="x_embedder_proj_1")
+        self.t_embedder_1_linear_1 = nn.Dense(self.dim, use_bias=False, name="t_embedder_1_linear_1")
+        self.t_embedder_1_linear_2 = nn.Dense(3 * self.dim, use_bias=False, name="t_embedder_1_linear_2")
+        self.t_embedding_norm = RMSNorm(self.dim, eps=self.eps, name="t_embedding_norm")
+        self.crossattn_proj_0 = nn.Dense(self.context_dim, name="crossattn_proj_0")
+        self.blocks = [
+            CosmosDiTBlock(
+                dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
+                head_dim=self.head_dim, context_dim=self.context_dim,
+                adaln_lora_dim=self.adaln_lora_dim, eps=self.eps, mesh=self.mesh,
+                sequence_parallel=self.sequence_parallel, sp_axis_name=self.sp_axis_name,
+                name=f"blocks_{i}")
+            for i in range(self.num_layers)
+        ]
+        out_patch_dim = math.prod(self.patch_size) * self.out_channels
+        self.final_layer = CosmosFinalLayer(
+            self.dim, out_patch_dim, self.adaln_lora_dim, self.eps, name="final_layer")
+
+    def pre_process(
         self,
         latents: jnp.ndarray,
         timesteps: jnp.ndarray,
         context: jnp.ndarray,
         padding_mask: Optional[jnp.ndarray] = None,
         condition_video_mask: Optional[jnp.ndarray] = None,
-    ) -> jnp.ndarray:
-        """
-        Args:
-            latents: (B, T, H, W, in_channels) noisy VAE-latent video.
-            timesteps: (B,) or (B, T) diffusion timesteps -- per-*frame* when
-                (B, T): video2world/image2world conditioning frames carry a
-                separate (near-zero) timestep from the frames being
-                generated, all in a single forward pass. A (B,) input is
-                broadcast to every frame (the plain text2video case).
-            context: (B, L, context_raw_dim) raw Reason1 text embeddings,
-                L <= 512 (zero-padded to 512 if shorter, matching the
-                reference's fixed `NUM_EMBEDDING_PADDING_TOKENS`).
-            padding_mask: (B, T, H, W, 1) optional; defaults to all-ones
-                (vidax assumes one shared (T, H, W) grid per batch, so this
-                is only useful if a caller has a real reason to pad).
-            condition_video_mask: (B, T, H, W, 1) optional; defaults to
-                all-zeros (pure text2video -- no conditioning frames). For
-                image2world/video2world, set to 1 for the latent frames
-                whose content is given (and blended into `latents` in place
-                of noise by the caller -- see this module's package
-                docstring / the reference's `denoise()` frame-replacement
-                logic, not reproduced here since it's sampling-loop
-                orchestration, not DiT architecture).
+    ):
+        """Everything before the block loop: mask-concat, patchify, per-frame
+        timestep/text-context embedding, and (under `sequence_parallel`) the
+        token-sequence chunk. Split out from `__call__` so `--offload_dit_weights`
+        can run this once, then loop the (offloaded) blocks externally, then
+        call `post_process` -- see `examples/generate_cosmos2_5.py`.
 
-        Returns:
-            (B, T, H, W, out_channels) denoised x0 prediction.
+        Returns `(x, emb, adaln_lora, context, rope_freqs, h_p, w_p, grid)` --
+        `grid` (`(b, t_p, h_p, w_p)`) is only needed by `post_process`, not by
+        the block loop itself. See `__call__`'s docstring for argument shapes.
         """
         b, t, h, w, _ = latents.shape
         pt, ph, pw = self.patch_size
@@ -331,7 +343,7 @@ class CosmosDiT(nn.Module):
         x = x.reshape(b, t_p, pt, h_p, ph, w_p, pw, in_ch)
         x = x.transpose(0, 1, 3, 5, 7, 2, 4, 6)  # (b, t_p, h_p, w_p, C, pt, ph, pw)
         x = x.reshape(b, t_p, h_p, w_p, in_ch * pt * ph * pw)
-        x = nn.Dense(self.dim, use_bias=False, name="x_embedder_proj_1")(x)
+        x = self.x_embedder_proj_1(x)
         x = x.reshape(b, t_p * h_p * w_p, self.dim)
 
         # --- timestep embedding: `emb` is the *raw* sinusoidal embedding
@@ -348,17 +360,17 @@ class CosmosDiT(nn.Module):
         # on a ~1000x out-of-distribution timestep at every sampling step.
         timesteps = timesteps * self.timestep_scale
         t_sin = sinusoidal_embedding_1d(self.dim, timesteps.reshape(-1)).reshape(b, t_p, self.dim)
-        adaln_lora = nn.Dense(self.dim, use_bias=False, name="t_embedder_1_linear_1")(t_sin)
+        adaln_lora = self.t_embedder_1_linear_1(t_sin)
         adaln_lora = nn.silu(adaln_lora)
-        adaln_lora = nn.Dense(3 * self.dim, use_bias=False, name="t_embedder_1_linear_2")(adaln_lora)
-        emb = RMSNorm(self.dim, eps=self.eps, name="t_embedding_norm")(t_sin)
+        adaln_lora = self.t_embedder_1_linear_2(adaln_lora)
+        emb = self.t_embedding_norm(t_sin)
 
         # --- text context: down-project once, shared by every block.
         text_pad = 512 - context.shape[1]
         assert text_pad >= 0, "context length exceeds the fixed 512-token Reason1 embedding length"
         if text_pad > 0:
             context = jnp.pad(context, ((0, 0), (0, text_pad), (0, 0)))
-        context = nn.Dense(self.context_dim, name="crossattn_proj_0")(context)
+        context = self.crossattn_proj_0(context)
         context = nn.gelu(context, approximate=False)
 
         rope_freqs = create_cosmos_rope3d_freqs(
@@ -394,18 +406,22 @@ class CosmosDiT(nn.Module):
             adaln_lora = chunk_by_rank(adaln_lora, 1, sp_size, rank)
         rope_freqs = (cos, sin)
 
-        for i in range(self.num_layers):
-            x = CosmosDiTBlock(
-                dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
-                head_dim=self.head_dim, context_dim=self.context_dim,
-                adaln_lora_dim=self.adaln_lora_dim, eps=self.eps, mesh=self.mesh,
-                sequence_parallel=self.sequence_parallel, sp_axis_name=self.sp_axis_name,
-                name=f"blocks_{i}")(x, emb, adaln_lora, context, rope_freqs, h_p, w_p)
+        return x, emb, adaln_lora, context, rope_freqs, h_p, w_p, (b, t_p, h_p, w_p)
 
-        out_patch_dim = math.prod(self.patch_size) * self.out_channels
-        x = CosmosFinalLayer(
-            self.dim, out_patch_dim, self.adaln_lora_dim, self.eps,
-            name="final_layer")(x, emb, adaln_lora, h_p, w_p)
+    def post_process(self, x: jnp.ndarray, emb: jnp.ndarray, adaln_lora: jnp.ndarray,
+                      grid: Tuple[int, int, int, int]):
+        """Everything after the block loop: final-layer projection +
+        unpatchify (and, under `sequence_parallel`, re-assembling the full
+        token sequence first). `grid` is `pre_process`'s `(b, t_p, h_p, w_p)`
+        return value -- `h_p`/`w_p` here are always the full (unsharded)
+        spatial grid, matching `pre_process`'s `_expand_temporal` broadcast
+        target even under `sequence_parallel` (only the token/frame *axis*
+        is chunked there, not h_p/w_p individually). See `pre_process`'s
+        docstring for why this is split out.
+        """
+        b, t_p, h_p, w_p = grid
+        pt, ph, pw = self.patch_size
+        x = self.final_layer(x, emb, adaln_lora, h_p, w_p)
 
         if self.sequence_parallel:
             # Re-assemble the full token sequence (every device's local
@@ -430,3 +446,43 @@ class CosmosDiT(nn.Module):
         x = x.transpose(0, 1, 6, 2, 4, 3, 5, 7)  # (b, t_p, pt, h_p, ph, w_p, pw, C)
         x = x.reshape(b, t_p * pt, h_p * ph, w_p * pw, self.out_channels)
         return x
+
+    def __call__(
+        self,
+        latents: jnp.ndarray,
+        timesteps: jnp.ndarray,
+        context: jnp.ndarray,
+        padding_mask: Optional[jnp.ndarray] = None,
+        condition_video_mask: Optional[jnp.ndarray] = None,
+    ) -> jnp.ndarray:
+        """
+        Args:
+            latents: (B, T, H, W, in_channels) noisy VAE-latent video.
+            timesteps: (B,) or (B, T) diffusion timesteps -- per-*frame* when
+                (B, T): video2world/image2world conditioning frames carry a
+                separate (near-zero) timestep from the frames being
+                generated, all in a single forward pass. A (B,) input is
+                broadcast to every frame (the plain text2video case).
+            context: (B, L, context_raw_dim) raw Reason1 text embeddings,
+                L <= 512 (zero-padded to 512 if shorter, matching the
+                reference's fixed `NUM_EMBEDDING_PADDING_TOKENS`).
+            padding_mask: (B, T, H, W, 1) optional; defaults to all-ones
+                (vidax assumes one shared (T, H, W) grid per batch, so this
+                is only useful if a caller has a real reason to pad).
+            condition_video_mask: (B, T, H, W, 1) optional; defaults to
+                all-zeros (pure text2video -- no conditioning frames). For
+                image2world/video2world, set to 1 for the latent frames
+                whose content is given (and blended into `latents` in place
+                of noise by the caller -- see this module's package
+                docstring / the reference's `denoise()` frame-replacement
+                logic, not reproduced here since it's sampling-loop
+                orchestration, not DiT architecture).
+
+        Returns:
+            (B, T, H, W, out_channels) denoised x0 prediction.
+        """
+        x, emb, adaln_lora, context, rope_freqs, h_p, w_p, grid = self.pre_process(
+            latents, timesteps, context, padding_mask, condition_video_mask)
+        for block in self.blocks:
+            x = block(x, emb, adaln_lora, context, rope_freqs, h_p, w_p)
+        return self.post_process(x, emb, adaln_lora, grid)

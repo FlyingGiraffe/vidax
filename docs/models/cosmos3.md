@@ -234,55 +234,14 @@ recipe (480x832, 121 frames, non-Karras; T2V: 35 steps/`shift=10.0`, I2V:
 20 steps/`shift=12.0`), **with a properly JSON-structured prompt** (see
 [Prompting](#prompting) — this matters far more for Edge than for Nano).
 
-Three real, distinct bugs were found and fixed to get here:
-
-1. **Vision-segment mRoPE offset used the padded `--max_text_len` instead of
-   each prompt's real token count.** The reference has no padding at all (a
-   ragged, per-item design), so it never faces this; this port pads text to
-   a fixed length for JAX's static shapes, and using the padded length
-   inflated the relative RoPE gap between vision tokens and the text tokens
-   they cross-attend to by `max_text_len - real_length` — differently
-   between the cond and uncond CFG passes whenever their real lengths
-   differ. Fixed by computing each pass's vision temporal offset from its
-   own real (unpadded) token count (`generate_cosmos3.py`'s
-   `_vision_position_ids_for`). This alone fully resolved Nano; Edge
-   improved substantially but not completely.
-2. **Edge's resolution/frame count and scheduler were both wrong.** This
-   repo's shared `--height`/`--width`/`--num_frames` defaults target Nano's
-   spec (1280x704/93 frames); Edge needs 480x832/121 frames instead (its
-   checkpoint documents a narrower 256p/480p, 50-150 frame range). Separately,
-   `examples/generate_cosmos3.py` hardcoded `use_karras_sigmas=True`
-   unconditionally — correct for Nano, wrong for Edge, whose real recipe uses
-   a non-Karras, shift-warped schedule. Running Edge at Nano's resolution, or
-   with Karras sigmas, doesn't error — it just produces degraded/incoherent
-   output, including a temporal-instability artifact that escalated past a
-   fixed absolute frame position on longer clips (traced to a real directional
-   divergence inside the DiT before the scheduler was identified as the actual
-   cause). Fixed by adding `--use_karras_sigmas`/`--shift` CLI flags (Nano's
-   `use_karras_sigmas=True` default is untouched) and correcting the
-   resolution/frame-count defaults used for Edge in
-   `benchmarks/run_cosmos3.py`. T2V and I2V need *different* `--shift`/
-   `--num_steps` values for Edge (confirmed by cross-checking three
-   independent `refs/cosmos-main` backend notebooks) — don't reuse one
-   task's values for the other.
-3. **Prompt format.** Both models' checkpoints document that "for optimal
-   quality, prompts should be upsampled into a specific JSON structure" —
-   this repo had been using short plain-text prompts throughout. Nano
-   tolerates this reasonably well; Edge does not — the previous fixes
-   resolved Edge's instability and gross incoherence, but output remained
-   flat, oversaturated, and short on detail until switching to a real,
-   JSON-structured prompt/negative-prompt pair, which produced fully
-   photorealistic, detailed output. See [Prompting](#prompting).
-
-Verification methodology for (1)-(2): full checkpoint-value verification
-(542/542 DiT tensors byte-exact against raw safetensors, VAE byte-identical
-between Nano and Edge), an independent from-scratch PyTorch reimplementation
-of the reference's attention/MLP/norm/RoPE math loaded with Edge's real
-weights (matched our JAX port to floating-point noise), and the mRoPE
-relative-position invariant verified at Edge's actual `rope_theta`. This
-ruled out the architecture port itself well before the scheduler and prompt
-issues were identified — both bugs were in the example script's usage of
-the model, not the model port.
+Three real, distinct bugs were found and fixed to get here — a vision-
+segment mRoPE offset computed from the padded text length instead of each
+prompt's real token count, Edge silently running at Nano's resolution/
+scheduler defaults, and both models needing a JSON-structured prompt (Edge
+especially) rather than a short plain-text one. Full diagnostic writeup,
+including the verification methodology that ruled out the architecture port
+itself before these were found, in
+[`docs/lessons/cosmos3_debugging.md`](../lessons/cosmos3_debugging.md).
 
 ### Prompting
 
@@ -474,5 +433,5 @@ need that for T2V/I2V specifically).
   and the **Reasoner** surface — see [Scope](#scope) for why these are out
   for now and what porting them would involve.
 
-See the [parity matrix in the root README](../../README.md#model-support--parity-matrix)
+See the [parity matrix in the root README](../../README.md#-model-support)
 for the up-to-date status across all variants.

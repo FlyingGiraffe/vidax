@@ -40,6 +40,14 @@ def build_args_5b(args: argparse.Namespace) -> argparse.Namespace:
     # frame count.
     tp_size = args.tensor_parallel_size if args.tensor_parallel_size is not None else 4
     sp_size = args.sequence_parallel_size if args.sequence_parallel_size is not None else 1
+    # `generate_wan2_2_ti2v.py`'s own `--num_steps` default resolves `None`
+    # to 50 (t2v) / 40 (i2v) internally, but `common.run_benchmark`'s
+    # per-step-time calculation reads `args.num_steps` directly off this
+    # harness's own Namespace, not what the script resolved it to -- passing
+    # `None` through leaves `per_step_s` empty in the results (it silently
+    # divides by `None` instead of the real step count). Resolve explicitly
+    # here so the harness's own args carry the actual value used.
+    num_steps = 40 if args.task == "i2v" else 50
     ns = argparse.Namespace(
         dit_checkpoint_path=os.path.join(repo_dir, "diffusion_pytorch_model.safetensors.index.json"),
         vae_checkpoint_path=os.path.join(repo_dir, "Wan2.2_VAE.pth"),
@@ -55,7 +63,7 @@ def build_args_5b(args: argparse.Namespace) -> argparse.Namespace:
         dtype="bfloat16",
         dit_dtype="float32",
         seed=0,
-        num_steps=None,  # script default: 50 t2v / 40 i2v
+        num_steps=num_steps,
         shift=5.0,
         height=704,
         width=1280,
@@ -92,22 +100,31 @@ def build_args_a14b(args: argparse.Namespace) -> argparse.Namespace:
         num_frames=num_frames,
         # See generate_wan2_2_i2v_a14b.py's identical flags -- offloading
         # composes with A14B's two-expert MoE switch, see
-        # docs/weight_offloading.md. Ignored by generate_wan2_2_t2v_a14b.py,
-        # which doesn't have these flags wired up yet.
+        # docs/weight_offloading.md. Now wired up for T2V too (see
+        # generate_wan2_2_t2v_a14b.py).
         offload_dit_weights=args.offload_dit_weights,
         offload_chunk_size=args.offload_chunk_size,
         output_path=common.output_path(
             "wan", "2.2",
-            "a14b_720p" if (args.task == "i2v" and args.i2v_resolution == "720P") else "a14b",
+            "a14b_720p" if (
+                (args.task == "i2v" and args.i2v_resolution == "720P")
+                or (args.task == "t2v" and args.t2v_resolution == "720P")
+            ) else "a14b",
             args.task),
     )
     if args.task == "t2v":
-        del common_kwargs["offload_dit_weights"], common_kwargs["offload_chunk_size"]
+        # `--t2v_resolution` picks which (height, width) to benchmark --
+        # mirrors `--i2v_resolution`'s existing pattern below. 720P is
+        # A14B T2V's own native default (`generate_wan2_2_t2v_a14b.py`'s
+        # `--height`/`--width` defaults); 480P is the smaller config that
+        # fits this 4-chip machine without needing to reduce frame count
+        # (see docs/benchmarking.md's `§` footnote).
+        height, width = (480, 832) if args.t2v_resolution == "480P" else (720, 1280)
         return argparse.Namespace(
             prompt=[common.STANDARD_T2V_PROMPT],
             negative_prompt=generate_wan2_2_t2v_a14b.DEFAULT_NEGATIVE_PROMPT,
             guide_scale=5.0, boundary=0.875, num_steps=50, shift=12.0,
-            height=720, width=1280, **common_kwargs)
+            height=height, width=width, **common_kwargs)
     else:
         # `--i2v_resolution` picks which max_area to benchmark -- see
         # generate_wan2_1_i2v.py's identical flag for the pattern. Unlike
@@ -132,6 +149,7 @@ def main():
     parser.add_argument("--offload_chunk_size", type=int, default=1, help="A14B only. See generate_wan2_2_i2v_a14b.py's identical flag.")
     parser.add_argument("--num_frames", type=int, default=None, help="A14B only. Overrides the benchmark script's own default (81).")
     parser.add_argument("--i2v_resolution", type=str, default="720P", choices=["480P", "720P"], help="A14B I2V only -- picks --max_area (480*832 or 720*1280). See generate_wan2_1_i2v.py's identical flag for the pattern.")
+    parser.add_argument("--t2v_resolution", type=str, default="720P", choices=["480P", "720P"], help="A14B T2V only -- picks --height/--width (480x832 or 720x1280, the script's own native default).")
     args = parser.parse_args()
 
     if args.model_size == "5B":
@@ -141,7 +159,10 @@ def main():
     else:
         run_args = build_args_a14b(args)
         main_fn = generate_wan2_2_t2v_a14b.main if args.task == "t2v" else generate_wan2_2_i2v_a14b.main
-        size = "a14b" if not (args.task == "i2v" and args.i2v_resolution == "720P") else "a14b_720p"
+        is_720p = (
+            (args.task == "i2v" and args.i2v_resolution == "720P")
+            or (args.task == "t2v" and args.t2v_resolution == "720P"))
+        size = "a14b_720p" if is_720p else "a14b"
 
     common.run_benchmark(
         model="wan", version="2.2", size=size, task=args.task, main_fn=main_fn, args=run_args,

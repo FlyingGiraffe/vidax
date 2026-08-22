@@ -40,7 +40,7 @@ from vidax.core.sharding import (
 )
 from vidax.core.rope3d import create_rope3d_freqs
 from vidax.models.wan.wan2_2.configs import T2V_A14B_CONFIG
-from vidax.models.wan.wan2_2.dit import WanDiT
+from vidax.models.wan.wan2_2.dit import WanDiT, Wan22DiTBlock
 from vidax.models.wan.wan2_1.vae import WanVAEDecoder, Decoder3d, _count_causal_convs
 from vidax.models.wan.common.t5 import T5Encoder, Umt5Tokenizer
 from vidax.schedulers.flow_match import RectifiedFlowScheduler
@@ -205,6 +205,38 @@ def main(args):
     dit_sharding_spec = shard_wan_params(high_dit_params, mesh)
     t5_params = jax.device_put(t5_params, shard_wan_params(t5_params, mesh))
     vae_params = jax.device_put(vae_params, replicated)
+
+    # `--offload_dit_weights`: generalizes the whole-expert host/device swap
+    # above to per-layer granularity -- see generate_wan2_2_i2v_a14b.py's
+    # identical block (this is a direct copy, no T2V-specific difference
+    # since offloading only touches the DiT's own weight residency, not
+    # conditioning) and docs/weight_offloading.md's "A14B (Wan2.2)" section.
+    if args.offload_dit_weights:
+        chunk_size = args.offload_chunk_size
+        assert dit_model.num_layers % chunk_size == 0, (
+            f"--offload_chunk_size ({chunk_size}) must divide WanDiT.num_layers "
+            f"({dit_model.num_layers}) -- see docs/weight_offloading.md.")
+        num_layers = dit_model.num_layers
+        layer_sharding = dit_sharding_spec["params"]["blocks_0"]
+        chunk_sharding = [layer_sharding] * chunk_size
+        chunk_partition_specs = [to_partition_specs(layer_sharding)] * chunk_size
+        nonblock_shardings = {
+            k: v for k, v in dit_sharding_spec["params"].items() if not k.startswith("blocks_")}
+        nonblock_partition_specs = to_partition_specs({"params": nonblock_shardings})
+
+        def _split_expert(host_params):
+            chunk_params_host = [
+                [host_params["params"][f"blocks_{i}"] for i in range(c, c + chunk_size)]
+                for c in range(0, num_layers, chunk_size)
+            ]
+            nonblock_params = {
+                k: v for k, v in host_params["params"].items() if not k.startswith("blocks_")}
+            device_nonblock_params = jax.device_put(
+                {"params": nonblock_params}, {"params": nonblock_shardings})
+            return chunk_params_host, device_nonblock_params
+
+        high_chunk_params_host, high_nonblock_params = _split_expert(high_dit_params)
+        low_chunk_params_host, low_nonblock_params = _split_expert(low_dit_params)
     logging.info("Weights loaded and cast (DiT experts stay on host until needed).")
 
     # --- Prepare inputs ---
@@ -253,6 +285,83 @@ def main(args):
     else:
         dit_apply = _dit_apply
 
+    if args.offload_dit_weights:
+        # Per-layer offloading, composed with the two-expert MoE switch and
+        # (if requested) `sequence_parallel` -- see
+        # generate_wan2_2_i2v_a14b.py's identical block for the full
+        # reasoning (this is a direct copy; T2V has no image conditioning to
+        # thread through, so `pre_process`/`post_process`'s signatures are
+        # simpler here, but the offloading mechanics are identical).
+        offload_input_dtype = dtype
+        offload_grid = (2 * dp_size, latent_t // pt, latent_h // ph, latent_w // pw)
+
+        def _pre_process_body(params, latents, t, freqs, context):
+            x, ctx, e0, fr, _input_dtype, e, _grid = dit_model.apply(
+                params, latents=latents, t=t, freqs=freqs, context=context,
+                method=dit_model.pre_process)
+            return x, ctx, e0, fr, e
+
+        def _post_process_body(params, x, e):
+            return dit_model.apply(
+                params, x, e, offload_input_dtype, offload_grid, method=dit_model.post_process)
+
+        def _chunk_forward_body(chunk_params, x, context, e0, freqs):
+            for layer_params in chunk_params:
+                x = Wan22DiTBlock(
+                    dim=dit_model.dim, ffn_dim=dit_model.ffn_dim, num_heads=dit_model.num_heads,
+                    qk_norm=dit_model.qk_norm, cross_attn_norm=dit_model.cross_attn_norm,
+                    eps=dit_model.eps, compute_dtype=dit_dtype, mesh=mesh,
+                    sequence_parallel=sequence_parallel,
+                ).apply({"params": layer_params}, x, context, e0, freqs)
+            return x
+
+        if sequence_parallel:
+            sp_freqs_spec = P(None, 'sp', None, None)
+            pre_apply = jax.jit(shard_map(
+                _pre_process_body, mesh=mesh,
+                in_specs=(nonblock_partition_specs, P('dp', None, None, None, None),
+                          P('dp'), (P(), P()), P('dp', None, None)),
+                out_specs=(P('dp', 'sp', None), P('dp', None, None), P('dp', 'sp', None, None),
+                           (sp_freqs_spec, sp_freqs_spec), P('dp', 'sp', None)),
+                check_rep=False,
+            ))
+            chunk_forward = jax.jit(shard_map(
+                _chunk_forward_body, mesh=mesh,
+                in_specs=(chunk_partition_specs, P('dp', 'sp', None), P('dp', None, None),
+                          P('dp', 'sp', None, None), (sp_freqs_spec, sp_freqs_spec)),
+                out_specs=P('dp', 'sp', None),
+                check_rep=False,
+            ), donate_argnums=(0,))
+            post_apply = jax.jit(shard_map(
+                _post_process_body, mesh=mesh,
+                in_specs=(nonblock_partition_specs, P('dp', 'sp', None), P('dp', 'sp', None)),
+                out_specs=P('dp', None, None, None, None),
+                check_rep=False,
+            ))
+        else:
+            pre_apply = jax.jit(_pre_process_body)
+            chunk_forward = jax.jit(_chunk_forward_body, donate_argnums=(0,))
+            post_apply = jax.jit(_post_process_body)
+
+        def single_step_offloaded(current_latents, step_index, prompt_embeds, negative_embeds, freqs,
+                                   chunk_params_host, nonblock_params, guide_scale):
+            b_size = current_latents.shape[0]
+            t_val = scheduler.timesteps[step_index]
+            t_vec = jnp.full((b_size,), t_val, dtype=jnp.float32)
+            latents_2b = jnp.concatenate([current_latents, current_latents], axis=0)
+            t_vec_2b = jnp.concatenate([t_vec, t_vec], axis=0)
+            context_2b = jnp.concatenate([prompt_embeds, negative_embeds], axis=0)
+
+            x, ctx, e0, fr, e = pre_apply(nonblock_params, latents_2b, t_vec_2b, freqs, context_2b)
+            for chunk_host in chunk_params_host:
+                chunk_params = jax.device_put(chunk_host, chunk_sharding)
+                x = chunk_forward(chunk_params, x, ctx, e0, fr)
+            v_2b = post_apply(nonblock_params, x, e)
+
+            v_cond, v_uncond = v_2b[:b_size], v_2b[b_size:]
+            velocity = v_uncond + guide_scale * (v_cond - v_uncond)
+            return scheduler.step(velocity, step_index, current_latents)
+
     # --- Euler sampling loop (see generate_wan2_1_t2v.py for why this isn't
     # one big jax.jit) ---
     @partial(jax.jit, donate_argnums=(0,))
@@ -276,18 +385,27 @@ def main(args):
     for step_index in range(scheduler.num_steps):
         t_val = scheduler.timesteps[step_index]
         expert = "high_noise" if t_val >= boundary_val else "low_noise"
-        if expert != active_expert:
-            # Only one expert is ever device-resident at a time -- see the
-            # comment above `dit_sharding_spec` in main() for why. Dropping
-            # the reference lets JAX free that expert's device buffers
-            # before the new one is placed.
-            device_params = None
-            host_params = high_dit_params if expert == "high_noise" else low_dit_params
-            device_params = jax.device_put(host_params, dit_sharding_spec)
-            active_expert = expert
+        expert_changed = expert != active_expert
+        if expert_changed:
             logging.info(f"  step {step_index}: switched to {expert}_model (t={t_val:.1f})")
-        latents = single_step(
-            latents, step_index, prompt_embeds, negative_embeds, freqs, device_params, args.guide_scale)
+            active_expert = expert
+        if args.offload_dit_weights:
+            chunk_params_host = high_chunk_params_host if expert == "high_noise" else low_chunk_params_host
+            nonblock_params = high_nonblock_params if expert == "high_noise" else low_nonblock_params
+            latents = single_step_offloaded(
+                latents, step_index, prompt_embeds, negative_embeds, freqs,
+                chunk_params_host, nonblock_params, args.guide_scale)
+        else:
+            if expert_changed:
+                # Only one expert is ever device-resident at a time -- see
+                # the comment above `dit_sharding_spec` in main() for why.
+                # Dropping the reference lets JAX free that expert's device
+                # buffers before the new one is placed.
+                device_params = None
+                host_params = high_dit_params if expert == "high_noise" else low_dit_params
+                device_params = jax.device_put(host_params, dit_sharding_spec)
+            latents = single_step(
+                latents, step_index, prompt_embeds, negative_embeds, freqs, device_params, args.guide_scale)
 
     # --- Decode latents to video frames (see generate_wan2_1_t2v.py for why
     # this uses a per-chunk jit loop rather than one big jax.jit call) ---
@@ -331,6 +449,8 @@ if __name__ == "__main__":
     parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. See generate_wan2_1_t2v.py's identical flag for the full reasoning; worth trying together with --tensor_parallel_size if even one A14B expert alone doesn't fit HBM at the resolution you want (see this script's header comment). Also requires the DiT's patch token count to be evenly divisible by this value.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for VAE and T5 (and cast target for their loaded checkpoints). Note: TPU's XLA backend does not implement float16 matmuls -- float16 will fail at runtime on TPU.")
     parser.add_argument("--dit_dtype", type=str, default="float32", choices=list(DTYPES.keys()), help="Cast target for both DiT experts' *weights* specifically, independent of --dtype. Defaults to float32 -- see generate_wan2_2_i2v_a14b.py's identical flag for why.")
+    parser.add_argument("--offload_dit_weights", action="store_true", help="Keep each DiT expert's per-block weights host-resident and offload one --offload_chunk_size-block group's worth into HBM at a time during the sampling loop, instead of one whole expert staying HBM-resident at a time (the existing behavior without this flag). Composes with --sequence_parallel_size > 1 -- see generate_wan2_2_i2v_a14b.py's identical flag and docs/weight_offloading.md.")
+    parser.add_argument("--offload_chunk_size", type=int, default=1, help="Number of consecutive DiT blocks grouped into one offloaded HBM buffer / one jax.jit compile when --offload_dit_weights is set (ignored otherwise). Must divide A14B's num_layers (40). See generate_wan2_2_i2v_a14b.py's identical flag.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=50, help="Number of sampling steps for the scheduler.")
     parser.add_argument("--shift", type=float, default=12.0, help="Flow-matching noise-schedule shift. Reference default for A14B T2V is 12.0 (5.0 for I2V).")

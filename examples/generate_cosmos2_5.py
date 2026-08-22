@@ -48,7 +48,7 @@ from vidax.models.cosmos2_5.reason1 import (
     NUM_EMBEDDING_PADDING_TOKENS, Qwen2TextModel, Reason1Tokenizer, compute_reason1_embeddings,
 )
 from vidax.models.cosmos2_5.configs import BASE_2B_CONFIG, BASE_14B_CONFIG
-from vidax.models.cosmos2_5.dit import CosmosDiT
+from vidax.models.cosmos2_5.dit import CosmosDiT, CosmosDiTBlock
 from vidax.models.wan.wan2_1.vae import Decoder3d, WanVAEDecoder, WanVAEEncoder, _count_causal_convs
 from vidax.schedulers.unipc import FlowUniPCMultistepScheduler
 from vidax.translator.mappings import load_torch_checkpoint_to_jax
@@ -255,11 +255,42 @@ def main(args):
     replicated = get_replicated_sharding(mesh)
     dit_params = cast_to_dtype(dit_params, dtype)
     dit_shardings = shard_wan_params(dit_params, mesh)
-    dit_params = jax.device_put(dit_params, dit_shardings)
     vae_params = jax.device_put(cast_to_dtype(vae_params, dtype), replicated)
     reason1_params = jax.device_put(
         cast_to_dtype(reason1_params, dtype), shard_wan_params(reason1_params, mesh))
-    logging.info("Weights loaded, cast, and sharded across devices.")
+
+    # `--offload_dit_weights`: keeps the DiT's per-block weights host-resident
+    # and offloads one `--offload_chunk_size`-block group's worth into HBM at
+    # a time during the sampling loop, instead of the whole DiT staying
+    # HBM-resident throughout (the existing behavior without this flag) --
+    # same idea as `generate_wan2_1_t2v.py`/`generate_wan2_2_i2v_a14b.py`'s
+    # identical flag, ported here with no MoE expert-switching to compose
+    # with (Cosmos-Predict2.5 is a single DiT, unlike Wan2.2 A14B). See
+    # `docs/weight_offloading.md`.
+    if args.offload_dit_weights:
+        chunk_size = args.offload_chunk_size
+        assert dit_model.num_layers % chunk_size == 0, (
+            f"--offload_chunk_size ({chunk_size}) must divide CosmosDiT.num_layers "
+            f"({dit_model.num_layers}) -- see docs/weight_offloading.md.")
+        num_layers = dit_model.num_layers
+        layer_sharding = dit_shardings["params"]["blocks_0"]
+        chunk_sharding = [layer_sharding] * chunk_size
+        chunk_partition_specs = [to_partition_specs(layer_sharding)] * chunk_size
+        nonblock_shardings = {
+            k: v for k, v in dit_shardings["params"].items() if not k.startswith("blocks_")}
+        nonblock_partition_specs = to_partition_specs({"params": nonblock_shardings})
+
+        chunk_params_host = [
+            [dit_params["params"][f"blocks_{i}"] for i in range(c, c + chunk_size)]
+            for c in range(0, num_layers, chunk_size)
+        ]
+        nonblock_params = {
+            k: v for k, v in dit_params["params"].items() if not k.startswith("blocks_")}
+        nonblock_params = jax.device_put({"params": nonblock_params}, {"params": nonblock_shardings})
+        logging.info("Weights loaded and cast (DiT blocks stay on host until needed).")
+    else:
+        dit_params = jax.device_put(dit_params, dit_shardings)
+        logging.info("Weights loaded, cast, and sharded across devices.")
 
     # --- Resolve output resolution + conditioning frames ---
     pt, ph, pw = dit_model.patch_size
@@ -392,6 +423,68 @@ def main(args):
     else:
         dit_apply = _dit_apply
 
+    if args.offload_dit_weights:
+        # Per-layer offloading, composed with `sequence_parallel` -- see
+        # `generate_wan2_2_i2v_a14b.py`'s identical `pre_apply`/
+        # `chunk_forward`/`post_apply` split (docs/weight_offloading.md).
+        # `h_p`/`w_p`/`grid` are the same every call (fixed resolution/frame
+        # count for the whole script run), so they're computed once here as
+        # plain Python constants and closed over, rather than threaded
+        # through the jitted calls as traced return values -- same reasoning
+        # as the Wan scripts' identical `offload_grid`.
+        offload_t_p, offload_h_p, offload_w_p = latent_t // pt, latent_h // ph, latent_w // pw
+        offload_grid = (2 * batch_size, offload_t_p, offload_h_p, offload_w_p)
+
+        def _pre_process_body(params, latents, t, context, cond_mask):
+            x, emb, adaln_lora, ctx, rope_freqs, _h_p, _w_p, _grid = dit_model.apply(
+                params, latents=latents, timesteps=t, context=context,
+                condition_video_mask=cond_mask, method=dit_model.pre_process)
+            return x, emb, adaln_lora, ctx, rope_freqs
+
+        def _post_process_body(params, x, emb, adaln_lora):
+            return dit_model.apply(
+                params, x, emb, adaln_lora, offload_grid, method=dit_model.post_process)
+
+        def _chunk_forward_body(chunk_params, x, emb, adaln_lora, context, rope_freqs):
+            for layer_params in chunk_params:
+                x = CosmosDiTBlock(
+                    dim=dit_model.dim, ffn_dim=dit_model.ffn_dim, num_heads=dit_model.num_heads,
+                    head_dim=dit_model.head_dim, context_dim=dit_model.context_dim,
+                    adaln_lora_dim=dit_model.adaln_lora_dim, eps=dit_model.eps, mesh=mesh,
+                    sequence_parallel=sequence_parallel,
+                ).apply({"params": layer_params}, x, emb, adaln_lora, context, rope_freqs,
+                        offload_h_p, offload_w_p)
+            return x
+
+        if sequence_parallel:
+            sp_freqs_spec = P(None, 'sp', None, None)
+            pre_apply = jax.jit(shard_map(
+                _pre_process_body, mesh=mesh,
+                in_specs=(nonblock_partition_specs, P('dp', None, None, None, None), P('dp', None),
+                          P('dp', None, None), P('dp', None, None, None, None)),
+                out_specs=(P('dp', 'sp', None), P('dp', 'sp', None), P('dp', 'sp', None),
+                           P('dp', None, None), (sp_freqs_spec, sp_freqs_spec)),
+                check_rep=False,
+            ))
+            chunk_forward = jax.jit(shard_map(
+                _chunk_forward_body, mesh=mesh,
+                in_specs=(chunk_partition_specs, P('dp', 'sp', None), P('dp', 'sp', None),
+                          P('dp', 'sp', None), P('dp', None, None), (sp_freqs_spec, sp_freqs_spec)),
+                out_specs=P('dp', 'sp', None),
+                check_rep=False,
+            ), donate_argnums=(0,))
+            post_apply = jax.jit(shard_map(
+                _post_process_body, mesh=mesh,
+                in_specs=(nonblock_partition_specs, P('dp', 'sp', None), P('dp', 'sp', None),
+                          P('dp', 'sp', None)),
+                out_specs=P('dp', None, None, None, None),
+                check_rep=False,
+            ))
+        else:
+            pre_apply = jax.jit(_pre_process_body)
+            chunk_forward = jax.jit(_chunk_forward_body, donate_argnums=(0,))
+            post_apply = jax.jit(_post_process_body)
+
     # --- Timestep conditioning, no input/output preconditioning ---
     #
     # No EDM-style `c_in`/`c_skip`/`c_out` preconditioning here -- the
@@ -464,6 +557,26 @@ def main(args):
         v_cond, v_uncond = net_out_2b[:b], net_out_2b[b:]
         return v_uncond + guide_scale * (v_cond - v_uncond)
 
+    def compute_velocity_offloaded(current_latents, sigma_vec, prompt_embeds, negative_embeds, guide_scale):
+        c_noise = sigma_vec * scheduler.num_train_timesteps  # (B, T)
+        net_in = current_latents
+
+        b = current_latents.shape[0]
+        net_in_2b = jnp.concatenate([net_in, net_in], axis=0)
+        c_noise_2b = jnp.concatenate([c_noise, c_noise], axis=0)
+        context_2b = jnp.concatenate([prompt_embeds, negative_embeds], axis=0)
+        cond_mask_2b = jnp.concatenate([cond_mask_full, cond_mask_full], axis=0)
+
+        x, emb, adaln_lora, ctx, rope_freqs = pre_apply(
+            nonblock_params, net_in_2b, c_noise_2b, context_2b, cond_mask_2b)
+        for chunk_host in chunk_params_host:
+            chunk_params = jax.device_put(chunk_host, chunk_sharding)
+            x = chunk_forward(chunk_params, x, emb, adaln_lora, ctx, rope_freqs)
+        net_out_2b = post_apply(nonblock_params, x, emb, adaln_lora)
+
+        v_cond, v_uncond = net_out_2b[:b], net_out_2b[b:]
+        return v_uncond + guide_scale * (v_cond - v_uncond)
+
     logging.info(
         f"Running UniPC sampling for {args.num_steps} steps "
         f"(solver_order={args.solver_order}, shift={args.shift}, guide_scale={args.guide_scale})...")
@@ -479,7 +592,12 @@ def main(args):
         # `c_noise` input via `sigma * num_train_timesteps`).
         sigma_vec = cond_frame_mask * CONDITIONAL_SIGMA + (1.0 - cond_frame_mask) * sigma_val
 
-        velocity = compute_velocity(latents, sigma_vec, prompt_embeds, negative_embeds, dit_params, args.guide_scale)
+        if args.offload_dit_weights:
+            velocity = compute_velocity_offloaded(
+                latents, sigma_vec, prompt_embeds, negative_embeds, args.guide_scale)
+        else:
+            velocity = compute_velocity(
+                latents, sigma_vec, prompt_embeds, negative_embeds, dit_params, args.guide_scale)
         unipc_state, latents = scheduler.step(unipc_state, velocity, step_index, latents)
 
         if has_conditioning:
@@ -533,6 +651,8 @@ if __name__ == "__main__":
     parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of devices to Megatron-shard the DiT's attention heads / FFN channels (weights) across. Also always used for Reason1's own (Megatron-only) weight sharding, independent of --sequence_parallel_size. Must divide num_devices, CosmosDiT.num_heads (16 for 2B, 40 for 14B -- see --model_size), and Qwen2TextModel.num_key_value_heads (4, the binding GQA constraint -- so tp in {1,2,4} if Reason1 is being sharded meaningfully). Composes independently with --sequence_parallel_size (their product is the DiT's real head-divisibility constraint).")
     parser.add_argument("--sequence_parallel_size", type=int, default=1, help="Number of devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of --tensor_parallel_size's weight-sharding. 1 (off) by default since Megatron TP already fits the 2B model fine at typical resolutions; useful for pushing to much higher resolution/frame counts, where self-attention activation memory (not weight memory) becomes the bottleneck. Also requires the latent frame count (`1 + (num_frames - 1) // 4`) to be evenly divisible by this value.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=list(DTYPES.keys()), help="Compute dtype for the DiT, VAE, and Reason1 encoder.")
+    parser.add_argument("--offload_dit_weights", action="store_true", help="Keep the DiT's per-block weights host-resident and offload one --offload_chunk_size-block group's worth into HBM at a time during the sampling loop, instead of the whole DiT staying HBM-resident throughout (the existing behavior without this flag). Composes with --sequence_parallel_size > 1. See generate_wan2_1_t2v.py's identical flag and docs/weight_offloading.md.")
+    parser.add_argument("--offload_chunk_size", type=int, default=1, help="Number of consecutive DiT blocks grouped into one offloaded HBM buffer / one jax.jit compile when --offload_dit_weights is set (ignored otherwise). Must divide num_layers (28 for 2B, see --model_size for 14B).")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the initial noise.")
     parser.add_argument("--num_steps", type=int, default=35, help="Number of UniPC sampling steps. The reference's default for the 2B base checkpoint is 35.")
     parser.add_argument("--solver_order", type=int, default=2, help="UniPC solver order. The reference's default is 2.")

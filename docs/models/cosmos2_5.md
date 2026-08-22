@@ -184,6 +184,8 @@ replica — only the text prompt varies).
 | `--tensor_parallel_size` | `1` | Devices to Megatron-shard the DiT's attention heads/FFN channels *and* Reason1's weights across (see [hardware doc](../hardware_and_sharding.md)). Must divide `num_devices`, `CosmosDiT.num_heads` (16 for 2B, 40 for 14B), and `Qwen2TextModel.num_key_value_heads` (4, GQA — the binding constraint if Reason1 is meaningfully sharded, so `tp` in `{1,2,4}` in practice). |
 | `--sequence_parallel_size` | `1` | Devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of `--tensor_parallel_size`'s weight-sharding. Not needed at 2B scale/typical resolutions; more likely to matter at 14B or at much higher resolution/frame counts — see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s "Combining with Megatron TP". Only affects the DiT — Reason1 always uses Megatron TP (`--tensor_parallel_size`) regardless. Requires the latent frame count to divide evenly by this value. |
 | `--dtype` | `bfloat16` | `float32` \| `float16` \| `bfloat16`. `float16` will fail at runtime — TPU's XLA backend doesn't implement `float16` matmuls. |
+| `--offload_dit_weights` | off | Keep the DiT's per-block weights host-resident, offloading `--offload_chunk_size` blocks' worth into HBM at a time during the sampling loop, instead of the whole DiT staying HBM-resident for the entire script. Needed for 14B to reach the reference's full 93-frame default on this repo's 4-chip machine (without it, reduced to 45 frames — see [`docs/benchmarking.md`](../benchmarking.md)). Composes with `--sequence_parallel_size`. See [`docs/weight_offloading.md`](../weight_offloading.md). |
+| `--offload_chunk_size` | `1` | Number of consecutive DiT blocks grouped into one offloaded HBM buffer when `--offload_dit_weights` is set. Must divide `num_layers` (28 for 2B, 36 for 14B). |
 | `--seed` | `0` | Initial noise seed. |
 | `--num_steps` | `35` | UniPC sampling steps. Reference default for the 2B base checkpoint. |
 | `--solver_order` | `2` | UniPC solver order. Reference default. |
@@ -199,64 +201,13 @@ replica — only the text prompt varies).
 **Verified end-to-end on real weights, both text2world and image2world:
 output is coherent, prompt-matching video** (e.g. a recognizable red panda
 climbing a bamboo stalk for T2V; a stable, identity-preserving subject for
-I2V). Getting there took four real, sequentially-discovered bugs — the
-fourth (and dominant) one only surfaced after the first three were fixed and
-output was still texture, not a scene. Full diagnostic writeup in
-[`docs/lessons/cosmos2_5_debugging.md`](../lessons/cosmos2_5_debugging.md);
-summary:
-
-- **`unpatchify`'s channel order didn't match the reference's** (it isn't
-  simply `patchify`'s inverse — the reference genuinely uses a different
-  order for the two). Fixed.
-- **Every sampling step recompiled the entire 2B-parameter DiT** (a `jax.jit`
-  static argument forced a full retrace of the function it was part of, not
-  just the small piece of code that read it) — 30 low-resolution steps took
-  16+ minutes wall-clock, almost entirely compile time. Fixed; the DiT
-  forward pass now compiles once and is reused for every step.
-- **A missing `timestep_scale=0.001` rescale** inside the DiT itself
-  (`MinimalV1LVGDiT.forward` in the reference) — a second, DiT-internal
-  timestep rescale distinct from the sampling loop's own EDM `t` conversion.
-  Missing it left the network conditioned on a ~1000x out-of-distribution
-  noise level at every step. Fixed (`CosmosDiT.timestep_scale`).
-- **The dominant bug, found last**: `generate_cosmos2_5.py` wrapped every
-  DiT call in an EDM-style `c_in`/`c_skip`/`c_out`/`c_noise` preconditioning
-  transform (`RectifiedFlowScaling` in the reference) that turned out to
-  belong to a *different* reference model class entirely —
-  `RectifiedFlowScaling` is never imported by `Text2WorldModelRectifiedFlow`/
-  `Video2WorldModelRectifiedFlow` (the classes this checkpoint's own
-  rectified-flow training config actually uses). The real reference feeds
-  the raw noisy latent to the DiT unscaled and uses the DiT's raw output
-  directly as the velocity prediction, fed straight into the scheduler's own
-  `x0 = sample - sigma_t * model_output` — exactly what
-  `vidax.schedulers.unipc.FlowUniPCMultistepScheduler` was already written
-  to expect (its own docstring says as much). Removing the entire
-  preconditioning wrapper — not adjusting it — was the fix. A real-photo
-  low-noise denoising probe (encode a real image, add a *small* amount of
-  noise, one DiT forward pass, decode) was the diagnostic that found this:
-  it reconstructed the photo almost perfectly at low noise and degraded into
-  the same meaningless texture at high noise, isolating the bug to
-  *noise-level conditioning*, not the network itself.
-
-Two more real bugs surfaced and were fixed during the same investigation,
-lower severity than the four above but worth noting since they're the kind
-that silently corrupt output without ever erroring:
-- A **swapped mask-channel concatenation order** at the DiT's input
-  (`[latents, condition_video_mask, padding_mask]`, not the order this port
-  originally used) — the two mask channels carry opposite-meaning constants
-  for plain text2world, so the swap fed the trained embedding weights
-  inverted per-channel semantics.
-- **Attention-entropy/gate diagnostics** (checking whether cross-attention
-  meaningfully discriminates among text tokens, and how much its AdaLN gate
-  contributes relative to self-attention's) that, in isolation, initially
-  looked like a smoking gun for a text-conditioning bug — ultimately a red
-  herring once the real (preconditioning) bug was found and fixed; kept as
-  a documented dead end since the diagnostic methodology itself (real-weight
-  entropy/gate measurement, not just architecture re-reading) is reusable.
-
-See [`docs/lessons/cosmos2_5_debugging.md`](../lessons/cosmos2_5_debugging.md)
-for the full narrative, including the ablations that ruled out other
-hypotheses (VAE round-trip fidelity, RoPE relative-position invariants,
-weight-loading exact-match checks) before the real bug was found.
+I2V). Getting there took six real bugs, found only once the port was run
+against real checkpoints — the dominant one was a wrongly-added EDM-style
+preconditioning wrapper borrowed from a reference class this checkpoint's
+training config never actually uses, isolated via a real-photo low-noise
+denoising probe. Full diagnostic writeup, including the other five bugs and
+the ablations that ruled out other hypotheses first, in
+[`docs/lessons/cosmos2_5_debugging.md`](../lessons/cosmos2_5_debugging.md).
 
 - DiT: loading `model_ema_bf16.pt` through the translator mapping and
   comparing every leaf against `CosmosDiT`'s initialized parameter tree
@@ -273,18 +224,19 @@ weight-loading exact-match checks) before the real bug was found.
 **14B** (`--model_size 14B`): the same translator mapping, DiT architecture,
 and sampling loop as 2B, just with `configs.BASE_14B_CONFIG`'s wider/deeper
 dims — verified end-to-end against the real released checkpoint
-(`Cosmos-Predict2.5-14B/base/pre-trained/..._ema_bf16.pt`) with
-`--tensor_parallel_size 4`: weight loading, Megatron sharding across all 4
-chips, Reason1 text encoding, UniPC sampling, and VAE decode all complete
-without error and produce a non-degenerate video (correct shape, sane pixel
-statistics) at a small low-step smoke-test config. Not yet run at
-full resolution/step-count for a real quality judgment the way 2B's T2V/I2V
-outputs were (see above) — the 4 architecture bugs found and fixed during 2B
-development live in code shared by both sizes, so there's no size-specific
-correctness gap expected, but this hasn't been independently confirmed by a
-full-quality 14B generation the way 2B's has.
+(`Cosmos-Predict2.5-14B/base/pre-trained/..._ema_bf16.pt`), full resolution
+and step count (704x1280, 93 frames, 35 steps), with
+`--tensor_parallel_size 4 --offload_dit_weights --offload_chunk_size 1`:
+weight loading, Megatron sharding across all 4 chips, Reason1 text encoding,
+UniPC sampling, and VAE decode all complete without error and produce
+coherent, sane video output (5 full benchmark runs: 48.5s compile, 4479.6s
+generation, 128.0s/step, 14.7GB peak HBM/chip — see
+[`docs/benchmarking.md`](../benchmarking.md) for the row). Offloading is
+needed here because a fully-resident 14B DiT doesn't fit this 4-chip
+machine's HBM alongside Reason1/VAE at the reference's full frame count —
+see [`docs/weight_offloading.md`](../weight_offloading.md).
 
-See the [parity matrix in the root README](../../README.md#model-support--parity-matrix)
+See the [parity matrix in the root README](../../README.md#-model-support)
 for the up-to-date status across all variants.
 
 ### Quick testing
@@ -404,5 +356,5 @@ from a full quality judgment, which still needs the native resolution.
 Mixture-of-Transformers, not a DiT continuation of Cosmos-Predict2.5) — see
 [`docs/models/cosmos3.md`](cosmos3.md), now implemented (T2V/I2V).
 
-See the [parity matrix in the root README](../../README.md#model-support--parity-matrix)
+See the [parity matrix in the root README](../../README.md#-model-support)
 for the up-to-date status across all variants.

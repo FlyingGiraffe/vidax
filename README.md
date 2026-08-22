@@ -22,6 +22,11 @@ Mixture-of-Transformers, not a DiT continuation).
   DeepSpeed-Ulysses sequence parallelism, picked per model/resolution
   depending on whether weight or activation memory is the bottleneck — see
   [`docs/hardware_and_sharding.md`](docs/hardware_and_sharding.md).
+- **💾 Per-layer weight offloading:** `--offload_dit_weights` keeps a DiT's
+  weights host-resident and streams one `--offload_chunk_size`-block group
+  into HBM at a time, extending every model's reach to resolutions/frame
+  counts that don't fit fully device-resident on a given chip count — see
+  [`docs/weight_offloading.md`](docs/weight_offloading.md).
 - **🌊 Flow matching engine:** a Rectified Flow Euler sampler and a
   from-scratch UniPC multistep predictor-corrector port, covering every
   supported model's native scheduler (including Cosmos 3's Karras-sigma
@@ -48,8 +53,8 @@ I2V, Wan2.2's A14B).
 | Cosmos3 | Edge (4B) | T2V/I2V | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos3-Edge) |
 | Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | ✅/❌/❌ | [cosmos2_5.md](docs/models/cosmos2_5.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-14B) |
 | Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅/❌/❌ | [cosmos2_5.md](docs/models/cosmos2_5.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B) |
-| Wan2.2 | A14B | T2V | 🟡/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B) |
-| Wan2.2 | A14B | I2V | 🟡/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) |
+| Wan2.2 | A14B | T2V | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B) |
+| Wan2.2 | A14B | I2V | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) |
 | Wan2.2 | 5B | T2V/I2V | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) |
 | Wan2.1 | 14B | T2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B) |
 | Wan2.1 | 14B (720P) | I2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P) |
@@ -66,9 +71,9 @@ I2V, Wan2.2's A14B).
 | CogVideoX | 2B | T2V |  ❌/❌/❌ | Toappear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX-2b) |
 
 Per-model checkpoint sources, CLI flags, architecture notes, and
-verification status live in each **Guide** link above. Benchmarking numbers
-will land in [`docs/benchmarking.md`](docs/benchmarking.md) once that
-harness exists.
+verification status live in each **Guide** link above. Measured
+latency/memory numbers for every row above live in
+[`docs/benchmarking.md`](docs/benchmarking.md).
 
 ## 🚀 Quickstart
 
@@ -120,7 +125,7 @@ vidax/                          # Repository Root
 │   ├── lessons/                 # Model-specific debugging postmortems
 │   ├── hardware_and_sharding.md # General sharding/JIT/dtype engineering notes
 │   ├── weight_offloading.md    # Per-layer DiT weight offloading (host RAM -> HBM)
-│   └── benchmarking.md         # JAX vs PyTorch performance (placeholder)
+│   └── benchmarking.md         # Measured latency/memory for every model/config above
 ├── examples/
 │   ├── generate_wan2_1_t2v.py     # Wan2.1 t2v, --model_size {1.3B,14B}
 │   ├── generate_wan2_1_i2v.py     # Wan2.1 i2v (14B only)

@@ -114,7 +114,7 @@ end-to-end — confirmed via direct probing (`sp=4/tp=1` OOMs during T5
 prompt encoding before the DiT even runs, since the fully-unsharded fp32
 DiT already consumes nearly the whole budget; `tp=2/sp=2` gets past T5
 encoding but still OOMs inside the DiT sampling step itself). See
-[`docs/benchmarking.md`](../benchmarking.md)'s Wan2.2 5B footnote for the
+[`docs/benchmarking.md`](../benchmarking.md)'s Wan2.2 5B row and
 full comparison. The product of both flags must divide `num_heads` (24 for
 the DiT, 64 for T5) and the DiT's patch token count — true by construction
 at the default 704x1280x121 resolution for 1/2/4/5/8-way splits; for i2v's
@@ -210,30 +210,38 @@ python examples/generate_wan2_2_t2v_a14b.py \
 | `--shift` | `12.0` | Flow-matching noise-schedule shift. Reference default for A14B T2V. |
 | `--height` | `720` | Output video height. |
 | `--width` | `1280` | Output video width. |
-| `--num_frames` | `81` | Output frame count. |
+| `--num_frames` | `81` | Output frame count. At native 720x1280, the full reference count doesn't fit this 4-chip machine even with offloading + sequence parallelism — reduce to `33` (the largest that does; see the `--offload_dit_weights` row below and [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22)). |
 | `--output_path` | `output_video.mp4` | With multiple prompts, each saved as `<output_path>_<i>.mp4`. |
+| `--offload_dit_weights` | off | Per-layer weight offloading, composed with the two-expert MoE switch above **and** with `--sequence_parallel_size > 1` — ported directly from `generate_wan2_2_i2v_a14b.py`'s identical flag (T2V has no image conditioning to thread through, so the offloading mechanics are unchanged). See [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22). |
+| `--offload_chunk_size` | `1` | Number of consecutive blocks grouped per offloaded HBM buffer when `--offload_dit_weights` is set. Must divide 40. At native 720x1280, only `1` fits (per-token activation memory dominates at this token count, same finding as I2V's native-720P row). At 480x832, `10` fits (same tradeoff as I2V's own 480P row) — see [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22) for both. |
 
 **Status:** verified end-to-end against the real T2V-A14B checkpoints (both
 experts, weight shapes/keys confirmed to exactly match
-`T2V_A14B_CONFIG`'s param tree) on a 4-chip v4 slice, at two sharding
-configurations: `--tensor_parallel_size 4` (128x128, 9 frames) and
-`--tensor_parallel_size 2 --sequence_parallel_size 2` (256x256, 9 frames —
-4x the pixel count, the combined scheme's actual payoff). Both confirmed
-both experts engage correctly (high_noise_model for the earlier steps,
-low_noise_model for the rest, matching `boundary=0.875` at `shift=12.0`).
-This reduced resolution/frame count is a limitation of this specific
-4-chip, ~30GB/chip environment (see the memory note above and the
-[hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s
-"Combining with Megatron TP"), not of the model, pipeline, or sharding
-code — the reference's default 1280x720x81 needs substantially more
-accelerator memory than this repo's Wan2.1-14B/TI2V-5B runs did, and even
-combining every parallelism trick this repo has, 4 chips isn't enough to
-reach it: a compile-time HLO-temporaries estimate at 480x832x9 frames
-(`--tensor_parallel_size 2 --sequence_parallel_size 2`) still came in at
-~33.75GB against a 30.75GB/chip budget. More chips (a real v4-16/v4-32 pod
-slice, not just this 4-chip machine) should close the remaining gap, since
-`--tensor_parallel_size`/`--sequence_parallel_size` both scale with however
-many chips are available. Not yet run at full resolution.
+`T2V_A14B_CONFIG`'s param tree) on a 4-chip v4 slice. Full native resolution
+(1280x720) is reachable with `--tensor_parallel_size 2
+--sequence_parallel_size 2 --offload_dit_weights --offload_chunk_size 1`,
+reduced to `--num_frames 33` (binary-searched down from the reference's 81 —
+required HLO temporaries don't shrink smoothly with frame count on this
+hardware, see [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22) for
+the exact numbers found along the way) — both experts confirmed to engage
+correctly (high_noise_model for the earlier steps, low_noise_model for the
+rest, matching `boundary=0.875` at `shift=12.0`), with sane, coherent output
+(frame pixel mean/std checked, no sign of the collapsed/corrupted signature
+associated with an under-precision DiT). 5 full benchmark runs at this
+config: 33.7s compile, 2321.9s generation, 46.4s/step, 18.1GB peak HBM/chip —
+see [`docs/benchmarking.md`](../benchmarking.md) for the row. At 480P
+(`--height 480 --width 832`), the same `--tensor_parallel_size 2
+--sequence_parallel_size 2 --offload_dit_weights` config fits the full 81
+frames with a larger `--offload_chunk_size 10` (smaller token count leaves
+more HBM headroom, same tradeoff as I2V's own 480P row) — 65.8s compile,
+2159.1s generation, 43.2s/step, 28.4GB peak HBM/chip. Full 81-frame
+native 720P remains out of reach on this 4-chip machine even with offloading
+and sequence parallelism combined, for the same reason as I2V's identical
+limitation (per-token activation memory, not weight residency, is the
+binding constraint — see
+[`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22)); more
+chips should close the remaining gap, since `--tensor_parallel_size`/
+`--sequence_parallel_size` both scale with however many chips are available.
 
 ---
 

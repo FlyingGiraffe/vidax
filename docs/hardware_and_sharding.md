@@ -352,11 +352,16 @@ bound as more models are ported. See:
   `dit_dtype` decoupling, latents/output re-quantization) behind severely
   corrupted Wan2.1 I2V output at large token counts, and why it only showed
   up at scale.
+- [`docs/lessons/cosmos3_debugging.md`](lessons/cosmos3_debugging.md) —
+  three bugs found only against real Cosmos3-Nano/Edge checkpoints (a
+  padding-length mRoPE offset bug, Edge silently running at Nano's
+  resolution/scheduler defaults, and both models needing JSON-structured
+  prompts).
 - [`docs/weight_offloading.md`](weight_offloading.md) — per-layer weight
   offloading (host RAM, streamed into a small fixed-shape HBM buffer one
-  block at a time), implemented for Wan2.1's 14B DiT to fix native-720P
-  OOMs; the measured throughput cost and when it's actually worth reaching
-  for.
+  block at a time), implemented for every DiT in this repo that doesn't fit
+  fully device-resident at some resolution; the measured throughput cost
+  and when it's actually worth reaching for.
 
 ## Summary of hard-won lessons
 

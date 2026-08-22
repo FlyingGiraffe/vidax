@@ -34,15 +34,19 @@ def build_args(args: argparse.Namespace) -> argparse.Namespace:
     sp_size = args.sequence_parallel_size if args.sequence_parallel_size is not None else 1
 
     # 14B at the reference's full 704x1280x93-frame default doesn't fit this
-    # repo's 4-chip v4-8 test machine at any --tensor_parallel_size/
-    # --sequence_parallel_size split (4x1 needs ~22.6G/chip with 18.5G free;
-    # 2x2 needs ~13.0G/chip with only 9.1G free -- weight-sharding four ways
-    # beats splitting the difference with sequence-parallel here, since 14B's
-    # weights dominate over its activations at this frame count). 45 frames
-    # (still native 704x1280, same "1 + 4k" VAE-valid frame count family) is
-    # the largest frame count that fits at --tensor_parallel_size 4 -- same
-    # reduced-config precedent as Wan2.2 A14B's own benchmarking notes.
-    num_frames = 93 if args.model_size == "2B" else 45
+    # repo's 4-chip v4-8 test machine fully device-resident at any
+    # --tensor_parallel_size/--sequence_parallel_size split (4x1 needs
+    # ~22.6G/chip with 18.5G free; 2x2 needs ~13.0G/chip with only 9.1G free
+    # -- weight-sharding four ways beats splitting the difference with
+    # sequence-parallel here, since 14B's weights dominate over its
+    # activations at this frame count). With --offload_dit_weights (see
+    # generate_cosmos2_5.py's identical flag, docs/weight_offloading.md),
+    # the DiT's weights no longer need to be fully resident at once, so the
+    # full reference 93 frames fits -- see docs/benchmarking.md's Cosmos-
+    # Predict2.5 14B row. Without it, 45 frames (still native 704x1280, same
+    # "1 + 4k" VAE-valid frame count family) remains the largest that fits
+    # at --tensor_parallel_size 4.
+    num_frames = 93 if (args.model_size == "2B" or args.offload_dit_weights) else 45
 
     ns = argparse.Namespace(
         model_size=args.model_size,
@@ -68,6 +72,8 @@ def build_args(args: argparse.Namespace) -> argparse.Namespace:
         width=1280,
         num_frames=num_frames,
         fps=16,
+        offload_dit_weights=args.offload_dit_weights,
+        offload_chunk_size=args.offload_chunk_size,
         output_path=common.output_path("cosmos", "2.5", args.model_size.lower(), args.task),
     )
 
@@ -86,6 +92,8 @@ def main():
     common.add_common_args(parser)
     parser.add_argument("--model_size", type=str, default="2B", choices=["2B", "14B"])
     parser.add_argument("--task", type=str, default="t2v", choices=TASKS)
+    parser.add_argument("--offload_dit_weights", action="store_true", help="See generate_cosmos2_5.py's identical flag; lets 14B fit the full reference 93-frame count instead of the reduced 45. See docs/weight_offloading.md.")
+    parser.add_argument("--offload_chunk_size", type=int, default=1, help="See generate_cosmos2_5.py's identical flag.")
     args = parser.parse_args()
 
     run_args = build_args(args)

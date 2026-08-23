@@ -16,6 +16,7 @@ import safetensors.numpy
 from .common import map_wan_dit_keys, map_wan_t5_keys
 from .cosmos2_5 import map_cosmos2_5_dit_keys
 from .cosmos3 import map_cosmos3_dit_keys
+from .ltx_video import map_ltx_video_dit_keys, map_ltx_video_t5_keys, map_ltx_video_vae_keys
 from .reason1 import map_reason1_text_encoder_keys
 from .wan2_1 import map_wan2_1_clip_keys, map_wan2_1_dit_keys, map_wan2_1_vae_keys
 from .wan2_2 import map_wan2_2_vae_keys
@@ -33,6 +34,9 @@ __all__ = [
     "map_reason1_text_encoder_keys",
     "map_cosmos3_dit_keys",
     "map_wan2_2_vae_diffusers_keys",
+    "map_ltx_video_dit_keys",
+    "map_ltx_video_vae_keys",
+    "map_ltx_video_t5_keys",
 ]
 
 
@@ -113,6 +117,12 @@ def load_torch_checkpoint_to_jax(checkpoint_path: str, model_type: str = "wan2.1
         return map_wan_t5_keys(pt_state_dict)
     elif model_type == "cosmos3_dit":
         return map_cosmos3_dit_keys(pt_state_dict)
+    elif model_type == "ltx_video_dit":
+        return map_ltx_video_dit_keys(pt_state_dict)
+    elif model_type == "ltx_video_vae":
+        return map_ltx_video_vae_keys(pt_state_dict)
+    elif model_type == "ltx_video_t5":
+        return map_ltx_video_t5_keys(pt_state_dict)
     elif model_type == "reason1_text_encoder":
         # Cosmos-Predict2.5-2B's text encoder (Reason1-finetuned
         # Qwen2.5-VL-7B-Instruct, text tower only -- see

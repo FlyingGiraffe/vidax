@@ -10,10 +10,6 @@ checkpoints/
 *.bin
 *.onnx
 
-# Output generated videos / evaluation runs
-*.mp4
-*.gif
-
 # Caching & Virtual Environments
 .venv/
 env/
@@ -34,7 +30,7 @@ dist/
 .vscode/
 *.swp
 
-# Local example outputs
+# Output generated videos / evaluation runs
 out/
 benchmarks/results/
 

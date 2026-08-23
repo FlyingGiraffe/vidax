@@ -53,15 +53,19 @@ when configs are genuinely identical (documented per-row).
 | Cosmos-Predict2.5 | 2B | T2V | v4-8 | 4/1 | 704x1280 | 93 | 35 | bf16 | bf16 | - | 112.9 | 1357.3 | 38.8 | 16.0 |
 | Wan2.2 | A14B | T2V | v4-8 | 2/2 | 480x832 | 81 | 50 | bf16 | fp32 | chunk 10 | 65.8 | 2159.1 | 43.2 | 28.4 |
 | Wan2.2 | A14B | T2V | v4-8 | 2/2 | 720x1280 | 33 | 50 | bf16 | fp32 | chunk 1 | 33.7 | 2321.9 | 46.4 | 18.1 |
-| Wan2.2 | A14B | I2V | v4-8 | 2/2 | 544x720\*\* | 81 | 40 | bf16 | fp32 | chunk 10 | 146.1 | 1780.0 | 44.5 | 28.3 |
-| Wan2.2 | A14B | I2V | v4-8 | 2/2 | 832x1104\*\* | 33 | 40 | bf16 | fp32 | chunk 1 | 102.9 | 1962.5 | 49.1 | 20.5 |
+| Wan2.2 | A14B | I2V | v4-8 | 2/2 | 544x720\* | 81 | 40 | bf16 | fp32 | chunk 10 | 146.1 | 1780.0 | 44.5 | 28.3 |
+| Wan2.2 | A14B | I2V | v4-8 | 2/2 | 832x1104\* | 33 | 40 | bf16 | fp32 | chunk 1 | 102.9 | 1962.5 | 49.1 | 20.5 |
 | Wan2.2 | 5B | T2V | v4-8 | 4/1 | 704x1280 | 121 | 50 | bf16 | fp32 | - | 87.3 | 525.9 | 10.5 | 18.3 |
 | Wan2.2 | 5B | I2V | v4-8 | 4/1 | 704x1280 | 121 | 40 | bf16 | fp32 | - | 145.8 | 482.7 | 12.1 | 18.3 |
 | Wan2.1 | 14B | T2V | v4-8 | 4/1 | 720x1280 | 81 | 50 | bf16 | fp32 | chunk 20 | 108.2 | 6150.5 | 123.0 | 23.0 |
 | Wan2.1 | 14B | T2V | v4-8 | 4/1 | 480x832 | 81 | 50 | bf16 | bf16 | - | 142.5 | 1306.8 | 26.1 | 17.2 |
-| Wan2.1 | 14B (720P) | I2V | v4-8 | 4/1 | 832x1104\*\* | 81 | 40 | bf16 | fp32 | chunk 20 | 131.3 | 5090.0 | 127.2 | 32.7 |
-| Wan2.1 | 14B (480P) | I2V | v4-8 | 4/1 | 544x720\*\* | 81 | 40 | bf16 | bf16 | - | 150.3 | 1125.3 | 28.1 | 22.1 |
+| Wan2.1 | 14B (720P) | I2V | v4-8 | 4/1 | 832x1104\* | 81 | 40 | bf16 | fp32 | chunk 20 | 131.3 | 5090.0 | 127.2 | 32.7 |
+| Wan2.1 | 14B (480P) | I2V | v4-8 | 4/1 | 544x720\* | 81 | 40 | bf16 | bf16 | - | 150.3 | 1125.3 | 28.1 | 22.1 |
 | Wan2.1 | 1.3B | T2V | v4-8 | 4/1 | 480x832 | 81 | 50 | bf16 | bf16 | - | 85.4 | 348.3 | 7.0 | 10.2 |
+| LTX-Video (0.9.8) | 13B (dev) | T2V | v4-8 | 4/- | 1216x704 | 121 | 30 | bf16 | bf16 | - | 134.7 | 156.0 | 5.2 | 15.3 |
+| LTX-Video (0.9.8) | 13B (distilled) | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16 | - | 136.4 | 104.2 | 13.0 | 15.3 |
+| LTX-Video (0.9.8) | 2B (distilled) | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16 | - | 83.5 | 47.3 | 5.9 | 8.8 |
+
 
 Resolution/frame/step columns are each model's reference default — not
 necessarily what fits this hardware today (see each model's own
@@ -81,6 +85,7 @@ The full reasoning, investigation, and every config's numbers live in
 | A14B (all 4 rows) | offloading **+** SP | A14B's AdaLN modulation is per-*token*, not per-sample, so activation memory (not just weight residency) is the constraint at native resolutions — offloading alone can't shrink that, sequence parallelism does. |
 | Cosmos-Predict2.5 14B | offloading only | Same class of problem as Wan2.1's rows — the reference's full 93-frame default doesn't fit fully resident at any TP/SP split. |
 | Wan2.2 5B | neither | Weight-sharding alone (`tp=4`) is enough — the opposite tradeoff from A14B: DiT weight residency dominates here, not per-token activation memory. |
+| LTX-Video (all 3 T2V rows) | TP only | Even the 2B checkpoint's own weights fit replicated on a single chip, but the reference's full `704x1216`/121-frame token count's self-attention activations don't (confirmed OOM at `tp=1`) — `tp=4` shards both and fits every variant at the same reference resolution, no offloading or sequence parallelism needed. |
 
 `--offload_chunk_size` varies row to row because it trades resident-weight
 headroom for transfer/compute overlap — larger where there's HBM to spare
@@ -99,7 +104,7 @@ resolution choice made for this benchmark.
 
 ## Notes
 
-\*\* I2V output resolution is derived from the standardized conditioning
+\* I2V output resolution is derived from the standardized conditioning
 image's aspect ratio + `--max_area`, not a fixed `--height`/`--width` — so
 these rows are portrait, unlike every other row's landscape resolution.
 

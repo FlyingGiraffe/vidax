@@ -62,9 +62,9 @@ I2V, Wan2.2's A14B).
 | Wan2.1 | 1.3B | T2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) |
 | LTX-2.5 | 22B (dev) | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-2.5) |
 | LTX-2.5 | 22B (distilled) | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-2.5) |
-| LTX-Video (0.9.8) | 13B (dev) | T2V/I2V/V2V | ✅/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
-| LTX-Video (0.9.8) | 13B (distilled) | T2V/I2V/V2V | ✅/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
-| LTX-Video (0.9.8) | 2B (distilled) | T2V/I2V/V2V | ✅/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
+| LTX-Video (0.9.8) | 13B (dev) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
+| LTX-Video (0.9.8) | 13B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
+| LTX-Video (0.9.8) | 2B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
 | HunyuanVideo1.5 | 8.3B | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/tencent/HunyuanVideo-1.5) |
 | HunyuanVideo | 13B | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/tencent/HunyuanVideo) |
 | CogVideoX1.5 | 5B | I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX1.5-5B-I2V) |

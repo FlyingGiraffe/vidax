@@ -357,6 +357,14 @@ bound as more models are ported. See:
   padding-length mRoPE offset bug, Edge silently running at Nano's
   resolution/scheduler defaults, and both models needing JSON-structured
   prompts).
+- [`docs/lessons/ltx_video_debugging.md`](lessons/ltx_video_debugging.md) —
+  two bugs caught by bit-exact numerical comparison against the actual
+  reference PyTorch implementation (a throwaway conda env, not the main
+  dev env) before any end-to-end generation was even attempted: the VAE's
+  top-level `patchify`/`unpatchify` using a different width/height merge
+  order than its own internal `PixelShuffleND`, and the decoder's
+  `causal_decoder=False` config meaning symmetric (not causal) temporal
+  padding.
 - [`docs/weight_offloading.md`](weight_offloading.md) — per-layer weight
   offloading (host RAM, streamed into a small fixed-shape HBM buffer one
   block at a time), implemented for every DiT in this repo that doesn't fit

@@ -62,10 +62,11 @@ when configs are genuinely identical (documented per-row).
 | Wan2.1 | 14B (720P) | I2V | v4-8 | 4/1 | 832x1104\* | 81 | 40 | bf16 | fp32 | chunk 20 | 131.3 | 5090.0 | 127.2 | 32.7 |
 | Wan2.1 | 14B (480P) | I2V | v4-8 | 4/1 | 544x720\* | 81 | 40 | bf16 | bf16 | - | 150.3 | 1125.3 | 28.1 | 22.1 |
 | Wan2.1 | 1.3B | T2V | v4-8 | 4/1 | 480x832 | 81 | 50 | bf16 | bf16 | - | 85.4 | 348.3 | 7.0 | 10.2 |
+| LTX-2.5 | 22B (dev) | T2V | v4-8 | 4/- | 544x320\*\* | 25 | 30 | bf16 | bf16 | - | 129.2 | 80.8 | 2.7 | 19.1 |
+| LTX-2.5 | 22B (distilled) | T2V | v4-8 | 4/- | 544x320\*\* | 25 | 8 | bf16 | bf16 | - | 104.3 | 60.1 | 7.5 | 19.0 |
 | LTX-Video (0.9.8) | 13B (dev) | T2V | v4-8 | 4/- | 1216x704 | 121 | 30 | bf16 | bf16 | - | 134.7 | 156.0 | 5.2 | 15.3 |
 | LTX-Video (0.9.8) | 13B (distilled) | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16 | - | 136.4 | 104.2 | 13.0 | 15.3 |
 | LTX-Video (0.9.8) | 2B (distilled) | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16 | - | 83.5 | 47.3 | 5.9 | 8.8 |
-
 
 Resolution/frame/step columns are each model's reference default — not
 necessarily what fits this hardware today (see each model's own
@@ -86,6 +87,7 @@ The full reasoning, investigation, and every config's numbers live in
 | Cosmos-Predict2.5 14B | offloading only | Same class of problem as Wan2.1's rows — the reference's full 93-frame default doesn't fit fully resident at any TP/SP split. |
 | Wan2.2 5B | neither | Weight-sharding alone (`tp=4`) is enough — the opposite tradeoff from A14B: DiT weight residency dominates here, not per-token activation memory. |
 | LTX-Video (all 3 T2V rows) | TP only | Even the 2B checkpoint's own weights fit replicated on a single chip, but the reference's full `704x1216`/121-frame token count's self-attention activations don't (confirmed OOM at `tp=1`) — `tp=4` shards both and fits every variant at the same reference resolution, no offloading or sequence parallelism needed. |
+| LTX-2.5 (both T2V rows) | TP only, at a smaller resolution than the reference | `tp=4` is required just for the 22B DiT's/12B Gemma-4's own bf16 weights to fit at all (unlike LTX-Video, where `tp=1`'s weights fit and only activations forced `tp=4`) — but even with `tp=4`, the reference's own `704x1216`/121-frame resolution still OOMs (47.2GB required vs. 30.75GB/chip available), unlike LTX-Video's 13B at the same resolution/tp. No offloading implemented yet to reach that resolution; these rows run at a smaller confirmed-fitting resolution instead (see the benchmarking table's own footnote). |
 
 `--offload_chunk_size` varies row to row because it trades resident-weight
 headroom for transfer/compute overlap — larger where there's HBM to spare
@@ -107,6 +109,15 @@ resolution choice made for this benchmark.
 \* I2V output resolution is derived from the standardized conditioning
 image's aspect ratio + `--max_area`, not a fixed `--height`/`--width` — so
 these rows are portrait, unlike every other row's landscape resolution.
+
+\*\* LTX-2.5's reference default (`1216x704`, 121 frames — the same
+resolution LTX-Video's own rows use) OOMs on this repo's reference v4-8
+test machine even at `--tensor_parallel_size 4` (47.2GB required vs.
+30.75GB/chip available) — a 22B model needs meaningfully more headroom
+than LTX-Video's 13B did at the same token count. `544x320`/25 frames is
+this port's own confirmed-fitting real end-to-end test configuration
+instead; revisit with weight offloading or a higher-tp-capable machine to
+get a resolution-comparable row against LTX-Video's.
 
 All Wan2.1 rows use `fp32` DiT weights (`--dit_dtype float32`): the
 reference keeps its residual stream in float32 even under bf16 autocast, and

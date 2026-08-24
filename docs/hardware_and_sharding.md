@@ -365,6 +365,16 @@ bound as more models are ported. See:
   order than its own internal `PixelShuffleND`, and the decoder's
   `causal_decoder=False` config meaning symmetric (not causal) temporal
   padding.
+- [`docs/lessons/ltx2_5_debugging.md`](lessons/ltx2_5_debugging.md) — six
+  bugs/gotchas found porting LTX-2.5's DiT/VAE/embeddings-connector/
+  Gemma-4: an `lax.conv_general_dilated` padding-spec quirk that
+  disagreed with the reference even at `precision=HIGHEST`, the VAE
+  encoder's real (deterministic, self-normalizing, mean-only) return
+  contract, `jnp.tanh` returning NaN at float64 on this TPU backend for
+  large-magnitude inputs, a corrupted-on-load connector parameter, a
+  hardcoded-`float32` softmax truncation, and a mask-format mismatch
+  between the embeddings connector and the DiT caught in the first real
+  end-to-end run.
 - [`docs/weight_offloading.md`](weight_offloading.md) — per-layer weight
   offloading (host RAM, streamed into a small fixed-shape HBM buffer one
   block at a time), implemented for every DiT in this repo that doesn't fit

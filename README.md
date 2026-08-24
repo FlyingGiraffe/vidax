@@ -49,29 +49,29 @@ I2V, Wan2.2's A14B).
 
 | Model Family | Variant | Task | TPU test (v4/v5e/v6e) | Guide | Weights |
 | --- | --- | --- | --- | --- | --- |
-| Cosmos3 | Nano (16B) | T2V/I2V | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos3-Nano) |
-| Cosmos3 | Edge (4B) | T2V/I2V | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos3-Edge) |
-| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | ✅/❌/❌ | [cosmos2_5.md](docs/models/cosmos2_5.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-14B) |
-| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅/❌/❌ | [cosmos2_5.md](docs/models/cosmos2_5.md) | 🤗[Huggingface](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B) |
-| Wan2.2 | A14B | T2V | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B) |
-| Wan2.2 | A14B | I2V | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) |
-| Wan2.2 | 5B | T2V/I2V | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) |
-| Wan2.1 | 14B | T2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B) |
-| Wan2.1 | 14B (720P) | I2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P) |
-| Wan2.1 | 14B (480P) | I2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P) |
-| Wan2.1 | 1.3B | T2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | 🤗[Huggingface](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) |
-| LTX-2.5 | 22B (dev) | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-2.5) |
-| LTX-2.5 | 22B (distilled) | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-2.5) |
-| LTX-Video (0.9.8) | 13B (dev) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
-| LTX-Video (0.9.8) | 13B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
-| LTX-Video (0.9.8) | 2B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Huggingface](https://huggingface.co/Lightricks/LTX-Video) |
-| HunyuanVideo1.5 | 8.3B | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/tencent/HunyuanVideo-1.5) |
-| HunyuanVideo | 13B | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/tencent/HunyuanVideo) |
-| CogVideoX1.5 | 5B | I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX1.5-5B-I2V) |
-| CogVideoX1.5 | 5B | T2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX1.5-5B) |
-| CogVideoX | 5B | I2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX-5b-I2V) |
-| CogVideoX | 5B | T2V | ❌/❌/❌ | To appear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX-5b) |
-| CogVideoX | 2B | T2V |  ❌/❌/❌ | Toappear | 🤗[Huggingface](https://huggingface.co/THUDM/CogVideoX-2b) |
+| Cosmos3 | Nano (16B) | T2V/I2V | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | [🤗](https://huggingface.co/nvidia/Cosmos3-Nano) |
+| Cosmos3 | Edge (4B) | T2V/I2V | ✅/❌/❌ | [cosmos3.md](docs/models/cosmos3.md) | [🤗](https://huggingface.co/nvidia/Cosmos3-Edge) |
+| Cosmos-Predict2.5 | 14B | T2V/I2V/V2V | ✅/❌/❌ | [cosmos2_5.md](docs/models/cosmos2_5.md) | [🤗](https://huggingface.co/nvidia/Cosmos-Predict2.5-14B) |
+| Cosmos-Predict2.5 | 2B | T2V/I2V/V2V | ✅/❌/❌ | [cosmos2_5.md](docs/models/cosmos2_5.md) | [🤗](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B) |
+| Wan2.2 | A14B | T2V | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | [🤗](https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B) |
+| Wan2.2 | A14B | I2V | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | [🤗](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) |
+| Wan2.2 | 5B | T2V/I2V | ✅/❌/❌ | [wan2_2.md](docs/models/wan2_2.md) | [🤗](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) |
+| Wan2.1 | 14B | T2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | [🤗](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B) |
+| Wan2.1 | 14B (720P) | I2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | [🤗](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P) |
+| Wan2.1 | 14B (480P) | I2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | [🤗](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P) |
+| Wan2.1 | 1.3B | T2V | ✅/❌/❌ | [wan2_1.md](docs/models/wan2_1.md) | [🤗](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) |
+| LTX-2.5 | 22B (dev) | T2V/I2V | ✅/❌/❌ | [ltx2_5.md](docs/models/ltx2_5.md) | [🤗](https://huggingface.co/Lightricks/LTX-2.5) |
+| LTX-2.5 | 22B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx2_5.md](docs/models/ltx2_5.md) | [🤗](https://huggingface.co/Lightricks/LTX-2.5) |
+| LTX-Video (0.9.8) | 13B (dev) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | [🤗](https://huggingface.co/Lightricks/LTX-Video) |
+| LTX-Video (0.9.8) | 13B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | [🤗](https://huggingface.co/Lightricks/LTX-Video) |
+| LTX-Video (0.9.8) | 2B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | [🤗](https://huggingface.co/Lightricks/LTX-Video) |
+| HunyuanVideo1.5 | 8.3B | T2V/I2V | ❌/❌/❌ | To appear | [🤗](https://huggingface.co/tencent/HunyuanVideo-1.5) |
+| HunyuanVideo | 13B | T2V/I2V | ❌/❌/❌ | To appear | [🤗](https://huggingface.co/tencent/HunyuanVideo) |
+| CogVideoX1.5 | 5B | I2V | ❌/❌/❌ | To appear | [🤗](https://huggingface.co/THUDM/CogVideoX1.5-5B-I2V) |
+| CogVideoX1.5 | 5B | T2V | ❌/❌/❌ | To appear | [🤗](https://huggingface.co/THUDM/CogVideoX1.5-5B) |
+| CogVideoX | 5B | I2V | ❌/❌/❌ | To appear | [🤗](https://huggingface.co/THUDM/CogVideoX-5b-I2V) |
+| CogVideoX | 5B | T2V | ❌/❌/❌ | To appear | [🤗](https://huggingface.co/THUDM/CogVideoX-5b) |
+| CogVideoX | 2B | T2V |  ❌/❌/❌ | Toappear | [🤗](https://huggingface.co/THUDM/CogVideoX-2b) |
 
 Per-model checkpoint sources, CLI flags, architecture notes, and
 verification status live in each **Guide** link above. Measured

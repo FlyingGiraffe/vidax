@@ -79,6 +79,7 @@ COLUMN_PARALLEL_NAMES = frozenset([
                                                 # names by construction, see vidax.models.ltx_video.dit).
     "add_q_proj", "add_k_proj", "add_v_proj",  # Cosmos3 "gen" (vision/diffusion) attention
     "ff_proj",                      # LTXDiT FFN up-projection
+    "w_gate", "w_up",               # vidax.models.ltx2_5.diffusion_vae.SwiGLU up-projections
 ])
 ROW_PARALLEL_NAMES = frozenset([
     "self_attn_o", "cross_attn_o",
@@ -93,6 +94,7 @@ ROW_PARALLEL_NAMES = frozenset([
     "to_out",       # Cosmos3 "und" attention output
     "to_add_out",   # Cosmos3 "gen" attention output
     "ff_out",       # LTXDiT FFN down-projection
+    "w_down",       # vidax.models.ltx2_5.diffusion_vae.SwiGLU down-projection
 ])
 
 

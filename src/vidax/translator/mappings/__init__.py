@@ -21,6 +21,7 @@ from .ltx2_5 import (
     map_gemma4_text_keys,
     map_ltx2_5_connector_keys,
     map_ltx2_5_dit_keys,
+    map_ltx2_5_diffusion_decoder_keys,
     map_ltx2_5_vae_keys,
 )
 from .reason1 import map_reason1_text_encoder_keys
@@ -46,6 +47,7 @@ __all__ = [
     "map_ltx2_5_dit_keys",
     "map_ltx2_5_connector_keys",
     "map_ltx2_5_vae_keys",
+    "map_ltx2_5_diffusion_decoder_keys",
     "map_gemma4_text_keys",
 ]
 
@@ -139,6 +141,8 @@ def load_torch_checkpoint_to_jax(checkpoint_path: str, model_type: str = "wan2.1
         return map_ltx2_5_connector_keys(pt_state_dict)
     elif model_type == "ltx2_5_vae":
         return map_ltx2_5_vae_keys(pt_state_dict)
+    elif model_type == "ltx2_5_diffusion_decoder":
+        return map_ltx2_5_diffusion_decoder_keys(pt_state_dict)
     elif model_type == "gemma4_text":
         return map_gemma4_text_keys(pt_state_dict)
     elif model_type == "reason1_text_encoder":

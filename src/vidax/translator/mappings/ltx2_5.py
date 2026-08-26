@@ -176,13 +176,57 @@ def map_ltx2_5_connector_keys(pt_state_dict: Dict) -> Dict:
     return {"params": jax_params}
 
 
+def _map_conv_encoder_keys(pt_state_dict: Dict, encoder_prefix: str = "encoder.") -> Dict:
+    """Translates one `Encoder` tower's state (conv-in/res-blocks/down-
+    blocks/conv-out) into a `vidax.models.ltx2_5.vae.Encoder` param subtree
+    -- shared by both VAE variants (the conv checkpoint's `encoder.*` and
+    the diffusion checkpoint's `encoder.*`), which ship the same encoder
+    architecture/key layout (confirmed from both checkpoints' embedded
+    `config.vae.encoder`, see `vidax.models.ltx2_5.diffusion_vae`'s module
+    docstring). Returns the `["encoder", ...]`-rooted subtree only --
+    callers merge it into their own `jax_params`.
+    """
+    jax_params: Dict[str, Any] = {}
+    for pt_key, pt_tensor in pt_state_dict.items():
+        if not pt_key.startswith(encoder_prefix):
+            continue
+        sub_key = pt_key[len(encoder_prefix):]
+        jax_tensor = _convert(pt_key, pt_tensor)
+        tower_path = ["encoder"]
+
+        if sub_key in ("conv_in.conv.weight", "conv_in.conv.bias"):
+            _set_nested_dict(jax_params, tower_path + ["conv_in", _leaf_name(sub_key)], jax_tensor)
+        elif sub_key in ("conv_out.conv.weight", "conv_out.conv.bias"):
+            _set_nested_dict(jax_params, tower_path + ["conv_out", _leaf_name(sub_key)], jax_tensor)
+        else:
+            match = re.match(r"down_blocks\.(\d+)\.(.*)", sub_key)
+            if not match:
+                continue
+            block_idx, block_sub = match.groups()
+            block_path = tower_path + [f"down_blocks_{block_idx}"]
+
+            if block_sub in ("conv.conv.weight", "conv.conv.bias"):
+                _set_nested_dict(jax_params, block_path + ["conv", _leaf_name(block_sub)], jax_tensor)
+            else:
+                res_match = re.match(r"res_blocks\.(\d+)\.(.*)", block_sub)
+                if not res_match:
+                    continue
+                res_idx, res_sub = res_match.groups()
+                res_path = block_path + [f"res_blocks_{res_idx}"]
+                if res_sub.startswith("conv1.conv."):
+                    _set_nested_dict(jax_params, res_path + ["conv1", _leaf_name(res_sub)], jax_tensor)
+                elif res_sub.startswith("conv2.conv."):
+                    _set_nested_dict(jax_params, res_path + ["conv2", _leaf_name(res_sub)], jax_tensor)
+    return jax_params
+
+
 def map_ltx2_5_vae_keys(pt_state_dict: Dict) -> Dict:
     """Translates LTX-2.5's conv-decoder `CausalVideoAutoencoder` state_dict
     into a Flax param tree for `vidax.models.ltx2_5.vae.LTXVAE`. No
     `model.`/`vae.` prefix -- the VAE checkpoint's own top-level keys are
     already bare `encoder.`/`decoder.`/`per_channel_statistics.`.
     """
-    jax_params: Dict[str, Any] = {}
+    jax_params: Dict[str, Any] = _map_conv_encoder_keys(pt_state_dict)
 
     for pt_key, pt_tensor in pt_state_dict.items():
         if pt_key.startswith("per_channel_statistics."):
@@ -201,24 +245,22 @@ def map_ltx2_5_vae_keys(pt_state_dict: Dict) -> Dict:
             _set_nested_dict(jax_params, ["encoder", f"per_channel_statistics_{stat}"], stat_array)
             _set_nested_dict(jax_params, ["decoder", f"per_channel_statistics_{stat}"], stat_array)
             continue
-        jax_tensor = _convert(pt_key, pt_tensor)
-
-        match = re.match(r"(encoder|decoder)\.(.*)", pt_key)
-        if not match:
+        if not pt_key.startswith("decoder."):
             continue
-        tower, sub_key = match.groups()
-        tower_path = [tower]
+        jax_tensor = _convert(pt_key, pt_tensor)
+        sub_key = pt_key[len("decoder."):]
+        tower_path = ["decoder"]
 
         if sub_key in ("conv_in.conv.weight", "conv_in.conv.bias"):
             _set_nested_dict(jax_params, tower_path + ["conv_in", _leaf_name(sub_key)], jax_tensor)
         elif sub_key in ("conv_out.conv.weight", "conv_out.conv.bias"):
             _set_nested_dict(jax_params, tower_path + ["conv_out", _leaf_name(sub_key)], jax_tensor)
         else:
-            match = re.match(r"(?:down|up)_blocks\.(\d+)\.(.*)", sub_key)
+            match = re.match(r"up_blocks\.(\d+)\.(.*)", sub_key)
             if not match:
                 continue
             block_idx, block_sub = match.groups()
-            block_path = tower_path + [f"{'down' if tower == 'encoder' else 'up'}_blocks_{block_idx}"]
+            block_path = tower_path + [f"up_blocks_{block_idx}"]
 
             if block_sub in ("conv.conv.weight", "conv.conv.bias"):
                 _set_nested_dict(jax_params, block_path + ["conv", _leaf_name(block_sub)], jax_tensor)
@@ -232,6 +274,154 @@ def map_ltx2_5_vae_keys(pt_state_dict: Dict) -> Dict:
                     _set_nested_dict(jax_params, res_path + ["conv1", _leaf_name(res_sub)], jax_tensor)
                 elif res_sub.startswith("conv2.conv."):
                     _set_nested_dict(jax_params, res_path + ["conv2", _leaf_name(res_sub)], jax_tensor)
+
+    return {"params": jax_params}
+
+
+def _map_dense_submodule(sub_key: str, path: list, jax_tensor, jax_params: dict, name: str) -> bool:
+    """`name.weight`/`name.bias` -> Flax `Dense`'s `kernel`/`bias`."""
+    match = re.match(rf"{re.escape(name)}\.(weight|bias)$", sub_key)
+    if not match:
+        return False
+    field = match.group(1)
+    _set_nested_dict(jax_params, path + [name, "bias" if field == "bias" else "kernel"], jax_tensor)
+    return True
+
+
+def _map_na_attention_submodule(sub_key: str, attn_path: list, pt_key: str, pt_tensor, jax_params: dict) -> bool:
+    """`vidax.models.ltx2_5.diffusion_vae.NeighborhoodAttention3D`'s own
+    `to_q`/`to_k`/`to_v`/`to_out`/`q_norm`/`k_norm` -- splits the
+    checkpoint's *fused* `qkv.{weight,bias}` into thirds (q, k, v order,
+    confirmed from the reference's own `_split_fused_qkv_param`) since this
+    checkpoint ships them fused (see module docstring). The checkpoint's own
+    raw key for the output projection is `attn.proj.*` -- mapped to this
+    port's `to_out` (not `proj`), see `NeighborhoodAttention3D`'s own
+    docstring for why (Megatron-TP sharding name reuse + a same-file naming
+    collision to avoid).
+    """
+    if sub_key in ("q_norm.weight", "k_norm.weight"):
+        name = "q_norm" if sub_key.startswith("q_norm") else "k_norm"
+        _set_nested_dict(jax_params, attn_path + [name, "scale"], pt_tensor_to_numpy(pt_tensor))
+        return True
+    if sub_key in ("qkv.weight", "qkv.bias"):
+        field = "weight" if sub_key.endswith("weight") else "bias"
+        d = pt_tensor.shape[0] // 3
+        for i, name in enumerate(("to_q", "to_k", "to_v")):
+            piece_key = pt_key  # only used by `_convert` to decide transpose; same rule for all thirds
+            piece = pt_tensor[i * d:(i + 1) * d]
+            jax_piece = _convert(piece_key, piece)
+            _set_nested_dict(jax_params, attn_path + [name, "bias" if field == "bias" else "kernel"], jax_piece)
+        return True
+    if sub_key in ("proj.weight", "proj.bias"):
+        field = "bias" if sub_key.endswith("bias") else "kernel"
+        _set_nested_dict(jax_params, attn_path + ["to_out", field], _convert(pt_key, pt_tensor))
+        return True
+    return False
+
+
+def _map_swiglu_submodule(sub_key: str, path: list, jax_tensor, jax_params: dict) -> bool:
+    """`vidax.models.ltx2_5.diffusion_vae.SwiGLU`'s `w_gate`/`w_up`/`w_down`
+    -- each an unbiased `Dense`, so only `.weight` keys ever appear."""
+    match = re.match(r"(w_gate|w_up|w_down)\.weight$", sub_key)
+    if not match:
+        return False
+    _set_nested_dict(jax_params, path + ["mlp", match.group(1), "kernel"], jax_tensor)
+    return True
+
+
+def map_ltx2_5_diffusion_decoder_keys(pt_state_dict: Dict) -> Dict:
+    """Translates the diffusion (NATTEN) VAE checkpoint
+    (`ltx-2.5-video-vae-bf16.safetensors`, `config.vae._class_name ==
+    "CausalDiffusionVAE"`) into a Flax param tree for
+    `vidax.models.ltx2_5.diffusion_vae.DiffusionVideoDecoder` (its
+    `encoder.*`/`per_channel_statistics.*` keys are shared with
+    `map_ltx2_5_vae_keys` via `_map_conv_encoder_keys` -- only this
+    checkpoint's own `decoder.*` diffusion-decoder keys are handled here).
+    `decoder.type_emb` is intentionally skipped -- see module docstring for
+    why (unreferenced anywhere in the real reference's own loader/model
+    code).
+    """
+    jax_params: Dict[str, Any] = {"encoder": _map_conv_encoder_keys(pt_state_dict)["encoder"]}
+
+    for pt_key, pt_tensor in pt_state_dict.items():
+        if pt_key.startswith("per_channel_statistics."):
+            # One shared top-level buffer pair -- the real checkpoint has no
+            # separate `decoder.per_channel_statistics.*` (confirmed from its
+            # own keys), so this duplicates into *both* `encoder.
+            # per_channel_statistics_{mean,std}` and the decoder's own
+            # top-level `per_channel_statistics_{mean,std}` (matching the
+            # reference's `DiffusionVideoDecoder.__init__` constructing its
+            # own separate `PerChannelStatistics` submodule from this same
+            # checkpoint key) -- same duplication pattern as
+            # `map_ltx2_5_vae_keys`.
+            stat = "mean" if pt_key.endswith("mean-of-means") else "std"
+            stat_array = pt_tensor_to_numpy(pt_tensor)
+            _set_nested_dict(jax_params, ["encoder", f"per_channel_statistics_{stat}"], stat_array)
+            _set_nested_dict(jax_params, [f"per_channel_statistics_{stat}"], stat_array)
+            continue
+        if not pt_key.startswith("decoder."):
+            continue
+        sub_key = pt_key[len("decoder."):]
+        if sub_key == "type_emb":
+            continue
+
+        if _map_dense_submodule(sub_key, [], _convert(pt_key, pt_tensor), jax_params, "conv_in"):
+            continue
+        if _map_dense_submodule(sub_key, [], _convert(pt_key, pt_tensor), jax_params, "conv_in_x_t"):
+            continue
+        if _map_dense_submodule(sub_key, [], _convert(pt_key, pt_tensor), jax_params, "conv_out"):
+            continue
+        if sub_key == "norm_out.weight":
+            _set_nested_dict(jax_params, ["norm_out", "scale"], _convert(pt_key, pt_tensor))
+            continue
+        if sub_key.startswith("t_embedder.mlp.0.") or sub_key.startswith("t_embedder.mlp.2."):
+            name = "t_embedder_linear_1" if "mlp.0." in sub_key else "t_embedder_linear_2"
+            field = "bias" if sub_key.endswith("bias") else "kernel"
+            _set_nested_dict(jax_params, [name, field], _convert(pt_key, pt_tensor))
+            continue
+        if sub_key.startswith("shared_adaln.proj."):
+            _map_dense_submodule(
+                sub_key[len("shared_adaln."):], ["shared_adaln"], _convert(pt_key, pt_tensor), jax_params, "proj")
+            continue
+
+        match = re.match(r"det_stages\.(\d+)\.(\d+)\.(.*)", sub_key)
+        if match:
+            stage_idx, block_idx, block_sub = match.groups()
+            block_path = [f"det_stages_{stage_idx}_{block_idx}"]
+            if block_sub.startswith("attn."):
+                _map_na_attention_submodule(block_sub[len("attn."):], block_path + ["attn"], pt_key, pt_tensor, jax_params)
+            elif block_sub == "norm1.weight":
+                _set_nested_dict(jax_params, block_path + ["norm1", "scale"], _convert(pt_key, pt_tensor))
+            elif block_sub == "norm2.weight":
+                _set_nested_dict(jax_params, block_path + ["norm2", "scale"], _convert(pt_key, pt_tensor))
+            elif block_sub.startswith("mlp."):
+                _map_swiglu_submodule(block_sub[len("mlp."):], block_path, _convert(pt_key, pt_tensor), jax_params)
+            continue
+
+        match = re.match(r"upsamples\.(\d+)\.(.*)", sub_key)
+        if match:
+            up_idx, up_sub = match.groups()
+            _map_dense_submodule(up_sub, [f"upsamples_{up_idx}"], _convert(pt_key, pt_tensor), jax_params, "proj")
+            continue
+
+        match = re.match(r"diff_blocks\.(\d+)\.(.*)", sub_key)
+        if match:
+            block_idx, block_sub = match.groups()
+            block_path = [f"diff_blocks_{block_idx}"]
+            if block_sub.startswith("attn."):
+                _map_na_attention_submodule(block_sub[len("attn."):], block_path + ["attn"], pt_key, pt_tensor, jax_params)
+            elif block_sub == "norm1.weight":
+                _set_nested_dict(jax_params, block_path + ["norm1", "scale"], _convert(pt_key, pt_tensor))
+            elif block_sub == "norm2.weight":
+                _set_nested_dict(jax_params, block_path + ["norm2", "scale"], _convert(pt_key, pt_tensor))
+            elif block_sub.startswith("mlp."):
+                _map_swiglu_submodule(block_sub[len("mlp."):], block_path, _convert(pt_key, pt_tensor), jax_params)
+            elif block_sub == "scale_shift_table":
+                _set_nested_dict(jax_params, block_path + ["scale_shift_table"], pt_tensor_to_numpy(pt_tensor))
+            elif block_sub.startswith("context_proj."):
+                _map_dense_submodule(
+                    block_sub, block_path, _convert(pt_key, pt_tensor), jax_params, "context_proj")
+            continue
 
     return {"params": jax_params}
 

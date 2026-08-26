@@ -316,6 +316,7 @@ def extract_video_features(
     attention_mask: jnp.ndarray,
     video_aggregate_kernel: jnp.ndarray,
     video_aggregate_bias: jnp.ndarray,
+    embedding_dim: int,
     eps: float = 1e-6,
 ) -> jnp.ndarray:
     """`FeatureExtractorV2` (22B / `PER_TOKEN_RMS`): stack every layer's
@@ -333,6 +334,23 @@ def extract_video_features(
             transposed from PyTorch's (out_dim, in_dim) `Linear.weight` by
             the translator.
         video_aggregate_bias: (out_dim,).
+        embedding_dim: Gemma's own single-layer hidden size (`gemma_text_
+            config.hidden_size`, e.g. 3840) -- **not** `D * num_layers`.
+            The reference's `_rescale_norm(x, target_dim, source_dim)` is
+            called as `_rescale_norm(normed, v_dim, self.embedding_dim)`
+            where `self.embedding_dim` is set from `gemma_text_config
+            .hidden_size` at `FeatureExtractorV2` construction time (see
+            `ltx_core.text_encoders.gemma.encoders.encoder_configurator`)
+            -- a real bug in an earlier version of this function used
+            `D * num_layers` (the concatenated width) here instead, ~7x
+            too large (`sqrt(49)` for a 49-hidden-state stack), producing
+            a conditioning signal fed into the embeddings connector ~7x
+            weaker than intended. This wasn't caught by this port's
+            bit-exact checks (which used a truncated-layer-count Gemma,
+            unable to exercise the real `video_aggregate_embed` weight at
+            its true width) -- only surfaced as generically-plausible-but-
+            prompt-disconnected generated video content. See
+            `docs/lessons/ltx2_5_debugging.md`.
 
     Returns:
         (B, S, out_dim) -- ready for
@@ -347,7 +365,7 @@ def extract_video_features(
     normed = jnp.where(mask3d, normed, jnp.zeros_like(normed))
 
     out_dim = video_aggregate_kernel.shape[-1]
-    scale = jnp.sqrt(out_dim / (d * l)).astype(normed.dtype)
+    scale = jnp.sqrt(out_dim / embedding_dim).astype(normed.dtype)
     scaled = normed * scale
     return jnp.einsum("bsi,io->bso", scaled, video_aggregate_kernel) + video_aggregate_bias
 

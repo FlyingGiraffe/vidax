@@ -62,6 +62,16 @@ DISTILLED_SIGMA_VALUES = (1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725,
 # `_PARAMS_SINCE_VERSION` table).
 DEV_NUM_STEPS = 30
 DEV_CFG_GUIDANCE_SCALE = 3.0
+# `PipelineParams.video_guider_params.rescale_scale` -- corrects for the
+# well-known CFG over-saturation/contrast artifact at `cfg_scale=3.0`
+# (`ltx_core.components.guiders.MultiModalGuider.calculate`: `factor =
+# rescale_scale * (cond.std() / pred.std()) + (1 - rescale_scale); pred =
+# pred * factor`). Distinct from STG (`stg_scale=1.0` in the reference,
+# not ported -- a third forward pass with self-attention perturbed at a
+# specific block, out of scope same as every other model in this repo's
+# "plain CFG only" cut) -- the rescale step needs no extra forward pass
+# and is cheap to apply exactly, so it is ported even though STG isn't.
+DEV_CFG_RESCALE_SCALE = 0.7
 
 # `ltx_core.components.schedulers.LTX2Scheduler`'s own defaults.
 _BASE_SHIFT_ANCHOR = 1024
@@ -132,16 +142,35 @@ class AncestralEulerScheduler:
         """
         Args:
             sampler: `"distilled"` (default, `eta=1.0` unless overridden) or
-                `"dev"` (`eta=0.0` unless overridden, needs `num_tokens`).
+                `"dev"` (`eta=0.0` unless overridden).
                 Ignored when `sigmas=` is given explicitly.
             sigmas: explicit sigma schedule override.
             eta: defaults to the real recipe's own value per `sampler`
                 (`1.0` distilled, `0.0` dev) -- see module docstring.
             num_steps: `sampler="dev"` only -- step count for
                 `compute_shifted_sigmas` (real recipe: `30`).
-            num_tokens: `sampler="dev"` only -- the target latent's
-                `F' * H' * W'` token count, required for
-                `compute_shifted_sigmas`.
+            num_tokens: `sampler="dev"` only -- defaults to
+                `_MAX_SHIFT_ANCHOR` (4096), matching the real reference
+                *exactly*: `ti2vid_one_stage.py` (the single-stage pipeline
+                this port's `dev` recipe targets) calls `LTX2Scheduler
+                .execute(steps=num_inference_steps)` with **no `latent`
+                argument at all** -- `LTX2Scheduler.execute`'s own
+                `default_number_of_tokens: int = MAX_SHIFT_ANCHOR` then
+                applies, so the real single-stage recipe's sigma shift is
+                *resolution-independent*, always calibrated at exactly
+                `sigma_shift == max_shift`. (The two-stage HQ pipeline
+                *does* pass a real `latent=` -- resolution-dependent
+                shifting is a real code path in the reference, just not
+                the one this port's single-stage `dev` recipe uses.) An
+                earlier version of this port passed the *real* target
+                resolution's token count here instead, producing a far
+                more extreme shift (almost no denoising progress until the
+                last 2 of 30 steps at typical resolutions) than the
+                reference's own recipe ever produces -- confirmed as the
+                root cause of incoherent `dev`-checkpoint output that
+                persisted even with CFG fully disabled, isolating it away
+                from every guidance-related change. See
+                `docs/lessons/ltx2_5_debugging.md`.
         """
         if sigmas is not None:
             self.sigmas = jnp.asarray(sigmas, dtype=jnp.float32)
@@ -150,9 +179,8 @@ class AncestralEulerScheduler:
             self.sigmas = jnp.asarray(DISTILLED_SIGMA_VALUES, dtype=jnp.float32)
             default_eta = 1.0
         elif sampler == "dev":
-            if num_tokens is None:
-                raise ValueError("sampler='dev' requires `num_tokens` (the target latent's F'*H'*W').")
-            self.sigmas = compute_shifted_sigmas(num_steps, num_tokens)
+            self.sigmas = compute_shifted_sigmas(
+                num_steps, num_tokens if num_tokens is not None else _MAX_SHIFT_ANCHOR)
             default_eta = 0.0
         else:
             raise NotImplementedError(

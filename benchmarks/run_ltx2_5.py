@@ -28,7 +28,10 @@ _DIT_CHECKPOINT_FILES = {
     "22B-dev": "diffusion_models/ltx-2.5-22b-dev-transformer-bf16.safetensors",
     "22B-distilled": "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors",
 }
-_VAE_CHECKPOINT_FILE = "vae/ltx-2.5-video-vae-conv-bf16.safetensors"
+_VAE_CHECKPOINT_FILES = {
+    "conv": "vae/ltx-2.5-video-vae-conv-bf16.safetensors",
+    "diffusion": "vae/ltx-2.5-video-vae-bf16.safetensors",
+}
 _TEXT_ENCODER_CHECKPOINT_FILE = "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors"
 _SAMPLER = {"22B-dev": "dev", "22B-distilled": "distilled"}
 # Both the 22B DiT's bf16 weights (~44GB) and the 12B Gemma-4 encoder's
@@ -41,16 +44,22 @@ _DEFAULT_TP_SIZE = {"22B-dev": 4, "22B-distilled": 4}
 def build_args(args: argparse.Namespace) -> argparse.Namespace:
     checkpoint_dir = os.path.join(common.resolve_checkpoint_dir(args), "LTX-2.5")
     dit_checkpoint_path = os.path.join(checkpoint_dir, _DIT_CHECKPOINT_FILES[args.model_size])
-    vae_checkpoint_path = os.path.join(checkpoint_dir, _VAE_CHECKPOINT_FILE)
+    vae_checkpoint_path = os.path.join(checkpoint_dir, _VAE_CHECKPOINT_FILES[args.vae_variant])
     text_encoder_checkpoint_path = os.path.join(checkpoint_dir, _TEXT_ENCODER_CHECKPOINT_FILE)
 
     tp_size = args.tensor_parallel_size if args.tensor_parallel_size is not None else _DEFAULT_TP_SIZE[args.model_size]
     sampler = _SAMPLER[args.model_size]
 
+    # Only suffix the slug for the non-default (`diffusion`) variant, so the
+    # existing `conv` result files/rows (docs/benchmarking.md) keep their
+    # established names rather than being silently overwritten.
     size_slug = args.model_size.lower().replace("-", "_")
+    if args.vae_variant == "diffusion":
+        size_slug += "_diffvae"
     ns = argparse.Namespace(
         dit_checkpoint_path=dit_checkpoint_path,
         vae_checkpoint_path=vae_checkpoint_path,
+        vae_variant=args.vae_variant,
         text_encoder_checkpoint_path=text_encoder_checkpoint_path,
         tensor_parallel_size=tp_size,
         prompt=[common.STANDARD_T2V_PROMPT],
@@ -65,20 +74,32 @@ def build_args(args: argparse.Namespace) -> argparse.Namespace:
         sigmas=None,
         eta=None,
         guidance_scale=None,
-        # Not the reference's own single-stage default (height=704,
-        # width=1216, num_frames=121, the same resolution LTX-Video's
-        # benchmark rows use) -- that OOMs even at tp=4 on this repo's
-        # reference v4-8 test machine for a 22B model (47.2GB required vs.
-        # 30.75GB/chip available; LTX-Video's 13B fit at the same
-        # resolution/tp, this doesn't). 121 frames alone OOMs too, even at a
-        # smaller 480x832 (21.3GB required vs. 13.8GB free) -- frame count
-        # dominates the token count this needs to shrink. Scaled down to
-        # this port's own confirmed-fitting real end-to-end test
-        # configuration instead -- see docs/benchmarking.md's own note that
-        # these columns are "not necessarily what fits this hardware today".
-        height=320,
-        width=544,
-        num_frames=25,
+        guidance_rescale=None,
+        # The reference's own single-stage default (height=704, width=1216,
+        # num_frames=121 -- the same resolution LTX-Video's benchmark rows
+        # use). This OOM'd at tp=4 (47.2GB required vs. 30.75GB/chip
+        # available) before two real fixes, both documented in
+        # docs/lessons/ltx2_5_debugging.md: (1) LTXAttention was manually
+        # materializing the full (B, H, S, S) attention matrix instead of
+        # using vidax.core.attention.dot_product_attention's real (O(S)
+        # memory) flash-attention kernel -- fixed by threading `mesh`
+        # through LTXDiT/LTXDiTBlock/LTXAttention; (2) even with flash
+        # attention, the fused 48-block forward pass's per-block AdaLN/FFN
+        # intermediates were never freed across blocks (temp memory scaled
+        # ~linearly with block count, not O(1)) -- fixed by
+        # `--offload_dit_weights`, which was *not* needed for its usual
+        # purpose here (DiT weights alone fit resident, ~6.6GB/chip) but for
+        # its side effect of closing the JIT compilation boundary once per
+        # chunk, bounding peak activation memory regardless of num_layers.
+        # `--offload_chunk_size 8` is the largest divisor of 48 confirmed to
+        # still fit at this resolution (12 OOMs: 22.28GB required vs.
+        # 16.97GB free with Gemma-4 still resident) -- swept empirically,
+        # see docs/benchmarking.md.
+        height=704,
+        width=1216,
+        num_frames=121,
+        offload_dit_weights=True,
+        offload_chunk_size=8,
         fps=24,
         output_path=common.output_path("ltx2_5", "", size_slug, args.task),
         # Not consumed by generate_ltx2_5.main() itself (step count comes
@@ -98,10 +119,17 @@ def main():
     common.add_common_args(parser)
     parser.add_argument("--model_size", type=str, default="22B-distilled", choices=MODEL_SIZES)
     parser.add_argument("--task", type=str, default="t2v", choices=TASKS)
+    parser.add_argument(
+        "--vae_variant", type=str, default="conv", choices=("conv", "diffusion"),
+        help="VAE decoder to benchmark -- 'conv' (default, has a real periodic artifact) or "
+             "'diffusion' (NATTEN-based, single full-volume tile only, about half as severe -- see "
+             "docs/lessons/ltx2_5_debugging.md). See examples/generate_ltx2_5.py's --vae_variant.")
     args = parser.parse_args()
 
     run_args = build_args(args)
     size_slug = args.model_size.lower().replace("-", "_")
+    if args.vae_variant == "diffusion":
+        size_slug += "_diffvae"
     common.run_benchmark(
         model="ltx2_5", version="", size=size_slug, task=args.task,
         main_fn=generate_ltx2_5.main, args=run_args, num_runs=args.num_runs)

@@ -56,7 +56,9 @@ from typing import Optional, Tuple
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 
+from vidax.core.attention import dot_product_attention
 from vidax.models.ltx2_5.rope import apply_rope, create_ltx2_5_rope_freqs
 
 
@@ -113,6 +115,7 @@ class LTXAttention(nn.Module):
     eps: float = 1e-6  # q_norm/k_norm eps == the checkpoint's norm_eps.
     apply_gated_attention: bool = False
     compute_dtype: jnp.dtype = jnp.bfloat16
+    mesh: Optional[Mesh] = None
 
     @nn.compact
     def __call__(
@@ -136,33 +139,31 @@ class LTXAttention(nn.Module):
         v = nn.Dense(self.inner_dim, name="to_v")(kv_input)
 
         seq_k = k.shape[1]
+        # (B, S, H, D) throughout -- the layout `vidax.core.attention
+        # .dot_product_attention` expects, and (for self-attn) what
+        # `apply_rope` needs transposed to (B, H, S, D) and back.
         q = q.reshape(b, seq_q, self.num_heads, self.head_dim)
         k = k.reshape(b, seq_k, self.num_heads, self.head_dim)
-        v_heads = v.reshape(b, seq_k, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        v = v.reshape(b, seq_k, self.num_heads, self.head_dim)
 
         if not self.is_cross_attn:
             cos, sin = freqs
             q = apply_rope(q.transpose(0, 2, 1, 3), cos, sin).transpose(0, 2, 1, 3)
             k = apply_rope(k.transpose(0, 2, 1, 3), cos, sin).transpose(0, 2, 1, 3)
 
-        q = q.transpose(0, 2, 1, 3)
-        k = k.transpose(0, 2, 1, 3)
-
         scale = self.head_dim ** -0.5
-        # Promote (never downcast) for the softmax -- a hardcoded
-        # `.astype(jnp.float32)` here silently truncated a verification
-        # run's float64 activations, and with `vidax.models.ltx2_5.
-        # connector`'s pre-final-norm residual stream growing into the
-        # thousands over 8 layers, that truncation overflowed to `inf`/
-        # `NaN` -- a real bug, not just lost precision, caught only by a
-        # float64 bit-exact check.
-        softmax_dtype = jnp.promote_types(q.dtype, jnp.float32)
-        logits = jnp.einsum("bhqd,bhkd->bhqk", q, k).astype(softmax_dtype) * scale
-        if encoder_attention_bias is not None:
-            logits = logits + encoder_attention_bias
-        weights = jax.nn.softmax(logits, axis=-1).astype(v_heads.dtype)
-        out = jnp.einsum("bhqk,bhkd->bhqd", weights, v_heads)
-        out = out.transpose(0, 2, 1, 3).reshape(b, seq_q, self.inner_dim)
+        # Real (O(S) memory) flash attention instead of a manually
+        # materialized (B, H, S, S) logits matrix -- at reference resolution
+        # (~13k video-patch tokens) the materialized matrix alone was the
+        # dominant contributor to a measured 54GB/chip peak HLO-temporaries
+        # requirement (vs. ~6.5GB/chip for the DiT's own weights at
+        # tp=4) -- see docs/lessons/ltx2_5_debugging.md. `bias`/`mask` are
+        # never both given alongside multi-device sharding in this model
+        # (encoder_attention_bias is always None in practice -- see
+        # examples/generate_ltx2_5.py's module docstring), so this always
+        # takes the fast sharded-flash path when `mesh` is given.
+        out = dot_product_attention(q, k, v, bias=encoder_attention_bias, scale=scale, mesh=self.mesh)
+        out = out.reshape(b, seq_q, self.inner_dim)
 
         if self.apply_gated_attention:
             gate_logits = nn.Dense(self.num_heads, name="to_gate_logits")(hidden_states)
@@ -204,6 +205,7 @@ class LTXDiTBlock(nn.Module):
     cross_attention_adaln: bool = False
     apply_gated_attention: bool = False
     compute_dtype: jnp.dtype = jnp.bfloat16
+    mesh: Optional[Mesh] = None
 
     @nn.compact
     def __call__(
@@ -229,7 +231,7 @@ class LTXDiTBlock(nn.Module):
         attn_out = LTXAttention(
             self.dim, self.num_heads, self.head_dim, is_cross_attn=False,
             eps=self.eps, apply_gated_attention=self.apply_gated_attention,
-            compute_dtype=self.compute_dtype, name="attn1")(norm_x, freqs=freqs)
+            compute_dtype=self.compute_dtype, mesh=self.mesh, name="attn1")(norm_x, freqs=freqs)
         x = x + (gate_msa * attn_out.astype(jnp.float32)).astype(x.dtype)
 
         x_normed = _rms_norm_no_affine(x, self.eps)
@@ -246,7 +248,7 @@ class LTXDiTBlock(nn.Module):
             attn2_out = LTXAttention(
                 self.dim, self.num_heads, self.head_dim, is_cross_attn=True,
                 eps=self.eps, apply_gated_attention=self.apply_gated_attention,
-                compute_dtype=self.compute_dtype, name="attn2")(
+                compute_dtype=self.compute_dtype, mesh=self.mesh, name="attn2")(
                     attn_input, encoder_hidden_states=ctx_mod,
                     encoder_attention_bias=encoder_attention_bias)
             x = x + (gate_ca * attn2_out.astype(jnp.float32)).astype(x.dtype)
@@ -254,7 +256,7 @@ class LTXDiTBlock(nn.Module):
             attn2_out = LTXAttention(
                 self.dim, self.num_heads, self.head_dim, is_cross_attn=True,
                 eps=self.eps, apply_gated_attention=self.apply_gated_attention,
-                compute_dtype=self.compute_dtype, name="attn2")(
+                compute_dtype=self.compute_dtype, mesh=self.mesh, name="attn2")(
                     x_normed, encoder_hidden_states=encoder_hidden_states,
                     encoder_attention_bias=encoder_attention_bias)
             x = x + attn2_out
@@ -290,6 +292,7 @@ class LTXDiT(nn.Module):
     double_precision_rope: bool = False
     eps: float = 1e-6
     compute_dtype: jnp.dtype = jnp.bfloat16
+    mesh: Optional[Mesh] = None
 
     def setup(self):
         self.inner_dim = self.num_attention_heads * self.attention_head_dim
@@ -321,7 +324,7 @@ class LTXDiT(nn.Module):
                 cross_attention_dim=self.cross_attention_dim, eps=self.eps,
                 ff_bias=self.ff_bias, cross_attention_adaln=self.cross_attention_adaln,
                 apply_gated_attention=self.apply_gated_attention,
-                compute_dtype=self.compute_dtype, name=f"blocks_{i}")
+                compute_dtype=self.compute_dtype, mesh=self.mesh, name=f"blocks_{i}")
             for i in range(self.num_layers)
         ]
 

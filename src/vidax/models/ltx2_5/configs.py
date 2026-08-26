@@ -182,6 +182,47 @@ def gemma4_text_model_kwargs(gemma_config: dict) -> dict:
     )
 
 
+# Read directly from `ltx-2.5-video-vae-bf16.safetensors`'s embedded
+# `config.vae` -- documentation/test fixture only, same caveat as
+# `VAE_CONFIG` (load via `diffusion_vae_kwargs_from_vae_config` at runtime).
+# `encoder` is identical to `VAE_CONFIG["encoder_blocks"]` above (confirmed
+# from the real checkpoint) except `latent_log_var: "constant"` instead of
+# `"uniform"` -- a no-op difference for this port, since
+# `vidax.models.ltx2_5.vae.Encoder` (reused unchanged for this VAE variant
+# too) only ever uses the first `latent_channels` output channels either
+# way -- see `vidax.models.ltx2_5.diffusion_vae`'s module docstring.
+DIFFUSION_VAE_CONFIG = dict(
+    in_channels=128, out_channels=3, patch_size=4, head_dim=64,
+    stage_channels=(2048, 1024, 512, 512, 256),
+    stage_depths=(4, 6, 4, 2, 8),
+    stage_kernels=((3, 7, 7), (3, 7, 7), (3, 5, 5), (3, 5, 5), (11, 11, 11)),
+    upsamples=(((1, 2, 2), 2), ((2, 1, 1), 2), ((2, 2, 2), 1), ((2, 2, 2), 2)),
+    stage5_kernel=(11, 11, 11),
+    timestep_scale_multiplier=1000.0,
+    default_num_inference_steps=1, model_output_type="x0",
+)
+
+
+def diffusion_vae_kwargs_from_vae_config(vae_config: dict) -> dict:
+    """Builds `vidax.models.ltx2_5.diffusion_vae.DiffusionVideoDecoder`
+    constructor kwargs from the diffusion-VAE checkpoint's own
+    `config.vae` (see `load_ltx2_5_metadata`) -- reads every field directly
+    from the checkpoint rather than trusting `DIFFUSION_VAE_CONFIG`.
+    """
+    dec = vae_config["decoder"]
+    return dict(
+        in_channels=dec["in_channels"], out_channels=dec["out_channels"], patch_size=dec["patch_size"],
+        head_dim=dec["head_dim"],
+        stage_channels=tuple(dec["stage_channels"]), stage_depths=tuple(dec["stage_depths"]),
+        stage_kernels=tuple(tuple(k) for k in dec["stage_kernels"]),
+        upsamples=tuple((tuple(stride), reduction) for stride, reduction in dec["upsamples"]),
+        stage5_kernel=tuple(dec.get("stage5_kernel", dec["stage_kernels"][-1])),
+        timestep_scale_multiplier=dec.get("timestep_scale_multiplier", 1000.0),
+        default_num_inference_steps=dec.get("default_num_inference_steps", 1),
+        model_output_type=vae_config.get("model_output_type", "x0"),
+    )
+
+
 def vae_scale_factors(vae_config: dict) -> "tuple[int, int]":
     """`(temporal_downscale_factor, spatial_downscale_factor)` -- same
     computation as `vidax.models.ltx_video.configs.vae_scale_factors`,

@@ -1,4 +1,18 @@
-# vidax 🎬⚡
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/wordmark-light.svg">
+    <img alt="vidax" src="assets/wordmark-light.svg" height="100">
+  </picture>
+</p>
+
+<p align="center">
+  <a href="https://flyinggiraffe.github.io/vidax-site/docs/intro">Documentation</a> |
+  <a href="https://arxiv.org/abs/TODO">arXiv</a> |
+  <a href="https://flyinggiraffe.github.io/vidax-site/blog">Blog</a> |
+  <a href="https://flyinggiraffe.github.io/vidax-site/benchmarks">Benchmark</a> |
+  <a href="https://flyinggiraffe.github.io/vidax-site/gallery">Gallery</a>
+</p>
 
 **`vidax`** is a lightweight JAX/Flax inference engine and
 PyTorch-to-JAX weight translator for modern Video Diffusion Transformers
@@ -7,6 +21,10 @@ eliminates framework overhead with clean, explicit PyTree architectures and
 native multi-chip parallelism (Megatron tensor parallelism and
 DeepSpeed-Ulysses sequence parallelism) across five architecturally distinct
 model families.
+
+<p align="center">
+  <img alt="Cosmos3-Nano T2V sample generated with vidax" src="assets/demo.gif" width="100%">
+</p>
 
 ## 🔑 Key Features
 
@@ -106,17 +124,14 @@ inference script per family/task under `examples/`. See
 
 ## 📚 References
 
-**Wan** — developed by Alibaba's Wan team.
-- Wan2.1: [code](https://github.com/Wan-Video/Wan2.1) | [report](https://arxiv.org/abs/2503.20314) | [weights](https://huggingface.co/Wan-AI)
-- Wan2.2: [code](https://github.com/Wan-Video/Wan2.2) | [report](https://arxiv.org/abs/2503.20314) | [weights](https://huggingface.co/Wan-AI)
-
-**Cosmos** — developed by NVIDIA.
-- Cosmos-Predict2.5: [code](https://github.com/nvidia-cosmos/cosmos-predict2.5) | [report](https://arxiv.org/abs/2511.00062) | [weights](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B)
-- Cosmos 3: [code](https://github.com/NVIDIA/cosmos) | [report](https://research.nvidia.com/labs/cosmos-lab/cosmos3/technical-report.pdf) | [weights](https://huggingface.co/nvidia/Cosmos3-Nano)
-
-**LTX** — developed by Lightricks.
-- LTX-Video (0.9.8): [code](https://github.com/Lightricks/LTX-Video) | [report](https://arxiv.org/abs/2501.00103) | [weights](https://huggingface.co/Lightricks/LTX-Video)
-- LTX-2.5: [code](https://github.com/Lightricks/LTX-2) | [weights](https://huggingface.co/Lightricks/LTX-2.5)
+| Model | Developer | Code | Report | Weights | License |
+| --- | --- | --- | --- | --- | --- |
+| Wan2.2 | Alibaba (Wan team) | [code](https://github.com/Wan-Video/Wan2.2) | [report](https://arxiv.org/abs/2503.20314) | [weights](https://huggingface.co/Wan-AI) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) |
+| Wan2.1 | Alibaba (Wan team) | [code](https://github.com/Wan-Video/Wan2.1) | [report](https://arxiv.org/abs/2503.20314) | [weights](https://huggingface.co/Wan-AI) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) |
+| Cosmos 3 | NVIDIA | [code](https://github.com/NVIDIA/cosmos) | [report](https://research.nvidia.com/labs/cosmos-lab/cosmos3/technical-report.pdf) | [weights](https://huggingface.co/nvidia/Cosmos3-Nano) | [OpenMDW-1.1](https://openmdw.ai/license/1-1/) |
+| Cosmos-Predict2.5 | NVIDIA | [code](https://github.com/nvidia-cosmos/cosmos-predict2.5) | [report](https://arxiv.org/abs/2511.00062) | [weights](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B) | [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license) |
+| LTX-2.5 | Lightricks | [code](https://github.com/Lightricks/LTX-2) | [report](https://arxiv.org/abs/2601.03233) | [weights](https://huggingface.co/Lightricks/LTX-2.5) | [LTX-2 Community License](https://github.com/Lightricks/LTX-2/blob/main/LICENSE.md) |
+| LTX-Video (0.9.8) | Lightricks | [code](https://github.com/Lightricks/LTX-Video) | [report](https://arxiv.org/abs/2501.00103) | [weights](https://huggingface.co/Lightricks/LTX-Video) | [LTX-Video Open Weights License](https://huggingface.co/Lightricks/LTX-Video/blob/main/LTX-Video-Open-Weights-License-0.X.txt) |
 
 **Parallelism techniques implemented in this repo:**
 - Megatron-style tensor parallelism — Shoeybi et al., [*Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism*](https://arxiv.org/abs/1909.08053).

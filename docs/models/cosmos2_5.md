@@ -196,45 +196,6 @@ replica — only the text prompt varies).
 | `--fps` | `16` | Output video frame rate. Matches the reference's training/inference fps. |
 | `--output_path` | `output_cosmos2_5.mp4` | With multiple prompts, each video is saved as `<output_path>_<i>.mp4`. |
 
-### Status
-
-**Verified end-to-end on real weights, both text2world and image2world:
-output is coherent, prompt-matching video** (e.g. a recognizable red panda
-climbing a bamboo stalk for T2V; a stable, identity-preserving subject for
-I2V). See
-[`docs/lessons/cosmos2_5_debugging.md`](../lessons/cosmos2_5_debugging.md)
-for the debugging/verification methodology.
-
-- DiT: loading `model_ema_bf16.pt` through the translator mapping and
-  comparing every leaf against `CosmosDiT`'s initialized parameter tree
-  gives an **exact 1:1 match (569/569 keys)**.
-- Reason1: same check against `Qwen2TextModel`'s initialized parameter tree,
-  loading the real sharded `Cosmos-Reason1-7B` checkpoint — **exact 1:1
-  match (338/338 keys)** — plus a real tokenizer + real forward pass (not
-  synthetic ids), producing the expected `(B, 512, 100352)` embedding with
-  sane statistics.
-- Parallelism: both `--tensor_parallel_size 4` (Megatron, all 4 chips) and
-  `--sequence_parallel_size 2` (2-way data-parallel × 2-way sequence-parallel)
-  complete cleanly against the real checkpoints, with correct output shapes.
-
-**14B** (`--model_size 14B`): the same translator mapping, DiT architecture,
-and sampling loop as 2B, just with `configs.BASE_14B_CONFIG`'s wider/deeper
-dims — verified end-to-end against the real released checkpoint
-(`Cosmos-Predict2.5-14B/base/pre-trained/..._ema_bf16.pt`), full resolution
-and step count (704x1280, 93 frames, 35 steps), with
-`--tensor_parallel_size 4 --offload_dit_weights --offload_chunk_size 1`:
-weight loading, Megatron sharding across all 4 chips, Reason1 text encoding,
-UniPC sampling, and VAE decode all complete without error and produce
-coherent, sane video output (5 full benchmark runs: 48.5s compile, 4479.6s
-generation, 128.0s/step, 14.7GB peak HBM/chip — see
-[`docs/benchmarking.md`](../benchmarking.md) for the row). Offloading is
-needed here because a fully-resident 14B DiT doesn't fit this 4-chip
-machine's HBM alongside Reason1/VAE at the reference's full frame count —
-see [`docs/weight_offloading.md`](../weight_offloading.md).
-
-See the [parity matrix in the root README](../../README.md#-model-support)
-for the up-to-date status across all variants.
-
 ### Quick testing
 
 Full-resolution (704x1280), full-step (35) runs are slow to iterate with —

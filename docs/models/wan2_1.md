@@ -128,9 +128,6 @@ independent noise, giving that many samples of one prompt "for free"; exactly
 PyTorch reference's model code) — it's just that the reference pipeline's
 `generate()` never uses it.
 
-**Status:** fully verified end-to-end against real checkpoints for both
-1.3B and 14B, output confirmed coherent (see the [parity matrix](../../README.md#-model-support)).
-
 ---
 
 ## I2V (14B) — `generate_wan2_1_i2v.py`
@@ -212,7 +209,7 @@ projection (`WanDiT`'s `model_type="i2v"` path).
 | `--sequence_parallel_size` | `1` | Same DeepSpeed-Ulysses flag as the t2v script, independent of `--tensor_parallel_size` — the one to reach for once actually running this 14B model at higher resolution, where self-attention activation memory is the more likely bottleneck than at 1.3B scale. Verified to work correctly with the CLIP image cross-attention branch too, as long as `--tensor_parallel_size 1` (combining both with i2v's CLIP branch isn't supported yet — see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s "Combining with Megatron TP"). |
 | `--dtype` | `bfloat16` | Same choices/caveats as t2v. |
 | `--dit_dtype` | `float32` | Same as t2v — cast target for the DiT's weights specifically, decoupled from `--dtype`. Also applies to the I2V conditioning tensor `y` and the sampling loop's `latents`, since both are concatenated directly into the DiT's own input. See [Precision: fp32 DiT weights](#precision-fp32-dit-weights). |
-| `--offload_dit_weights` | off | Same as t2v. Needed for the 720P checkpoint at native resolution (fixes the OOM described in Status below); not needed for 480P. |
+| `--offload_dit_weights` | off | Same as t2v. Needed for the 720P checkpoint at native resolution — a fully-resident fp32 DiT otherwise leaves no HBM headroom for the conditioning image's VAE encode right before generation starts (the DiT's own per-step compute already fits fine fully resident at this scale; the OOM is from the DiT staying resident *outside* the sampling loop too). Not needed for 480P. |
 | `--offload_chunk_size` | `1` | Same as t2v. |
 | `--seed` | `0` | Initial noise seed. |
 | `--num_steps` | `40` | Reference i2v default (vs. 50 for t2v). |
@@ -221,24 +218,6 @@ projection (`WanDiT`'s `model_type="i2v"` path).
 | `--max_area` | `720*1280` | Bounds output pixel count; `compute_latent_grid` picks the largest (height, width) at that budget preserving the input image's aspect ratio, aligned to the VAE's spatial stride and the DiT's patch size — matches `WanI2V.generate`'s own resolution selection exactly. Set to `480*832` when using the 480P checkpoint (the default matches the 720P checkpoint's scale). |
 | `--num_frames` | `81` | Output frame count. |
 | `--output_path` | `output_video.mp4` | With `dp_size > 1`, each replica's sample is saved as `<output_path>_<i>.mp4`. |
-
-**Status:** verified end-to-end against the real I2V-14B/VAE/T5/CLIP
-checkpoints for **both** the 480P and 720P checkpoints, output confirmed
-coherent for each at its own resolution (see
-[`docs/benchmarking.md`](../benchmarking.md) for measured numbers).
-
-480P is verified coherent under the fp32-DiT-weights default with no
-special handling (smaller token count, fits comfortably fully resident).
-Native 720P (81 frames) needs `--offload_dit_weights`: a fully-resident fp32
-DiT otherwise leaves no HBM headroom for the conditioning image's VAE
-encode, right before generation starts, on this repo's 4-chip machine (the
-DiT's own per-step compute already fits fine fully resident at this scale —
-the OOM is specifically from the DiT staying resident *outside* the
-sampling loop too). With `--offload_dit_weights`, native 720P is verified
-coherent — see [Precision: fp32 DiT weights](#precision-fp32-dit-weights),
-[`docs/weight_offloading.md`](../weight_offloading.md)
-for the mechanism and its real (non-trivial) throughput cost, and
-[`docs/benchmarking.md`](../benchmarking.md) for measured numbers.
 
 ### Precision: fp32 DiT weights
 
@@ -269,3 +248,49 @@ the direct cause of I2V-14B-720P's OOM at native resolution before
 `--offload_dit_weights` (see above). See
 [`docs/lessons/wan2_1_debugging.md`](../lessons/wan2_1_debugging.md)
 for the full investigation.
+
+---
+
+## Architecture notes
+
+- **DiT (`vidax.models.wan.wan2_1.dit.WanDiT`):** config-driven from a named
+  preset in `vidax.models.wan.wan2_1.configs`
+  (`T2V_1_3B_CONFIG`/`T2V_14B_CONFIG`/`I2V_14B_CONFIG`) — one architecture,
+  size and (for I2V) `in_dim` (extra mask+latent conditioning channels) the
+  only differences. RoPE is Wan's interleaved-pair convention (not
+  rotate-half — see e.g. `vidax.models.cosmos2_5.rope`'s docstring for the
+  contrast), and AdaLN modulation is **per-sample** (one `(B, 6, dim)`
+  modulation vector per block, not per-token) — unlike Wan2.2's `WanDiT`,
+  which needs per-token modulation for its MoE experts (see
+  [`docs/models/wan2_2.md`](wan2_2.md#architecture-notes)); this is a
+  genuine simplification for Wan2.1's sequence-parallel path (no
+  modulation-state chunking needed).
+- **VAE (`vidax.models.wan.wan2_1.vae.WanVAEDecoder`/`WanVAEEncoder`):** a
+  causal 3D-conv VAE (`Wan2.1_VAE.pth`, `vae_stride=(4,8,8)`), decoded/
+  encoded frame-chunk-by-chunk via `decode_chunk`/`encode_chunk` (not one
+  fused forward pass over the whole tensor) specifically to keep XLA
+  compilation to a handful of distinct shapes instead of one per op — see
+  [`docs/hardware_and_sharding.md`](../hardware_and_sharding.md)'s "The VAE
+  decode 'hang' that wasn't a hang".
+- **I2V conditioning:** two independent mechanisms, both only present for
+  the I2V-14B checkpoints. `vidax.models.wan.wan2_1.vae.WanVAEEncoder`
+  encodes the conditioning image (as a single real frame followed by zero
+  frames) into a mask+latent tensor `y`, concatenated onto the noisy
+  latent's channel axis before the DiT call; separately,
+  `vidax.models.wan.wan2_1.clip_vision.ClipVisionTransformer` extracts CLIP
+  image features the DiT cross-attends onto through a second, image-only
+  K/V projection (`WanDiT`'s `model_type="i2v"` path) — the CLIP branch is
+  the one piece of this port genuinely unique to Wan2.1 (Wan2.2's I2V uses
+  channel-concatenation only, no CLIP branch at all — see
+  [`docs/models/wan2_2.md`](wan2_2.md#architecture-notes)).
+- **Text encoder (`vidax.models.wan.common.t5.T5Encoder`):** UMT5-XXL,
+  shared verbatim across every Wan version (byte-identical checkpoint
+  format).
+- **Scheduler (`vidax.schedulers.flow_match.RectifiedFlowScheduler`):** a
+  plain deterministic Euler step on a `shift`-warped linear sigma schedule
+  — no per-token timestep support (Wan2.1 never needs it; contrast LTX-2.5's
+  scheduler, which does, for its per-token `denoise_mask` conditioning).
+- **Checkpoint translator (`vidax.translator.mappings.wan2_1`):** DiT/VAE/T5
+  each load from their own separate checkpoint file (unlike LTX-Video/
+  LTX-2.5, which bundle multiple submodules into one file) — no shared-file
+  loading concerns here.

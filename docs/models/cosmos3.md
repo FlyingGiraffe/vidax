@@ -126,10 +126,9 @@ checkpoints across sizes).
 **Resolution/frame count/scheduler are not interchangeable with Nano's, and
 T2V and I2V use *different* scheduler values from each other** — always
 pass Edge's explicit `--height`/`--width`/`--num_frames`/`--num_steps`/
-`--use_karras_sigmas`/`--shift` as shown below rather than reusing Nano's
-defaults or mixing T2V's/I2V's values. See [Status](#status) for how these
-values were determined and what happens if you don't (it doesn't error —
-it just looks badly wrong).
+`--use_karras_sigmas`/`--shift` as shown below. Reusing Nano's defaults or
+mixing T2V's/I2V's values doesn't error — it just produces badly wrong
+output.
 
 ### Text2Video
 
@@ -225,16 +224,6 @@ raise `--max_text_len` further if you hit the tokenized-length assertion.
 | `--num_frames` | `93` | Output frame count. Nano default — Edge's real recipe uses `121`. |
 | `--fps` | `24.0` | Output video frame rate, also injected into the mRoPE temporal modulation and the prompt's duration-metadata sentence. |
 | `--output_path` | `output_cosmos3.mp4` | Output video path. |
-
-### Status
-
-**Both sizes verified: clean, stable, high-quality output** — Nano at its
-full resolution (1280x704, 93 frames, 35 steps), Edge at its real per-task
-recipe (480x832, 121 frames, non-Karras; T2V: 35 steps/`shift=10.0`, I2V:
-20 steps/`shift=12.0`), **with a properly JSON-structured prompt** (see
-[Prompting](#prompting) — this matters far more for Edge than for Nano).
-See [`docs/lessons/cosmos3_debugging.md`](../lessons/cosmos3_debugging.md)
-for the verification methodology.
 
 ### Prompting
 
@@ -413,6 +402,6 @@ need that for T2V/I2V specifically).
   schedule, not just a different `shift` value. Both checkpoints'
   bundled `scheduler/scheduler_config.json` defaults to
   `use_karras_sigmas: true`, `sigma_min: 0.147`, `sigma_max: 200.0` — the
-  real recipe for Nano, but not for Edge (see [Status](#status) and
+  real recipe for Nano, but not for Edge (see
   [Cosmos3-Edge](#cosmos3-edge-4b--model_size-edge)'s `--use_karras_sigmas`/
   `--shift` values).

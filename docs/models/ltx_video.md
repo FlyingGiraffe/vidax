@@ -68,7 +68,7 @@ python examples/generate_ltx_video.py \
 recommended recipe (trained to look good in very few steps with no
 classifier-free guidance at all — `guidance_scale=1.0` skips CFG's
 amplification entirely, though this script still runs the unconditional
-branch regardless, see [Status](#status)). For `13B-dev` (not distilled),
+branch regardless). For `13B-dev` (not distilled),
 use real CFG and more steps instead:
 
 ```bash
@@ -126,7 +126,7 @@ obviously, needed for **2B too** at the reference's full
 704x1216/121-frame resolution: 2B's own weights fit replicated fine, but
 the self-attention activations at that token count don't (confirmed OOM at
 `tp=1`; see [`docs/benchmarking.md`](../benchmarking.md)'s "why TP" row).
-There is no `--sequence_parallel_size` yet — see [Status](#status).
+There is no `--sequence_parallel_size` yet — see [Scope](#scope).
 
 ### CLI reference
 
@@ -156,28 +156,7 @@ There is no `--sequence_parallel_size` yet — see [Status](#status).
 | `--fps` | `24` | Output video frame rate. |
 | `--output_path` | `output_video.mp4` | With multiple prompts, each video is saved as `<output_path>_<i>.mp4`. |
 
-### Status
-
-**Verified end-to-end on real weights, T2V and I2V, 2B and 13B alike:
-output is coherent, prompt-matching, temporally consistent video.** Unlike
-this repo's other model ports, correctness here was checked two ways, not
-one:
-
-- **Bit-exact against the actual reference PyTorch implementation**, run in
-  a throwaway conda env (`torch`+`diffusers`+`transformers` pinned to the
-  versions the reference was built against) against the real downloaded
-  2B-distilled checkpoint, with `jax_default_matmul_precision="highest"`:
-  DiT max diff `3.3e-5` (correlation `0.999999999984`), VAE encode+decode
-  max diff `2e-5` (correlation `0.9999999999`), T5 text encoder max diff
-  `1.2e-5` (correlation `0.9999999999`).
-- **Real end-to-end generation**, both variants: T2V from the standardized
-  red-panda prompt produces a recognizable red panda in snow next to
-  bamboo (13B noticeably sharper/more detailed than 2B, as expected); I2V
-  conditioned on a generated frame reproduces it near-exactly at frame 0
-  and continues it coherently.
-
-See [`docs/lessons/ltx_video_debugging.md`](../lessons/ltx_video_debugging.md)
-for the bit-exact verification methodology used to confirm this.
+### Scope
 
 **Not implemented in this first port** (see
 [`examples/generate_ltx_video.py`](../../examples/generate_ltx_video.py)'s
@@ -200,9 +179,6 @@ module docstring):
   per-token mask) is the same one I2V already uses, just anchored at an
   interior/later frame instead of frame 0 — architecturally close, just
   not wired into the example script yet.
-
-See the [parity matrix in the root README](../../README.md#-model-support)
-for the up-to-date status across all variants.
 
 ---
 
@@ -284,9 +260,8 @@ for the up-to-date status across all variants.
   I2V, see above; Wan's scheduler only ever handles a per-sample scalar),
   and the `LinearQuadratic`/`Constant` sigma-schedule shapes every released
   checkpoint's own embedded config actually specifies (verified bit-exact
-  against the reference's `linear_quadratic_schedule` — see
-  [Status](#status)), on top of the plain `Uniform` linspace Wan's
-  `shift`-only schedule effectively is.
+  against the reference's `linear_quadratic_schedule`), on top of the plain
+  `Uniform` linspace Wan's `shift`-only schedule effectively is.
 - **Checkpoint translator
   (`vidax.translator.mappings.ltx_video.{map_ltx_video_dit_keys,
   map_ltx_video_vae_keys, map_ltx_video_t5_keys}`):** the DiT and VAE

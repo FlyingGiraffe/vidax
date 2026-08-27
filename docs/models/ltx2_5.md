@@ -4,8 +4,8 @@ One standalone TPU inference script lives in `examples/`:
 `generate_ltx2_5.py` — a single script covering both T2V and I2V (pass
 `--image_path` for the latter, omit it for T2V), for the two released
 22B checkpoints (dev, distilled). Scope is deliberately narrower than
-LTX-2.5's full reference (see [Status](#status)): **video-only** (no audio
-generation), **single-stage** (no `LatentUpsampler` two-pass refinement).
+LTX-2.5's full reference: **video-only** (no audio generation),
+**single-stage** (no `LatentUpsampler` two-pass refinement).
 Architecturally unrelated to `vidax.models.ltx_video`'s port beyond the
 shared "LTX" lineage and the same causal-conv-VAE family: a much larger
 22B DiT with cross-attention AdaLN and per-head gated attention, an
@@ -36,7 +36,7 @@ Three separate checkpoint files from
 [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5):
 
 - `--dit_checkpoint_path`: `diffusion_models/ltx-2.5-22b-{dev,distilled}-transformer-bf16.safetensors` — bundles the DiT *and* the video embeddings connector (`model.diffusion_model.video_embeddings_connector.*`, confirmed from the real checkpoint's own keys — the connector's weights don't live in the text-encoder file the way its name might suggest).
-- `--vae_checkpoint_path`: `vae/ltx-2.5-video-vae-conv-bf16.safetensors` (default `--vae_variant conv`) or `vae/ltx-2.5-video-vae-bf16.safetensors` (`--vae_variant diffusion`, the transformer/neighborhood-attention decoder — see [Status](#status)).
+- `--vae_checkpoint_path`: `vae/ltx-2.5-video-vae-conv-bf16.safetensors` (default `--vae_variant conv`) or `vae/ltx-2.5-video-vae-bf16.safetensors` (`--vae_variant diffusion`, the transformer/neighborhood-attention decoder, the official demos' decoder).
 - `--text_encoder_checkpoint_path`: `text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors` — bundles the Gemma-4 text tower, its embedded HF tokenizer (extracted from the checkpoint's own `tokenizer_json`/`hf_asset__tokenizer_config.json` tensors, not a separate directory download), and the `text_embedding_projection.video_aggregate_embed` feature-extraction Linear.
 
 Every architecture hyperparameter (DiT `num_layers`/dims/`cross_attention_adaln`/

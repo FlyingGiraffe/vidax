@@ -123,17 +123,6 @@ derived width in 32px steps (up to `tensor_parallel_size - 1` times —
 guaranteed to find a divisible value) and logs when it does, rather than
 failing outright.
 
-**Status:** verified end-to-end on the real TI2V-5B checkpoint for **both**
-t2v and i2v, at the reference's full resolution/frame count (704x1280, 121
-frames) and full step count (50 t2v / 40 i2v), on a v4-8 (4 chips),
-`--tensor_parallel_size 4 --sequence_parallel_size 1`, `--dit_dtype
-float32` — 5 full benchmark runs each, no OOM, ~18.3GB peak HBM/chip; see
-[`docs/benchmarking.md`](../benchmarking.md)'s Wan2.2 5B rows for the
-numbers. (An earlier smoke test only ran 3 sampling steps at the harness's
-now-superseded `--tensor_parallel_size 1 --sequence_parallel_size 4`
-default, which OOMs at the full step count once `--dit_dtype float32` is
-applied — see the note above.)
-
 ---
 
 ## T2V (A14B) — `generate_wan2_2_t2v_a14b.py`
@@ -168,8 +157,9 @@ very first thing tried here and reliably ran out of HBM.
 its weights *and* the token sequence sharded at once, e.g.
 `--tensor_parallel_size 2 --sequence_parallel_size 2` on this repo's 4
 chips. This measurably helps: it's what let A14B run at a noticeably larger
-resolution than either trick alone reached here (see Status below), though
-still short of the reference's full 1280x720x81 on just 4 chips.
+resolution than either trick alone reached here, though still short of the
+reference's full 1280x720x81 on just 4 chips (see the `--num_frames` row in
+the CLI reference below for the actual reachable resolution).
 
 Unlike TI2V-5B, A14B reuses **Wan2.1's causal VAE** (`Wan2.1_VAE.pth`,
 `vae_stride=(4,8,8)`) — the checkpoint repo ships that file, not
@@ -211,34 +201,6 @@ python examples/generate_wan2_2_t2v_a14b.py \
 | `--output_path` | `output_video.mp4` | With multiple prompts, each saved as `<output_path>_<i>.mp4`. |
 | `--offload_dit_weights` | off | Per-layer weight offloading, composed with the two-expert MoE switch above **and** with `--sequence_parallel_size > 1` — ported directly from `generate_wan2_2_i2v_a14b.py`'s identical flag (T2V has no image conditioning to thread through, so the offloading mechanics are unchanged). See [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22). |
 | `--offload_chunk_size` | `1` | Number of consecutive blocks grouped per offloaded HBM buffer when `--offload_dit_weights` is set. Must divide 40. At native 720x1280, only `1` fits (per-token activation memory dominates at this token count, same finding as I2V's native-720P row). At 480x832, `10` fits (same tradeoff as I2V's own 480P row) — see [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22) for both. |
-
-**Status:** verified end-to-end against the real T2V-A14B checkpoints (both
-experts, weight shapes/keys confirmed to exactly match
-`T2V_A14B_CONFIG`'s param tree) on a 4-chip v4 slice. Full native resolution
-(1280x720) is reachable with `--tensor_parallel_size 2
---sequence_parallel_size 2 --offload_dit_weights --offload_chunk_size 1`,
-reduced to `--num_frames 33` (binary-searched down from the reference's 81 —
-required HLO temporaries don't shrink smoothly with frame count on this
-hardware, see [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22) for
-the exact numbers found along the way) — both experts confirmed to engage
-correctly (high_noise_model for the earlier steps, low_noise_model for the
-rest, matching `boundary=0.875` at `shift=12.0`), with sane, coherent output
-(frame pixel mean/std checked, no sign of the collapsed/corrupted signature
-associated with an under-precision DiT). 5 full benchmark runs at this
-config: 33.7s compile, 2321.9s generation, 46.4s/step, 18.1GB peak HBM/chip —
-see [`docs/benchmarking.md`](../benchmarking.md) for the row. At 480P
-(`--height 480 --width 832`), the same `--tensor_parallel_size 2
---sequence_parallel_size 2 --offload_dit_weights` config fits the full 81
-frames with a larger `--offload_chunk_size 10` (smaller token count leaves
-more HBM headroom, same tradeoff as I2V's own 480P row) — 65.8s compile,
-2159.1s generation, 43.2s/step, 28.4GB peak HBM/chip. Full 81-frame
-native 720P remains out of reach on this 4-chip machine even with offloading
-and sequence parallelism combined, for the same reason as I2V's identical
-limitation (per-token activation memory, not weight residency, is the
-binding constraint — see
-[`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22)); more
-chips should close the remaining gap, since `--tensor_parallel_size`/
-`--sequence_parallel_size` both scale with however many chips are available.
 
 ---
 
@@ -285,7 +247,54 @@ python examples/generate_wan2_2_i2v_a14b.py \
 | `--num_steps` | `40` | Reference i2v default (vs. 50 for t2v). |
 | `--shift` | `5.0` | Reference default for A14B I2V (vs. 12.0 for T2V). |
 | `--max_area` | `720*1280` | Bounds output pixel count; same `compute_latent_grid` as Wan2.1 I2V. At 480P (`480*832`) the full reference 81 frames fits this repo's 4-chip machine; at native 720P, only a reduced 33 frames does — see the `--num_frames` row. |
-| `--num_frames` | `81` | Output frame count. At 480P, the full reference count (`81`) fits with `--offload_dit_weights --offload_chunk_size 10 --tensor_parallel_size 2 --sequence_parallel_size 2` — measured row in [`docs/benchmarking.md`](../benchmarking.md). At native 720P, the full 81 doesn't fit even with offloading + sequence parallelism — reduce to `33` (the largest that does; verified working, see Status below and [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22) for the memory analysis). |
+| `--num_frames` | `81` | Output frame count. At 480P, the full reference count (`81`) fits with `--offload_dit_weights --offload_chunk_size 10 --tensor_parallel_size 2 --sequence_parallel_size 2` — measured row in [`docs/benchmarking.md`](../benchmarking.md). At native 720P, the full 81 doesn't fit even with offloading + sequence parallelism — reduce to `33` (the largest that does; verified working — see [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22) for the memory analysis). |
 | `--output_path` | `output_video.mp4` | With `dp_size > 1`, each replica's sample is saved as `<output_path>_<i>.mp4`. |
 | `--offload_dit_weights` | off | Per-layer weight offloading (see `generate_wan2_1_t2v.py`'s identical flag), composed with the two-expert MoE switch above **and** with `--sequence_parallel_size > 1` (unlike Wan2.1's identical flag) — needed here because A14B's per-*token* modulation makes activation memory, not just weight residency, a real constraint at native resolutions. See [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22) for the full memory analysis. |
 | `--offload_chunk_size` | `1` | Number of consecutive blocks grouped per offloaded HBM buffer when `--offload_dit_weights` is set. Must divide 40. Swept at 480P/81 frames: `1`, `2`, `4`, `10` all fit, `20` OOMs (needs 5.8GB against 3.7GB free) — `10` is the largest that fits and is what the 480P benchmarking row uses. At native 720P/33 frames, HBM headroom is much tighter (per-token activation memory dominates there) and only `1` fits. See [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22). |
+
+---
+
+## Architecture notes
+
+- **DiT (`vidax.models.wan.wan2_2.dit.WanDiT`):** config-driven from a named
+  preset in `vidax.models.wan.wan2_2.configs`
+  (`TI2V_5B_CONFIG`/`T2V_A14B_CONFIG`/`I2V_A14B_CONFIG`) — one architecture
+  identical across all three; size and, for I2V, `in_dim` (extra mask+
+  latent conditioning channels) are the only differences. Same interleaved-
+  pair RoPE convention as Wan2.1, but AdaLN modulation is **per-token**, not
+  per-sample (`e0` is `(B, seq_len, 6, dim)`, not Wan2.1's `(B, 6, dim)`) —
+  the real driver behind needing sequence parallelism at all for this
+  family (see [`docs/hardware_and_sharding.md`](../hardware_and_sharding.md)'s
+  "Where Megatron TP stops being enough").
+- **VAE:** TI2V-5B uses its own `WanVAEDecoder`/`WanVAEEncoder`
+  (`vidax.models.wan.wan2_2.vae`, `Wan2.2_VAE.pth`) — architecturally
+  different from Wan2.1's (48-channel latent space, 2x2 pixel-patchify
+  wrapping, 16x spatial / 4x temporal compression, not the same class at
+  all). A14B instead reuses **Wan2.1's** causal VAE verbatim
+  (`vidax.models.wan.wan2_1.vae`, `Wan2.1_VAE.pth`) — the checkpoint repo
+  ships that file, not `Wan2.2_VAE.pth`.
+- **MoE expert switching (A14B only):** two separately-checkpointed 14B
+  `WanDiT`s (`high_noise_model`/`low_noise_model`), switched per sampling
+  step by comparing that step's timestep against `--boundary *
+  num_train_timesteps` — a plain Python-level choice of which params
+  pytree to feed the same jitted `single_step`, not a traced/data-dependent
+  branch. Only one expert is ever device-resident at a time (see [T2V
+  (A14B)](#t2v-a14b--generate_wan2_2_t2v_a14bpy) above).
+- **I2V conditioning (A14B only):** unlike Wan2.1's I2V-14B, A14B has no
+  CLIP vision cross-attention branch at all — image conditioning is purely
+  a mask+VAE-latent `y` concatenated onto the noisy latent's channel axis
+  before the DiT call (`in_dim=36` = 16 noise channels + 20 conditioning
+  channels). TI2V-5B's own i2v is different again: no extra DiT input at
+  all, just substituting the known conditioning frame's latent back into
+  `x` between sampling steps (driven by a per-token timestep of 0 for that
+  frame).
+- **Text encoder (`vidax.models.wan.common.t5.T5Encoder`):** UMT5-XXL,
+  byte-identical checkpoint format to Wan2.1 (`map_wan_t5_keys`).
+- **Scheduler (`vidax.schedulers.flow_match.RectifiedFlowScheduler`):** same
+  scheduler as Wan2.1, unmodified.
+- **Checkpoint translator (`vidax.translator.mappings.wan2_2`/
+  `wan2_2_diffusers`):** TI2V-5B and A14B both use the plain
+  `vidax.translator.mappings.wan2_2` mapper; Cosmos3 reuses Wan2.2's VAE
+  through a separate `wan2_2_diffusers` mapper for `diffusers`' different
+  checkpoint *layout* of the same architecture (see
+  [`docs/models/cosmos3.md`](cosmos3.md#architecture-notes)).

@@ -1,4 +1,10 @@
-# Wan2.1: the fp32/bf16 precision bug behind corrupted large-scale I2V output
+# Wan2.1 debugging notes
+
+Findings from porting/scaling Wan2.1 that are worth keeping in mind beyond
+the specific fix — precision handling and a sequence-parallel correctness
+bug in code Wan2.1 shares with Wan2.2.
+
+## The fp32/bf16 precision bug behind corrupted large-scale I2V output
 
 Wan2.1 I2V-14B produced severely corrupted output (hazy, flat, low-detail —
 not noise, not a crash) specifically at large token counts (native 720P,
@@ -13,7 +19,7 @@ general sharding/JIT conventions this investigation also touched (Megatron
 TP vs. sequence parallelism, flash-attention int overflow, JIT compilation
 cache) — this doc covers only the precision bug itself.
 
-## Symptom
+### Symptom
 
 - Native 720P, 81 frames (the model's actual training config): severely
   corrupted output — hazy, flat, low-detail, visually obviously wrong.
@@ -27,7 +33,7 @@ cache) — this doc covers only the precision bug itself.
   all considered and directly ruled out (by source inspection or targeted
   ablation) before the real cause was found.
 
-## Root cause
+### Root cause
 
 The PyTorch reference (`refs/Wan2.1-main`) wraps `WanAttentionBlock.forward`'s
 residual updates in `amp.autocast(dtype=torch.float32)`, and never casts
@@ -57,7 +63,7 @@ research should have caught by reading the autocast wrapping directly, but
 didn't — a documented "we use bf16 for weights and compute" assumption
 that was never checked against the reference's actual dtype handling.
 
-## Why this took three separate fixes, not one
+### Why this took three separate fixes, not one
 
 Testing an initial single fix repeatedly produced **byte-identical output**
 to the broken baseline (same mean/std/max, same MP4 file size) despite real
@@ -72,7 +78,7 @@ the following bugs fixed *together* before any visible change would occur,
 since fixing any one or two alone left a re-quantization point that erased
 the others' effect.
 
-### Bug 1 — DiT weights rounded to bf16 at checkpoint load
+#### Bug 1 — DiT weights rounded to bf16 at checkpoint load
 
 `cast_to_dtype(dit_params, dtype)` in both example scripts unconditionally
 rounded the native-fp32 checkpoint weights down to bf16 at load time,
@@ -85,7 +91,7 @@ opt-in, preserving the ability to trade this precision fix away for memory
 when it isn't needed (see "Memory cost" below) — the fix is a default
 change, not a removed option.
 
-### Bug 2 — `compute_dtype` didn't track `dit_dtype`
+#### Bug 2 — `compute_dtype` didn't track `dit_dtype`
 
 With Bug 1 fixed alone, output didn't change at all. A direct sanity test
 confirmed `nn.Dense` given an explicit bf16-cast input plus fp32 params
@@ -103,7 +109,7 @@ input to them was pre-quantized away. Fixed by adding an explicit
 threaded from the calling script's `dit_dtype`, decoupled entirely from the
 general pipeline dtype.
 
-### Bug 3 — latents/output re-quantized every sampling step
+#### Bug 3 — latents/output re-quantized every sampling step
 
 With Bugs 1+2 fixed together, output *still* didn't change. Diagnosed by
 reproducing the one config already known to work from earlier ad hoc
@@ -123,7 +129,7 @@ the reference's own persistently-float32 residual stream) and by changing
 `dit_dtype` instead of the general `dtype` — since `y` gets concatenated
 directly onto `latents` before any Dense layer and must match.
 
-## The actual fix, structurally
+### The actual fix, structurally
 
 `WanDiTBlock` (`src/vidax/models/wan/wan2_1/dit.py`):
 - `compute_dtype: jnp.dtype = jnp.bfloat16` field, decoupled from the
@@ -153,7 +159,7 @@ both its T2V and I2V `argparse.Namespace(...)` constructions — it builds
 `Namespace` objects by hand rather than parsing CLI args, so it doesn't
 automatically inherit new argparse defaults from the example scripts.
 
-## Verification
+### Verification
 
 Confirmed on real production code (not a synthetic harness), both scales:
 native 720P/81 frames (previously corrupted — std ~60-63 after the fix,
@@ -162,7 +168,7 @@ previous, already-correct behavior). A `--dit_dtype bfloat16`
 backward-compatibility smoke test (the pre-fix behavior, now opt-in) also
 passed cleanly, confirming the option is preserved, not removed.
 
-## Memory cost and current limits
+### Memory cost and current limits
 
 Keeping DiT weights at float32 instead of bf16 roughly doubles their
 resident weight memory (the actual multiplier depends on which parameters;
@@ -183,3 +189,60 @@ further across chips this machine doesn't have) that fixes this exact
 problem — implemented and confirmed working (`--offload_dit_weights`), see
 that doc and [`docs/benchmarking.md`](../benchmarking.md) for the measured
 result.
+
+## Row-parallel `psum` double-counted `nn.Dense`'s bias under `sequence_parallel`
+
+Found while getting Wan2.2 A14B working with `--offload_dit_weights` and
+`--sequence_parallel_size > 1` combined (see
+[`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22)), but the
+bug lived in code Wan2.1 and Wan2.2 share
+(`vidax.models.wan.common.dit_layers.attend`'s output projection and both
+models' DiT-block FFN down-projection), so it affected Wan2.1's own
+sequence-parallel path too, not just A14B.
+
+### Symptom
+
+Composing offloading with `--sequence_parallel_size > 1` produced visibly
+wrong output — a blocky/tiled, spatially-discontinuous artifact, reproducible
+even at a tiny 96x144 resolution (not a scale-specific numerical issue, unlike
+the precision bug above). `--tensor_parallel_size 4` with
+`--offload_dit_weights` alone (no sequence parallelism) produced clean output
+at the same resolution, isolating the cause to `sequence_parallel` itself,
+not to offloading — offloading merely exposed a pre-existing bug by being the
+first thing to combine sequence parallelism with a real checkpoint's
+non-zero weights (random-init tests never triggered it, see Root cause).
+
+### Root cause
+
+`attend`'s output projection and every DiT block's FFN down-projection are
+row-parallel under `sequence_parallel` — each device holds a slice of the
+contraction dimension, computes a partial output, and the code sums those
+partial outputs via `jax.lax.psum`. But `nn.Dense` adds its bias *inside*
+its own call, once per device — the bias is fully replicated, not sharded —
+so naively summing `tp_size` devices' outputs summed `tp_size` copies of the
+bias instead of one. Invisible with Flax's zero-initialized bias (every
+synthetic/random-init test, which is exactly why this passed every
+correctness check before real weights were used), but a real, systematic
+per-layer additive error with real trained (non-zero) biases, injected at 3
+row-parallel calls per block × 40 blocks, compounding through the residual
+stream (~3% divergence at 1 real block, ~83% at the full 40-layer
+checkpoint).
+
+### Fix
+
+`vidax.models.wan.common.dit_layers.psum_row_parallel`: subtracts the bias
+before the `psum` and adds exactly one copy back after — a true no-op
+whenever `sequence_parallel` is off or `tp` has size 1, so it's safe to use
+unconditionally in place of the old bare `jax.lax.psum` calls. Applied to
+`attend`'s output projection (shared by Wan2.1 and Wan2.2) and both models'
+FFN down-projection. Cosmos-Predict2.5's DiT is unaffected — its own
+row-parallel projections are declared `use_bias=False`, no bias to
+double-count — so `vidax.models.cosmos2_5.dit_layers.cosmos_attend` still
+calls plain `jax.lax.psum` directly.
+
+### Verification
+
+The same isolated-forward-pass check used to find the bug dropped from ~83%
+to ~0.18% divergence at 1 layer, ~1.65% at 8 layers after the fix — no
+longer compounding. End-to-end generation at the previously-broken config
+now produces clean, coherent output.

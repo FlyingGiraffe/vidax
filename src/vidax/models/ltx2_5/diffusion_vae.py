@@ -10,23 +10,22 @@ layers,swiglu,qkv,rope_math,det_attn_rope,combined/*}}.py`, for the real
 `docs/lessons/ltx2_5_debugging.md` for the full port/verification writeup
 and for why this decoder exists at all (the conv-decoder VAE in
 `vidax.models.ltx2_5.vae` has a real, checkpoint-inherent periodic
-artifact). **This decoder reduces that
-artifact by roughly half (proportionally), it does not eliminate it** --
-confirmed real, checkpoint-inherent behavior of the actual reference
-`NADiffusionDecoder` too (not a porting bug in either VAE), verified by
-directly comparing this port against the real PyTorch reference on the
-same constant-latent diagnostic that found the conv decoder's own artifact
--- see `docs/lessons/ltx2_5_debugging.md`'s "The period-8 artifact is
-checkpoint-inherent here too" entry.
+artifact). **This decoder reduces that artifact by roughly half
+(proportionally), it does not eliminate it** -- confirmed real,
+checkpoint-inherent behavior of the actual reference `NADiffusionDecoder`
+too (not a porting bug in either VAE), verified by directly comparing this
+port against the real PyTorch reference on the same constant-latent
+diagnostic that found the conv decoder's own artifact.
 
 **Scope: single full-volume tile only** -- no NATTEN tile-schedule/blend
 machinery (`diffusion_tiling.py`'s `TilingConfig`/multi-tile pixel blend).
 The reference's own `prepare_tile_schedule(..., tiling_config=None)` already
 degenerates to exactly one untiled full-volume tile, so this is a real,
 supported reference code path, not an approximation -- just not the one
-that lets large resolutions fit in memory (see the plan doc's own
-recommendation to validate single-tile correctness before investing in
-tiling). Because there is no tiling, this module also skips two pieces of
+that lets arbitrarily large resolutions fit in memory (Megatron tensor
+parallelism, not tiling, is what got this port's own reference resolution
+to fit -- see `docs/lessons/ltx2_5_debugging.md`). Because there is no
+tiling, this module also skips two pieces of
 tiling-only machinery entirely: the `chunked`/`dsl_kernels`/Blackwell
 pathways (PyTorch-compile/GPU-specific, no JAX equivalent needed), and the
 det/nested RoPE positional split the reference keeps for `torch.compile`

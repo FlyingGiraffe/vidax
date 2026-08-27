@@ -201,13 +201,9 @@ replica — only the text prompt varies).
 **Verified end-to-end on real weights, both text2world and image2world:
 output is coherent, prompt-matching video** (e.g. a recognizable red panda
 climbing a bamboo stalk for T2V; a stable, identity-preserving subject for
-I2V). Getting there took six real bugs, found only once the port was run
-against real checkpoints — the dominant one was a wrongly-added EDM-style
-preconditioning wrapper borrowed from a reference class this checkpoint's
-training config never actually uses, isolated via a real-photo low-noise
-denoising probe. Full diagnostic writeup, including the other five bugs and
-the ablations that ruled out other hypotheses first, in
-[`docs/lessons/cosmos2_5_debugging.md`](../lessons/cosmos2_5_debugging.md).
+I2V). See
+[`docs/lessons/cosmos2_5_debugging.md`](../lessons/cosmos2_5_debugging.md)
+for the debugging/verification methodology.
 
 - DiT: loading `model_ema_bf16.pt` through the translator mapping and
   comparing every leaf against `CosmosDiT`'s initialized parameter tree
@@ -339,22 +335,8 @@ from a full quality judgment, which still needs the native resolution.
   used directly** (`generate_cosmos2_5.py`'s `compute_velocity`, not the DiT
   itself — sampling-loop orchestration). The noisy latent is passed to the
   DiT unscaled; the timestep passed in is `sigma * num_train_timesteps`
-  (the DiT's own `timestep_scale=0.001` divides this back down internally —
-  see the checkpoint-loading note above); the DiT's raw output (after CFG
-  combination) is fed straight into `FlowUniPCMultistepScheduler.step` as
-  `model_output`, which internally computes `x0 = sample - sigma_t *
-  model_output` — no `c_skip`/`c_out`/`c_in` reconstruction anywhere. An
-  earlier revision of this port wrapped every DiT call in exactly that kind
-  of EDM-style preconditioning transform, borrowed from a reference class
-  (`RectifiedFlowScaling`) that turns out not to apply to this checkpoint at
-  all — see [Status](#status) for the full story. That was, by a wide
-  margin, the largest correctness bug found in this model's port.
-
-## Coming later
-
-**Cosmos 3** is a separate, architecturally unrelated model family (a
-Mixture-of-Transformers, not a DiT continuation of Cosmos-Predict2.5) — see
-[`docs/models/cosmos3.md`](cosmos3.md), now implemented (T2V/I2V).
-
-See the [parity matrix in the root README](../../README.md#-model-support)
-for the up-to-date status across all variants.
+  (the DiT's own `timestep_scale=0.001` divides this back down internally);
+  the DiT's raw output (after CFG combination) is fed straight into
+  `FlowUniPCMultistepScheduler.step` as `model_output`, which internally
+  computes `x0 = sample - sigma_t * model_output` — no
+  `c_skip`/`c_out`/`c_in` reconstruction anywhere.

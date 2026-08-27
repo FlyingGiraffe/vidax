@@ -166,11 +166,19 @@ width, `shard_map` raises a shape mismatch immediately.
    manual `psum` below).
 2. **The manual all-reduce row-parallel layers need.** Outside `shard_map`,
    GSPMD auto-inserts the cross-device sum a row-parallel layer's output
-   needs; inside it, nothing does, so `vidax.models.wan.common.dit_layers
-   .attend` and `vidax.models.cosmos2_5.dit_layers.cosmos_attend`
-   (their shared output projection) and every DiT block's FFN down-
-   projection now call `jax.lax.psum(x, 'tp')` by hand whenever
-   `sequence_parallel` is set — a no-op when `'tp'` has size 1.
+   needs; inside it, nothing does, so every row-parallel output projection
+   and FFN down-projection now sums its per-device partial output by hand
+   whenever `sequence_parallel` is set — a no-op when `'tp'` has size 1.
+   `vidax.models.cosmos2_5.dit_layers.cosmos_attend` calls plain
+   `jax.lax.psum(x, 'tp')` directly (its row-parallel Dense layers are
+   `use_bias=False`); `vidax.models.wan.common.dit_layers.attend` and both
+   Wan DiTs' FFN down-projection instead call
+   `vidax.models.wan.common.dit_layers.psum_row_parallel`, a thin wrapper
+   around the same `psum` that also corrects for `nn.Dense`'s replicated
+   bias otherwise getting summed once per `tp`-way device instead of once
+   — see
+   [`docs/lessons/wan2_1_debugging.md`](lessons/wan2_1_debugging.md#row-parallel-psum-double-counted-nndenses-bias-under-sequence_parallel)
+   for why Wan needs the extra correction and Cosmos doesn't.
 3. **Wan's Q/K-RMSNorm needed more than a shape fix.** It normalizes over
    the *entire* projected `dim` (before splitting into heads) — under TP
    sharding, that axis is now split across devices, so a naive per-device
@@ -342,21 +350,21 @@ sharding/JIT/dtype engineering conventions rather than growing without
 bound as more models are ported. See:
 
 - [`docs/lessons/cosmos2_5_debugging.md`](lessons/cosmos2_5_debugging.md) —
-  six bugs found only against real Cosmos-Predict2.5 checkpoints (tokenizer,
-  RoPE dtype, JAX pytree registration, `jit` static args, dtype promotion,
-  resolution-divisibility), plus three deeper diffusion-correctness bugs
-  behind a "grid of random colors" symptom (unpatchify channel order,
-  per-step recompilation, a missing EDM preconditioning wrapper).
-- [`docs/lessons/wan2_1_precision_debugging.md`](lessons/wan2_1_precision_debugging.md) —
+  a "grid of random colors" output symptom traced to a wrongly-added EDM
+  preconditioning wrapper borrowed from a reference class this checkpoint's
+  training config never actually uses, and the real-photo low-noise
+  denoising probe that found it.
+- [`docs/lessons/wan2_1_debugging.md`](lessons/wan2_1_debugging.md) —
   three compounding bugs (checkpoint weight rounding, `compute_dtype`/
   `dit_dtype` decoupling, latents/output re-quantization) behind severely
-  corrupted Wan2.1 I2V output at large token counts, and why it only showed
-  up at scale.
+  corrupted Wan2.1 I2V output at large token counts and why it only showed
+  up at scale, plus the row-parallel `psum` double-counting `nn.Dense`'s
+  bias under `sequence_parallel` in code Wan2.1 and Wan2.2 share (found
+  while combining offloading with sequence parallelism on A14B).
 - [`docs/lessons/cosmos3_debugging.md`](lessons/cosmos3_debugging.md) —
-  three bugs found only against real Cosmos3-Nano/Edge checkpoints (a
-  padding-length mRoPE offset bug, Edge silently running at Nano's
-  resolution/scheduler defaults, and both models needing JSON-structured
-  prompts).
+  Edge silently running at Nano's resolution/scheduler defaults (wrong
+  config, no error, just degraded output), and both models needing
+  JSON-structured prompts for good quality.
 - [`docs/lessons/ltx_video_debugging.md`](lessons/ltx_video_debugging.md) —
   two bugs caught by bit-exact numerical comparison against the actual
   reference PyTorch implementation (a throwaway conda env, not the main
@@ -365,16 +373,16 @@ bound as more models are ported. See:
   order than its own internal `PixelShuffleND`, and the decoder's
   `causal_decoder=False` config meaning symmetric (not causal) temporal
   padding.
-- [`docs/lessons/ltx2_5_debugging.md`](lessons/ltx2_5_debugging.md) — six
-  bugs/gotchas found porting LTX-2.5's DiT/VAE/embeddings-connector/
-  Gemma-4: an `lax.conv_general_dilated` padding-spec quirk that
-  disagreed with the reference even at `precision=HIGHEST`, the VAE
-  encoder's real (deterministic, self-normalizing, mean-only) return
-  contract, `jnp.tanh` returning NaN at float64 on this TPU backend for
-  large-magnitude inputs, a corrupted-on-load connector parameter, a
-  hardcoded-`float32` softmax truncation, and a mask-format mismatch
-  between the embeddings connector and the DiT caught in the first real
-  end-to-end run.
+- [`docs/lessons/ltx2_5_debugging.md`](lessons/ltx2_5_debugging.md) —
+  findings from porting LTX-2.5 that generalize beyond this one model: a
+  fully-fused 48-block `jax.jit` trace not freeing per-block activations
+  (and per-layer weight offloading fixing that as a side effect), AdaLN
+  modulation tables shipped at float32 in an otherwise-bf16 checkpoint, a
+  periodic VAE-decoder artifact that turned out checkpoint-inherent rather
+  than a porting bug, a silently under-scaled conditioning signal that
+  produced prompt-disconnected video with no crash to flag it, and the
+  multi-stage memory/compile-time story behind the NATTEN-based diffusion
+  VAE decoder.
 - [`docs/weight_offloading.md`](weight_offloading.md) — per-layer weight
   offloading (host RAM, streamed into a small fixed-shape HBM buffer one
   block at a time), implemented for every DiT in this repo that doesn't fit
@@ -392,7 +400,3 @@ bound as more models are ported. See:
 | DiT weight cast OOMs on-device | float32 + bfloat16 copies coexist during an on-device cast | Cast on the host (numpy) before `device_put` |
 | i2v sequence-parallel chunking fails for some images | Image-derived resolution doesn't guarantee divisible token count | Grow width in 32px steps until divisible |
 | Final decode OOMs only when i2v conditioning is also present | On-device concatenate of all chunks competes with other device-resident state | Move each chunk to host immediately, concatenate on host |
-
-Model-specific postmortems (Cosmos-Predict2.5's real-checkpoint bugs, the
-Wan2.1 fp32/bf16 precision corruption) have their own summary tables in
-[`docs/lessons/`](lessons/) — see the section above.

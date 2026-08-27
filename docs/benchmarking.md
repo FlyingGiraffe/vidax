@@ -65,8 +65,10 @@ when configs are genuinely identical (documented per-row).
 | Wan2.1 | 14B (720P) | I2V | v4-8 | 4/1 | 832x1104\* | 81 | 40 | bf16 | fp32 | chunk 20 | 131.3 | 5090.0 | 127.2 | 32.7 |
 | Wan2.1 | 14B (480P) | I2V | v4-8 | 4/1 | 544x720\* | 81 | 40 | bf16 | bf16 | - | 150.3 | 1125.3 | 28.1 | 22.1 |
 | Wan2.1 | 1.3B | T2V | v4-8 | 4/1 | 480x832 | 81 | 50 | bf16 | bf16 | - | 85.4 | 348.3 | 7.0 | 10.2 |
-| LTX-2.5 | 22B (dev) | T2V | v4-8 | 4/- | 1216x704 | 121 | 30 | bf16 | bf16\*\* | chunk 8 | 88.6 | 215.2 | 7.2 | 16.7 |
-| LTX-2.5 | 22B (distilled) | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16\*\* | chunk 8 | 87.5 | 37.4 | 4.7 | 15.3 |
+| LTX-2.5 | 22B (dev), conv VAE | T2V | v4-8 | 4/- | 1216x704 | 121 | 30 | bf16 | bf16\*\* | chunk 8 | 87.7 | 217.9 | 7.3 | 16.7 |
+| LTX-2.5 | 22B (distilled), conv VAE | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16\*\* | chunk 8 | 87.9 | 37.3 | 4.7 | 15.3 |
+| LTX-2.5 | 22B (dev), diffusion VAE | T2V | v4-8 | 4/- | 1216x704 | 121 | 30 | bf16 | bf16\*\* | chunk 8 | 479.5 | 2859.6 | 95.3\*\*\* | 16.1 |
+| LTX-2.5 | 22B (distilled), diffusion VAE | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16\*\* | chunk 8 | 478.2 | 2680.8 | 335.1\*\*\* | 14.8 |
 | LTX-Video (0.9.8) | 13B (dev) | T2V | v4-8 | 4/- | 1216x704 | 121 | 30 | bf16 | bf16 | - | 134.7 | 156.0 | 5.2 | 15.3 |
 | LTX-Video (0.9.8) | 13B (distilled) | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16 | - | 136.4 | 104.2 | 13.0 | 15.3 |
 | LTX-Video (0.9.8) | 2B (distilled) | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16 | - | 83.5 | 47.3 | 5.9 | 8.8 |
@@ -97,10 +99,7 @@ headroom for transfer/compute overlap — larger where there's HBM to spare
 (A14B's 480P rows, `chunk 10`), forced down to `1` where activation memory
 already consumes most of the budget (native-720P rows). See
 [`docs/weight_offloading.md`](weight_offloading.md) for the full chunk-size
-sweep and every model's numbers, and for a real correctness bug found while
-combining offloading with sequence parallelism (`nn.Dense` bias
-double-counted under row-parallel `psum` — fixed in
-[`psum_row_parallel`](../src/vidax/models/wan/common/dit_layers.py)).
+sweep and every model's numbers.
 
 Wan2.1's I2V-14B ships as two checkpoints tuned for different resolution
 ranges (`480P`/`720P`, same architecture, different weights, different
@@ -126,11 +125,22 @@ its own convention (see the "Metrics" section above); it isn't literally
 embeddings connector) is fully bf16, matching their checkpoints exactly —
 confirmed by auditing every tensor's actual stored dtype, not assumed.
 
+\*\*\* The diffusion-VAE rows' "Per-step (s)" is not a fair per-DiT-step
+cost — it's `Generation (s) / Steps`, and generation time here is
+dominated by the VAE decode itself (a one-time cost per generation, not
+per DiT step), not the DiT sampling loop. Compare "Generation (s)"
+directly between VAE variants instead — the DiT sampling cost itself is
+essentially unchanged from the conv-VAE rows (same DiT, same steps); the
+diffusion VAE decode step alone (single full-volume NA tile, no tiling
+yet — see `docs/models/ltx2_5.md`) accounts for the bulk of the
+difference, dominated by its own compile time (`~478s`) more than actual
+decode compute. See `docs/lessons/ltx2_5_debugging.md`'s "Diffusion
+(NATTEN) VAE decoder: the full compile-time and memory story" for why.
+
 All Wan2.1 rows use `fp32` DiT weights (`--dit_dtype float32`): the
 reference keeps its residual stream in float32 even under bf16 autocast, and
-rounding weights to bf16 (this repo's old default) causes visible corruption
-at large token counts. See
-[`docs/lessons/wan2_1_precision_debugging.md`](lessons/wan2_1_precision_debugging.md).
+rounding weights to bf16 causes visible corruption at large token counts. See
+[`docs/lessons/wan2_1_debugging.md`](lessons/wan2_1_debugging.md).
 
 ## Weight-offloading chunk-size sweep
 
@@ -156,10 +166,12 @@ don't help more, and every other model's chunk-size tradeoff.
 
 ---
 
-See [`docs/models/wan2_1.md`](models/wan2_1.md)/
-[`docs/models/wan2_2.md`](models/wan2_2.md)/
+See [`docs/models/cosmos3.md`](models/cosmos3.md)/
 [`docs/models/cosmos2_5.md`](models/cosmos2_5.md)/
-[`docs/models/cosmos3.md`](models/cosmos3.md) for per-model implementation
-and verification status, and
+[`docs/models/wan2_2.md`](models/wan2_2.md)/
+[`docs/models/wan2_1.md`](models/wan2_1.md)/
+[`docs/models/ltx2_5.md`](models/ltx2_5.md)/
+[`docs/models/ltx_video.md`](models/ltx_video.md) for per-model
+implementation and verification status, and
 [`docs/hardware_and_sharding.md`](hardware_and_sharding.md) for the
 sharding/parallelism engineering behind the Peak HBM/chip numbers above.

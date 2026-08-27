@@ -109,7 +109,7 @@ python examples/generate_wan2_1_t2v.py \
 | `--tensor_parallel_size` | `1` | Devices to Megatron-shard attention heads / FFN channels across (see [hardware doc](../hardware_and_sharding.md)). Must divide `num_devices` and `num_heads` (12 for the 1.3B DiT, 40 for the 14B DiT, 64 for T5). `--tensor_parallel_size 4` (4-way TP × 2-way DP) is a reasonable start on a v4-8 at full 1280×720 for 1.3B; the 14B model was verified with `--tensor_parallel_size 4` on a v4-8. Raise it if you hit HBM OOM. |
 | `--sequence_parallel_size` | `1` | Devices to shard the DiT's token sequence itself across (DeepSpeed-Ulysses), independent of `--tensor_parallel_size`'s weight-sharding — the two compose freely (see [hardware doc](../hardware_and_sharding.md#3-sequence-parallelism-deepspeed-ulysses)'s "Combining with Megatron TP"). Not needed at 1.3B scale; may help the 14B model at higher resolutions. |
 | `--dtype` | `bfloat16` | `float32` \| `float16` \| `bfloat16`. Compute dtype for T5/VAE, and for the DiT's *activations* specifically (not its weights — see `--dit_dtype`). `float16` will fail at runtime — TPU's XLA backend doesn't implement `float16` matmuls. |
-| `--dit_dtype` | `float32` | Cast target for the DiT's *weights*, independent of `--dtype`. Defaults to `float32` because the reference keeps its residual stream in float32 for virtually the entire network even under bf16 autocast, and the released checkpoints ship natively float32 — rounding them to bf16 (the old default here) causes real, visually obvious corruption at large token counts. See [Precision: fp32 DiT weights](#precision-fp32-dit-weights) below. Pass `--dit_dtype bfloat16` to opt back into the old, cheaper-but-lossy-at-scale behavior. |
+| `--dit_dtype` | `float32` | Cast target for the DiT's *weights*, independent of `--dtype`. Defaults to `float32` because the reference keeps its residual stream in float32 for virtually the entire network even under bf16 autocast, and the released checkpoints ship natively float32 — rounding them to bf16 causes real, visually obvious corruption at large token counts. See [Precision: fp32 DiT weights](#precision-fp32-dit-weights) below. Pass `--dit_dtype bfloat16` for cheaper-but-lossy-at-scale behavior. |
 | `--offload_dit_weights` | off | Keep the DiT's per-block weights host-resident, offloading `--offload_chunk_size` blocks' worth into HBM at a time during the sampling loop, instead of the whole tree staying HBM-resident for the entire script (the same idea as DeepSpeed's ZeRO-Offload / diffusers' `enable_sequential_cpu_offload`, applied per-layer here). Needed at native 720P on this repo's 4-chip machine (the DiT's own compute already fits fully resident there; a fully-resident DiT just leaves no headroom for VAE decode right after). Not needed at 480P. Has a real throughput cost even at the best-measured chunk size (~5x slower per step than 480P) — see [`docs/weight_offloading.md`](../weight_offloading.md). Not implemented together with `--sequence_parallel_size > 1`. |
 | `--offload_chunk_size` | `1` | Number of consecutive DiT blocks grouped into one offloaded HBM buffer / `jax.jit` compile, when `--offload_dit_weights` is set. Must divide `num_layers` (30 for 1.3B, 40 for 14B). Raising it trades some resident-memory headroom for fewer, larger transfers — `docs/benchmarking.md`'s own native-720P rows use `20` (confirmed with the full 5-run methodology: ~5-8% faster than the default `1`, at 23.0GB/chip for T2V and 32.7GB/chip for I2V — the latter close to this chip's real ceiling), see [`docs/weight_offloading.md`](../weight_offloading.md)'s chunk-size sweep for the full picture and every chunk size measured. |
 | `--seed` | `0` | Initial noise seed. |
@@ -225,14 +225,7 @@ projection (`WanDiT`'s `model_type="i2v"` path).
 **Status:** verified end-to-end against the real I2V-14B/VAE/T5/CLIP
 checkpoints for **both** the 480P and 720P checkpoints, output confirmed
 coherent for each at its own resolution (see
-[`docs/benchmarking.md`](../benchmarking.md) for measured numbers). The
-first real run against these checkpoints surfaced and fixed three
-pre-existing bugs specific to the image-conditioning path, never before
-exercised against real weights: a wrong `WanVAEEncoder` method call, a wrong
-`temperal_downsample` default (Wan2.1's actual `(False, True, True)` vs. the
-class default's `(True, True, False)`), and the 480P checkpoint silently
-running at the 720P checkpoint's `--shift`/`--max_area` defaults — `--shift`
-now auto-selects `3.0` at 480P scale (see the CLI reference below).
+[`docs/benchmarking.md`](../benchmarking.md) for measured numbers).
 
 480P is verified coherent under the fp32-DiT-weights default with no
 special handling (smaller token count, fits comfortably fully resident).
@@ -250,25 +243,21 @@ for the mechanism and its real (non-trivial) throughput cost, and
 ### Precision: fp32 DiT weights
 
 Wan2.1's DiT weights default to `--dit_dtype float32`, not `bfloat16` —
-different from every other model in this repo, and different from this
-script's own earlier default. The reference implementation's checkpoints
-ship natively as float32 on disk, and `WanAttentionBlock.forward` wraps its
-residual updates in `amp.autocast(dtype=torch.float32)` without ever
-casting back down — so the residual stream stays float32 for virtually the
-entire 40-layer network, with bf16 autocast applied only transiently to
-individual matmul/conv ops, never to the stored weights or the
-accumulating residual. This repo's implementation originally treated
-Wan2.1 like every other bf16-weights model (round the checkpoint to bf16
-at load, keep the residual stream in bf16 throughout) — correct-looking
-and fine at most scales, but it compounds into real, visually obvious
+different from every other model in this repo. The reference
+implementation's checkpoints ship natively as float32 on disk, and
+`WanAttentionBlock.forward` wraps its residual updates in
+`amp.autocast(dtype=torch.float32)` without ever casting back down — so the
+residual stream stays float32 for virtually the entire 40-layer network,
+with bf16 autocast applied only transiently to individual matmul/conv ops,
+never to the stored weights or the accumulating residual. `WanDiTBlock`/
+`WanDiT` matches this: weights and the residual stream stay float32
+throughout, downcasting to bf16 only transiently, immediately before each
+sub-layer's matmul, then back to float32 immediately after, for the
+residual add. Running the DiT weights/residual stream in bf16 throughout
+instead (`--dit_dtype bfloat16`) compounds into real, visually obvious
 output corruption (hazy, flat, low-detail) specifically at large token
-counts (native 720P, 81 frames), since that's where 40 layers' worth of
-bf16 rounding error in a long chain of residual additions finally becomes
-significant. Fixed by keeping DiT weights and the residual stream at
-float32 throughout, matching the reference's actual dtype handling exactly
-— `WanDiTBlock`/`WanDiT` now downcast to bf16 only transiently, immediately
-before each sub-layer's matmul, then back to float32 immediately after, for
-the residual add.
+counts (native 720P, 81 frames) — the more layers' worth of bf16 rounding
+error accumulates through the residual chain, the more it shows.
 
 `--dit_dtype bfloat16` remains fully supported as an explicit opt-in
 (useful for memory-constrained runs at smaller/safer token counts, where
@@ -277,17 +266,6 @@ the corruption doesn't show up), decoupled from the general `--dtype` flag
 cheap and correct to run in bf16). The memory cost of the new default is
 real: roughly double the DiT's resident weight memory versus bf16, which is
 the direct cause of I2V-14B-720P's OOM at native resolution before
-`--offload_dit_weights` (see above). Full investigation — including why
-this took three compounding bugs (checkpoint rounding, a `compute_dtype`/
-`dit_dtype` decoupling bug, and per-step latent re-quantization) rather than
-one to actually fix — in
-[`docs/lessons/wan2_1_precision_debugging.md`](../lessons/wan2_1_precision_debugging.md).
-
----
-
-See [`docs/models/wan2_2.md`](wan2_2.md) for Wan2.2 (TI2V-5B, A14B),
-[`docs/models/cosmos2_5.md`](cosmos2_5.md) for Cosmos-Predict2.5, and
-[`docs/models/cosmos3.md`](cosmos3.md) for Cosmos 3.
-
-See the [Model Support table in the root README](../../README.md#-model-support)
-for the up-to-date status across all variants.
+`--offload_dit_weights` (see above). See
+[`docs/lessons/wan2_1_debugging.md`](../lessons/wan2_1_debugging.md)
+for the full investigation.

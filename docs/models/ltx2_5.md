@@ -114,14 +114,17 @@ python examples/generate_ltx2_5.py \
 shards the DiT's, the connector's, and Gemma-4's attention heads/FFN
 channels via `vidax.core.sharding.shard_wan_params`. Unlike LTX-Video
 (where TP was optional at small scale), **no `sharding.py` changes were
-needed** for this port: LTX-2.5's DiT/connector submodule names
-(`to_q`/`to_k`/`to_v`/`to_out_0`/`ff_proj`/`ff_out`) and Gemma-4's
-(`q_proj`/`k_proj`/`v_proj`/`o_proj`/`gate_proj`/`up_proj`/`down_proj`)
-already matched the existing whitelist from LTX-Video/Reason1/Cosmos3.
-TP is required, not optional, at any real scale: the 22B DiT's bf16
-weights alone (~44GB) and the 12B Gemma encoder's (~24GB) don't fit
-replicated on a single TPU v4 chip's ~32GB HBM. There is no
-`--sequence_parallel_size` (same gap as LTX-Video's own port).
+needed for the DiT/connector/Gemma-4 side of this port**: LTX-2.5's
+DiT/connector submodule names (`to_q`/`to_k`/`to_v`/`to_out_0`/`ff_proj`/
+`ff_out`) and Gemma-4's (`q_proj`/`k_proj`/`v_proj`/`o_proj`/`gate_proj`/
+`up_proj`/`down_proj`) already matched the existing whitelist from
+LTX-Video/Reason1/Cosmos3. TP is required, not optional, at any real
+scale: the 22B DiT's bf16 weights alone (~44GB) and the 12B Gemma
+encoder's (~24GB) don't fit replicated on a single TPU v4 chip's ~32GB
+HBM. There is no `--sequence_parallel_size` (same gap as LTX-Video's own
+port). (`--vae_variant diffusion` *does* TP the VAE too, and needed two
+small `sharding.py` additions for that — see the Diffusion VAE decoder
+architecture note below.)
 
 ### CLI reference
 
@@ -129,7 +132,7 @@ replicated on a single TPU v4 chip's ~32GB HBM. There is no
 | --- | --- | --- |
 | `--dit_checkpoint_path` | *required* | Bundles the DiT and the video embeddings connector. |
 | `--vae_checkpoint_path` | *required* | The VAE checkpoint matching `--vae_variant`. |
-| `--vae_variant` | `conv` | `conv` (ResNet + pixel-shuffle-upsample) or `diffusion` (NATTEN-based, the official demos' decoder). Both have a real, checkpoint-inherent period-8 artifact (confirmed against the real reference for both); `diffusion` reduces it by roughly half but does not eliminate it — single full-volume tile only so far, see [Coming later](#coming-later). |
+| `--vae_variant` | `conv` | `conv` (ResNet + pixel-shuffle-upsample) or `diffusion` (NATTEN-based, the official demos' decoder). |
 | `--text_encoder_checkpoint_path` | *required* | Bundles Gemma-4, its embedded tokenizer, and the feature-extraction projection. |
 | `--tensor_parallel_size` | `4` | See [Tensor parallelism](#tensor-parallelism). Must divide `num_devices`, the DiT's `num_attention_heads` (32), and Gemma-4's `num_attention_heads` (16). |
 | `--prompt` | *required*, 1+ values | One prompt (broadcast) or exactly `batch_size` prompts. |
@@ -152,141 +155,6 @@ replicated on a single TPU v4 chip's ~32GB HBM. There is no
 | `--offload_dit_weights` | off | Streams the DiT's 48 blocks through HBM `--offload_chunk_size` at a time instead of tracing the whole forward pass as one fused program. Needed at the reference's own `1216x704x121` resolution — not because DiT weights don't fit (they do, comfortably), but because the fused trace doesn't free per-block activations across blocks; see `docs/lessons/ltx2_5_debugging.md` and `docs/weight_offloading.md`. |
 | `--offload_chunk_size` | `1` | Blocks per offloaded chunk (must divide 48). `8` is the largest value confirmed to fit at the reference resolution (`tp=4`, both checkpoints). |
 | `--output_path` | `output.mp4` | With multiple prompts, each video is saved as `<output_path>_<i>.mp4`. |
-
-### Status
-
-**A real, significant bug affecting every prior generation from this port
-was fixed after this doc's "sharp, coherent" claims below were written**:
-temporal RoPE positions were never divided by the generation's `fps`
-before normalizing by `positional_embedding_max_pos` (the real checkpoint's
-`max_pos[0] = 20` is calibrated in **seconds**, not frames) —
-`vidax.models.ltx2_5.patchifier.latent_to_pixel_coord_bounds` now takes an
-`fps` parameter and applies this (see
-[`docs/lessons/ltx2_5_debugging.md`](../lessons/ltx2_5_debugging.md)'s "The
-real cause: temporal RoPE was never divided by `fps`" entry for the full
-investigation and before/after verification). Without the fix, the
-temporal RoPE phase wrapped multiple full rotations across a real clip's
-length, producing structured, semi-periodic corruption — this, not the
-VAE's own much smaller checkpoint-inherent artifact (see below), was the
-dominant cause of the "periodic chunks"/low-quality symptom a user
-reported. **The benchmark rows in [`docs/benchmarking.md`](../benchmarking.md)
-and the specific quality claims below predate this fix and should be
-treated as stale** pending a re-run — not further evidence of correctness.
-
-**Every core component verified bit-exact against the real PyTorch
-reference** (a throwaway `ltx2-verify` conda env, `jax_default_matmul_
-precision="highest"`, float64 activations where feasible — see
-[`docs/lessons/ltx2_5_debugging.md`](../lessons/ltx2_5_debugging.md) for
-the full methodology and every real bug this caught):
-
-- **VAE** (encode + decode): max diff `~1e-8`/`~2e-8`.
-- **DiT** (1-layer truncated — every block shares identical architecture,
-  unlike Gemma-4's mixed layer types, so this exercises the full
-  pre/post-process + cross-attention AdaLN + gated attention path):
-  correlation `0.9999999999`.
-- **Embeddings connector** (all 8 layers, with real masking/register-
-  substitution exercised): correlation `0.9999916`.
-- **Gemma-4 text encoder** (6 layers, covering both sliding-window and
-  full/global attention types): correlation `0.9999999999999055` through
-  the final normed output.
-
-Five real bugs were caught specifically by these checks and the first real
-runs (not code review — the numbers/output didn't match until fixed), all
-documented in
-[`docs/lessons/ltx2_5_debugging.md`](../lessons/ltx2_5_debugging.md): an
-XLA convolution-padding quirk in the VAE (a genuine framework-level bug,
-not just a precision gotcha), a corrupted-on-load parameter and a
-softmax-precision bug in the embeddings connector, and a mask-format
-mismatch between the connector's output and the DiT's input caught during
-the first real end-to-end generation run.
-
-**Real end-to-end generation, TPU v4 (tp=4), both checkpoints, at the
-reference's own `1216x704`/121-frame default** (`--offload_dit_weights
---offload_chunk_size 8`, see `docs/benchmarking.md`):
-- **Distilled, T2V**: a sunflower-field prompt produces a sharp, coherent,
-  temporally consistent video matching the prompt. (The `extract_video_
-  features` rescale bug below is in the shared Gemma-4/connector encoding
-  path, so it affected `distilled` too, the whole time — but re-checked
-  after the fix with the standard benchmark prompt and found no visible
-  difference, unlike `dev`'s dramatic before/after. Plausibly because
-  `distilled`'s few-step ancestral sampler relies less on cross-attention
-  strength, or because this specific prompt's subject is common enough
-  that even a ~7x-attenuated conditioning signal still nudged output the
-  right way — not a guarantee every prompt is unaffected on `distilled`.)
-- **Distilled, I2V**: conditioned on a generated frame reproduces it
-  closely at frame 0 (mean absolute pixel diff `~9`/255 — VAE round-trip +
-  video-codec compression, not drift) and continues it coherently,
-  matching a "swaying gently" follow-up prompt.
-- **`dev`, T2V** (30 plain-Euler steps, real CFG at `guidance_scale=3.0`
-  with the reference's own `guidance_rescale=0.7` correction, the
-  reference's own resolution-*independent* shifted sigma schedule — see
-  `docs/lessons/ltx2_5_debugging.md` for why it's independent of the
-  actual target resolution): produces a coherent, temporally consistent,
-  visually distinct (different depth of field, lighting, composition —
-  confirming the different sampler/schedule genuinely changes behavior
-  rather than degenerating to the same output) video from the same
-  prompt, and — after fixing a real ~7x-wrong rescale in
-  `extract_video_features` that had been silently under-weighting every
-  prompt's conditioning signal (see `docs/lessons/ltx2_5_debugging.md`) —
-  one that actually matches the specific prompt's content, not just a
-  generically-plausible video.
-
-**Known quality limitation of the conv decoder, not a bug**: the default
-`--vae_variant conv` VAE (`ltx-2.5-video-vae-conv-bf16.safetensors`) has a
-real, checkpoint-inherent periodic artifact (temporal and spatial) —
-bit-exact-verified against the real reference decoder, so it's not a
-porting bug, but it also means output won't match the smoothness of the
-official demos, which use the other checkpoint
-(`ltx-2.5-video-vae-bf16.safetensors`, a transformer/neighborhood-attention
-decoder). **That second decoder is now also ported** —
-`vidax.models.ltx2_5.diffusion_vae.DiffusionVideoDecoder`, available via
-`--vae_variant diffusion` — see
-[the debugging lessons](../lessons/ltx2_5_debugging.md) for the full port
-and verification writeup. **Scope of this port**: a single full-volume NA
-tile only (no `diffusion_tiling.py` multi-tile schedule/blend) — verified
-end-to-end (stages 1-4 context + one manual stage-5 diffusion step, real
-checkpoint weights, an explicit shared initial noise fed to both sides)
-against the real PyTorch reference at correlation `0.9999946` (float32, not
-this port's usual float64/`HIGHEST`-precision bit-exact bar — see the
-debugging lessons entry for why). Full spatial/temporal tiling (needed to
-fit large resolutions in memory) is not yet ported — a documented follow-up,
-not a silent gap.
-
-**The period-8 artifact is measurably reduced, not eliminated, by
-`--vae_variant diffusion`.** A direct A/B against the real, untouched
-PyTorch reference `DiffusionVideoDecoder` (same constant-latent diagnostic
-that originally found the conv decoder's artifact) confirms the diffusion
-decoder's own period-8 dip is real, checkpoint-inherent behavior — matching
-the real reference to within noise on an unmatched-RNG comparison — not a
-porting bug in either VAE. It's about half as severe (proportionally) as
-the conv decoder's own dip, so real generations should look visibly
-smoother, but the underlying periodicity (most plausibly tied to LTX-2.5's
-shared 8x temporal-downsampling structure, upstream of either decoder) is
-not fully gone. See `docs/lessons/ltx2_5_debugging.md`'s "The period-8
-artifact is checkpoint-inherent here too" entry for the full measurement.
-
-**Not implemented in this first port** (see
-[`examples/generate_ltx2_5.py`](../../examples/generate_ltx2_5.py)'s
-module docstring):
-
-- **Audio generation.** LTX-2.5 is natively a joint audio-video model;
-  this port only builds `LTXModelType.VideoOnly` (skips the audio VAE,
-  audio cross-attention, and every audio-branch weight entirely).
-- **Multi-stage generation.** No `LatentUpsampler` / half-res-then-2x-
-  refine second pass — always single-stage, single-pass, at the requested
-  `--height`/`--width`/`--num_frames` directly.
-- **Diffusion VAE decoder tiling.** `--vae_variant diffusion` only supports
-  a single full-volume NA tile (see above) — the reference's own tile-
-  schedule/multi-tile blend machinery (`diffusion_tiling.py`), needed to
-  decode large resolutions without OOMing, isn't ported yet.
-- **`res_2s` (second-order) sampling**, **STG**, and the per-sigma-bucket
-  guidance-parameter schedule — all pure inference-loop refinements
-  layered on a working base model, not architectural; plain constant-scale
-  CFG only (see `--guidance_scale`).
-- **`--sequence_parallel_size`** — same gap as LTX-Video's own port.
-
-See the [parity matrix in the root README](../../README.md#-model-support)
-for the up-to-date status across all variants.
 
 ---
 
@@ -326,9 +194,13 @@ for the up-to-date status across all variants.
   self-attention only) that projects Gemma-4's per-token features into the
   DiT's `cross_attention_dim` space. Padded positions get substituted with
   tiled learnable "register" vectors before attention runs, so no
-  attention mask is threaded into the DiT afterward (see [a real bug this
-  caused](../lessons/ltx2_5_debugging.md#example-script-the-connectors-own-mask-format-isnt-the-dits-mask-format)). Its weights live inside the *DiT*
-  checkpoint (`video_embeddings_connector.*`), not the text-encoder file.
+  attention mask is threaded into the DiT afterward — the connector's own
+  `(encoded, additive_attention_mask)` return contract (a `(B, 1, 1, L)`
+  already-additive mask) isn't the same shape/convention as
+  `LTXDiT.pre_process`'s `encoder_attention_mask` parameter (a plain `(B,
+  L)` binary mask it broadcasts itself), so the two aren't interchangeable.
+  Its weights live inside the *DiT* checkpoint
+  (`video_embeddings_connector.*`), not the text-encoder file.
 - **VAE (`vidax.models.ltx2_5.vae.LTXVAE`, conv-decoder variant):** the
   same causal-conv3d/`PixelNorm`/pixel-shuffle family as
   `vidax.models.ltx_video.vae`, with one real delta:
@@ -336,11 +208,12 @@ for the up-to-date status across all variants.
   Video's VAE is always noise-conditioned; this one never is — no noise
   injection, no final AdaLN, no `timestep` argument needed at decode
   time). Also **self-normalizing**: `encode` returns a deterministic,
-  already-normalized latent mean (no exposed sampling — see [the real
-  surprise this was](../lessons/ltx2_5_debugging.md#vae-the-real-videoencoderforward-is-deterministic-self-normalizing-mean-only)), and `decode` un-normalizes
-  internally, so callers pass the same convention both directions with no
-  external per-channel-statistics step (unlike LTX-Video's VAE, where
-  normalization is the caller's job).
+  already-normalized latent mean (no exposed sampling — the log-var half
+  the encoder's `conv_out` produces is computed but discarded, matching the
+  reference exactly), and `decode` un-normalizes internally, so callers
+  pass the same convention both directions with no external
+  per-channel-statistics step (unlike LTX-Video's VAE, where normalization
+  is the caller's job).
 - **Diffusion VAE decoder (`vidax.models.ltx2_5.diffusion_vae.
   DiffusionVideoDecoder`):** the alternative, transformer-based decoder
   (`--vae_variant diffusion`) — shares `vidax.models.ltx2_5.vae.Encoder`
@@ -361,7 +234,13 @@ for the up-to-date status across all variants.
   docstring. **Single full-volume NA tile only** so far (no
   `diffusion_tiling.py` multi-tile schedule) — see
   `docs/lessons/ltx2_5_debugging.md` for the full port + verification
-  writeup.
+  writeup, including the compile-time/memory investigation that led to
+  Megatron-TP-sharding this decoder too (`--vae_variant diffusion` needed
+  two new `vidax.core.sharding` entries, `w_gate`/`w_up`/`w_down` for
+  `SwiGLU`, plus renaming the attention output `Dense` to `to_out` to
+  reuse an existing entry — a fully replicated single-chip decoder didn't
+  fit the reference resolution's HBM budget even after every other memory
+  fix).
 - **Text encoder (`vidax.models.ltx2_5.gemma4.Gemma4TextModel`):** Gemma-4
   12B (`gemma4-12b-ltx-v1`), the real HF `Gemma4UnifiedTextModel`
   architecture (not an LTX-specific invention) — 48 layers mixing
@@ -384,12 +263,10 @@ for the up-to-date status across all variants.
   Linear) turns the 49 layers' worth of hidden states into the connector's
   input — the rescale factor is `sqrt(cross_attention_dim /
   gemma_hidden_size)`, **not** `sqrt(cross_attention_dim / (gemma_hidden_size
-  * 49))` (the width of the concatenated per-layer tensor being rescaled,
-  the "obvious" quantity to reach for and a real, previously-shipped bug
-  in this port — see `docs/lessons/ltx2_5_debugging.md`, where getting
-  this wrong under-scaled every prompt's conditioning signal ~7x and
-  produced generically-plausible-but-prompt-disconnected video with no
-  crash or shape mismatch to catch it).
+  * 49))` (the width of the concatenated per-layer tensor being rescaled —
+  the tempting-but-wrong quantity; getting this wrong silently produces
+  generically-plausible-but-prompt-disconnected video with no crash or
+  shape mismatch to catch it, see `docs/lessons/ltx2_5_debugging.md`).
 - **Tokenizer (`vidax.models.ltx2_5.gemma4.Gemma4Tokenizer`):** extracted
   directly from the Gemma checkpoint's own embedded `tokenizer_json`/
   `hf_asset__tokenizer_config.json` raw-byte tensors (a full HF
@@ -438,21 +315,3 @@ for the up-to-date status across all variants.
   connector.*` keys, distinguished by prefix) — call both on the same
   `load_torch_checkpoint_to_jax(...)` result rather than loading the file
   twice, same pattern as LTX-Video's DiT+VAE sharing one file.
-
-## Coming later
-
-**Diffusion VAE decoder tiling** and **audio generation** are the most
-likely next additions to this port. The diffusion decoder itself
-(`--vae_variant diffusion`) is fully ported and fits the reference
-`1216x704`/121-frame resolution comfortably (`14.76GB` peak HBM/chip,
-4-way Megatron tensor parallelism — see `docs/lessons/ltx2_5_debugging.md`'s
-"Diffusion (NATTEN) VAE decoder: the full compile-time and memory story"),
-but it's still **single full-volume tile only** — the reference's own
-spatial/temporal tile-schedule/blend machinery
-(`diffusion_tiling.py`) isn't ported. Tensor parallelism turned out to be
-enough to fit this port's own reference resolution without it; tiling
-would still matter for resolutions beyond that (or for fitting on fewer/
-smaller chips than a 4-device v4-8 slice).
-
-See the [parity matrix in the root README](../../README.md#-model-support)
-for the up-to-date status across all variants.

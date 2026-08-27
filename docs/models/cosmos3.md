@@ -233,15 +233,8 @@ full resolution (1280x704, 93 frames, 35 steps), Edge at its real per-task
 recipe (480x832, 121 frames, non-Karras; T2V: 35 steps/`shift=10.0`, I2V:
 20 steps/`shift=12.0`), **with a properly JSON-structured prompt** (see
 [Prompting](#prompting) — this matters far more for Edge than for Nano).
-
-Three real, distinct bugs were found and fixed to get here — a vision-
-segment mRoPE offset computed from the padded text length instead of each
-prompt's real token count, Edge silently running at Nano's resolution/
-scheduler defaults, and both models needing a JSON-structured prompt (Edge
-especially) rather than a short plain-text one. Full diagnostic writeup,
-including the verification methodology that ruled out the architecture port
-itself before these were found, in
-[`docs/lessons/cosmos3_debugging.md`](../lessons/cosmos3_debugging.md).
+See [`docs/lessons/cosmos3_debugging.md`](../lessons/cosmos3_debugging.md)
+for the verification methodology.
 
 ### Prompting
 
@@ -269,10 +262,8 @@ negative prompt (`examples/assets/cosmos3_t2v_negative_prompt.json`, from
 detailed positive prompt. Pairing a short positive prompt with a much
 longer/richer negative prompt is a real trap: the large difference in real
 token count between the cond and uncond passes inflates the vision-segment
-mRoPE offset gap between them (same mechanism as bug (1) in
-[Status](#status), just from a length mismatch between prompts rather than
-padding) and can produce badly corrupted output. Keep positive and negative
-prompts roughly comparable in scale.
+mRoPE offset gap between them and can produce badly corrupted output. Keep
+positive and negative prompts roughly comparable in scale.
 
 `--add_duration_template`/`--add_resolution_template` (both default `true`,
 matching the reference pipeline's own default) append metadata sentences
@@ -425,13 +416,3 @@ need that for T2V/I2V specifically).
   real recipe for Nano, but not for Edge (see [Status](#status) and
   [Cosmos3-Edge](#cosmos3-edge-4b--model_size-edge)'s `--use_karras_sigmas`/
   `--shift` values).
-
-## Coming later
-
-- **Cosmos3-Super** (the 64B sibling), if useful.
-- **Video2video, action-conditioned, and sound-conditioned generation**,
-  and the **Reasoner** surface — see [Scope](#scope) for why these are out
-  for now and what porting them would involve.
-
-See the [parity matrix in the root README](../../README.md#-model-support)
-for the up-to-date status across all variants.

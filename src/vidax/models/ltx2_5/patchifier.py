@@ -67,9 +67,8 @@ def latent_to_pixel_coord_bounds(
     121-frame/24fps clip after `temporal_scale=8` pixel scaling) -- since
     RoPE's `cos`/`sin` are periodic, this wraps the temporal phase multiple
     full rotations across the sequence instead of the intended single
-    sweep, a real bug (not a checkpoint-inherent property) plausibly
-    responsible for periodic/aliased self-attention structure. See
-    `docs/lessons/ltx2_5_debugging.md`.
+    sweep, a real bug (not a checkpoint-inherent property) responsible for
+    periodic/aliased self-attention structure across the whole clip.
     """
     scale_factors = jnp.asarray(
         (temporal_scale, spatial_scale, spatial_scale), dtype=latent_coord_bounds.dtype)

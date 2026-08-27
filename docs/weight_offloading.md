@@ -165,7 +165,7 @@ failure that surfaced it, on Wan2.1).
 
 Used to fix two real, measured OOMs: Wan2.1 14B T2V and I2V-720P at native
 720P, both under the correct `--dit_dtype float32` default (see
-[`lessons/wan2_1_precision_debugging.md`](lessons/wan2_1_precision_debugging.md)).
+[`lessons/wan2_1_debugging.md`](lessons/wan2_1_debugging.md)).
 **Neither OOM was actually the DiT's own per-step compute needing more HBM
 than fits** — a fully-resident fp32 DiT tree, TP-4 sharded, comfortably fits
 *while the sampling loop runs* at native 720P. The real problem in both cases
@@ -212,41 +212,17 @@ None of these fit at the reference's full 81 frames — `--tensor_parallel_size
 2 --sequence_parallel_size 2` (or fewer frames, see the results table below)
 is what the measured rows use.
 
-**A pre-existing correctness bug found while testing this combination**:
-composing offloading with `--sequence_parallel_size > 1` initially produced
-visibly wrong output — a blocky/tiled, spatially-discontinuous artifact,
-reproducible even at a tiny 96x144 resolution (not a scale-specific numerical
-issue). Isolating the cause: `--tensor_parallel_size 4` with
-`--offload_dit_weights` alone (no sequence parallelism) produced clean output
-at the same resolution, so the bug tracked to `sequence_parallel` itself, not
-to offloading — a pre-existing bug in `WanDiT`'s sequence-parallel path,
-affecting Wan2.1 too (shared code), that offloading merely exposed by being
-the first thing to combine sequence parallelism with a real checkpoint's
-non-zero weights (random-init tests never triggered it — see below).
-
-Root cause: `vidax.models.wan.common.dit_layers.attend`'s output projection
-and both DiT blocks' FFN down-projection are row-parallel under
-`sequence_parallel` — each device holds a slice of the contraction dimension,
-computes a partial output, and the code sums those partial outputs via
-`jax.lax.psum`. But `nn.Dense`'s bias is *replicated* and gets added *inside*
-each device's own call, before the `psum` — so summing `tp_size` devices'
-outputs summed `tp_size` copies of the bias instead of one. Invisible with
-Flax's zero-initialized bias (every synthetic test), but a real per-layer
-additive error with real trained (non-zero) biases, injected at 3 row-parallel
-calls per block × 40 blocks, compounding through the residual stream (~3%
-divergence at 1 real block, ~83% at the full 40-layer checkpoint).
-
-Fixed in `vidax.models.wan.common.dit_layers.psum_row_parallel`: subtracts
-the bias before the `psum` and adds exactly one copy back after — a true
-no-op whenever `sequence_parallel` is off or `tp` has size 1, so it's safe to
-use unconditionally in place of the old bare `jax.lax.psum` calls. Applied to
-`attend`'s output projection (shared by Wan2.1 and Wan2.2) and both models'
-FFN down-projection. Verified fixed: the same isolated-forward-pass check
-dropped from ~83% to ~0.18% divergence at 1 layer, ~1.65% at 8 layers — no
-longer compounding. End-to-end generation at the previously-broken config now
-produces clean, coherent output. (Cosmos-Predict2.5's DiT is unaffected — its
-own row-parallel projections are declared `use_bias=False`, no bias to
-double-count.)
+Row-parallel layers under `sequence_parallel` (`attend`'s output projection,
+both DiT blocks' FFN down-projection) sum their per-device partial outputs
+via `vidax.models.wan.common.dit_layers.psum_row_parallel`, not a bare
+`jax.lax.psum` — it corrects for `nn.Dense`'s replicated bias otherwise
+getting summed once per `tp`-way device instead of once (a true no-op when
+`sequence_parallel` is off or `tp` has size 1, so safe to call
+unconditionally). See
+[`docs/lessons/wan2_1_debugging.md`](lessons/wan2_1_debugging.md#row-parallel-psum-double-counted-nndenses-bias-under-sequence_parallel)
+for the bug this fixes and how it was found (first surfaced while combining
+offloading with sequence parallelism here, but the underlying bug was in
+shared Wan2.1/Wan2.2 code, not specific to offloading).
 
 ### A14B results, all configs
 

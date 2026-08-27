@@ -5,10 +5,10 @@ PyTorch-to-JAX weight translator for modern Video Diffusion Transformers
 (DiTs) and beyond. Built for **Google Cloud TPUs (v4, v5e, v6e)**, it
 eliminates framework overhead with clean, explicit PyTree architectures and
 native multi-chip parallelism (Megatron tensor parallelism and
-DeepSpeed-Ulysses sequence parallelism) for models like **Wan 2.1/2.2**,
-**Cosmos-Predict2.5**, and **Cosmos 3** (Nano and Edge, T2V/I2V) — the last
-of these architecturally unrelated to the first two (an omnimodal
-Mixture-of-Transformers, not a DiT continuation).
+DeepSpeed-Ulysses sequence parallelism) across five architecturally distinct
+model families: **Wan 2.1/2.2**, **Cosmos-Predict2.5**, **Cosmos 3** (Nano
+and Edge — an omnimodal Mixture-of-Transformers, not a DiT continuation of
+Cosmos-Predict2.5), **LTX-Video (0.9.8)**, and **LTX-2.5**.
 
 ## 🔑 Key Features
 
@@ -71,7 +71,7 @@ I2V, Wan2.2's A14B).
 | CogVideoX1.5 | 5B | T2V | ❌/❌/❌ | To appear | [🤗](https://huggingface.co/THUDM/CogVideoX1.5-5B) |
 | CogVideoX | 5B | I2V | ❌/❌/❌ | To appear | [🤗](https://huggingface.co/THUDM/CogVideoX-5b-I2V) |
 | CogVideoX | 5B | T2V | ❌/❌/❌ | To appear | [🤗](https://huggingface.co/THUDM/CogVideoX-5b) |
-| CogVideoX | 2B | T2V |  ❌/❌/❌ | Toappear | [🤗](https://huggingface.co/THUDM/CogVideoX-2b) |
+| CogVideoX | 2B | T2V | ❌/❌/❌ | To appear | [🤗](https://huggingface.co/THUDM/CogVideoX-2b) |
 
 Per-model checkpoint sources, CLI flags, architecture notes, and
 verification status live in each **Guide** link above. Measured
@@ -98,93 +98,36 @@ python examples/generate_wan2_1_t2v.py \
 
 ## 🛠 Directory Layout
 
-`vidax` follows the standard Python `src`-layout. `models/` holds one
-subpackage per model family. `models/wan/` additionally splits into one
-subpackage per released *architecture version* (`wan2_1/`, `wan2_2/`), plus a
-`common/` package for building blocks shared across those versions, since
-Wan2.1 and Wan2.2 are genuinely different architectures. `models/cosmos2_5/`
-and `models/cosmos3/` are both flat instead (no version/common split): each
-released size within a family (Cosmos-Predict2.5's 2B/14B, Cosmos 3's
-Nano/Edge) is the *same* architecture at different widths/depths, not a
-different version, so one `dit.py` plus a `configs.py` of named
-hyperparameter presets covers every size in that family. (`models/cosmos2_5/`
-and `models/cosmos3/` were originally nested under a shared `models/cosmos/`
-package on the assumption Cosmos-Predict2.5 and Cosmos 3 would share
-significant model code; in practice they turned out architecturally
-unrelated, so they're now flat siblings under `models/`, matching `wan/`'s
-own top-level positioning.) `translator/mappings/` mirrors this
-layout one-for-one.
+Standard Python `src`-layout: one subpackage per model family under
+`models/`, one usage guide per family under `docs/models/`, one standalone
+inference script per family/task under `examples/`. See
+[`docs/directory_layout.md`](docs/directory_layout.md) for the full tree.
 
-```text
-vidax/                          # Repository Root
-├── pyproject.toml              # Build & dependency metadata
-├── README.md                   # This file — concise landing page
-├── docs/
-│   ├── models/
-│   │   ├── wan2_1.md           # Full CLI reference & usage for Wan2.1 scripts
-│   │   ├── wan2_2.md           # Full CLI reference & usage for Wan2.2 scripts
-│   │   ├── cosmos2_5.md         # Full CLI reference & usage for Cosmos-Predict2.5
-│   │   └── cosmos3.md          # Full CLI reference & usage for Cosmos 3 (Nano/Edge)
-│   ├── lessons/                 # Model-specific debugging postmortems
-│   ├── hardware_and_sharding.md # General sharding/JIT/dtype engineering notes
-│   ├── weight_offloading.md    # Per-layer DiT weight offloading (host RAM -> HBM)
-│   └── benchmarking.md         # Measured latency/memory for every model/config above
-├── examples/
-│   ├── generate_wan2_1_t2v.py     # Wan2.1 t2v, --model_size {1.3B,14B}
-│   ├── generate_wan2_1_i2v.py     # Wan2.1 i2v (14B only)
-│   ├── generate_wan2_2_ti2v.py    # Wan2.2 TI2V-5B, t2v + i2v
-│   ├── generate_wan2_2_t2v_a14b.py # Wan2.2 A14B t2v (two-expert MoE)
-│   ├── generate_wan2_2_i2v_a14b.py # Wan2.2 A14B i2v (two-expert MoE)
-│   ├── generate_cosmos2_5.py      # Cosmos-Predict2.5, --model_size {2B,14B}, text2world/image2world/video2world
-│   └── generate_cosmos3.py        # Cosmos3 Nano/Edge, --model_size {nano,edge}, text2video + image2video
-└── src/
-    └── vidax/                  # Core Python Package
-        ├── __init__.py
-        ├── core/                # XLA & Hardware Primitives (model-family-agnostic)
-        │   ├── attention.py     # RMSNorm + dot-product/flash/sequence-parallel attention
-        │   ├── rope3d.py        # 3D RoPE (T/H/W split) & sinusoidal time embedding
-        │   └── sharding.py      # TPU Mesh & NamedSharding topology maps
-        ├── models/
-        │   ├── wan/
-        │   │   ├── common/          # Building blocks shared by every Wan version
-        │   │   │   ├── t5.py            # UMT5-XXL Text Encoder + tokenizer wrapper
-        │   │   │   ├── vae_layers.py    # Shared causal-VAE primitives
-        │   │   │   └── dit_layers.py    # Shared DiT primitives (attend(), WanHead, chunk_by_rank)
-        │   │   ├── wan2_1/
-        │   │   │   ├── configs.py       # Named hyperparameter presets: T2V_1_3B/T2V_14B/I2V_14B
-        │   │   │   ├── dit.py           # Wan2.1 DiT, t2v + i2v, sequence-parallel-capable, config-driven size
-        │   │   │   ├── vae.py           # Wan2.1 VAE, encoder + decoder, jit-per-chunk
-        │   │   │   └── clip_vision.py   # CLIP ViT-H/14, for i2v image conditioning
-        │   │   └── wan2_2/
-        │   │       ├── configs.py       # Named hyperparameter presets: TI2V_5B/T2V_A14B/I2V_A14B
-        │   │       ├── dit.py           # Wan2.2 DiT, per-token timestep, sequence-parallel-capable
-        │   │       └── vae.py           # Wan2.2 VAE (AvgDown3D/DupUp3D/patchify), jit-per-chunk
-        │   ├── cosmos2_5/
-        │   │   ├── configs.py            # Named hyperparameter presets: BASE_2B_CONFIG/BASE_14B_CONFIG
-        │   │   ├── reason1.py            # Qwen2.5-VL-7B text tower + embedding-extraction pipeline
-        │   │   ├── rope.py               # Cosmos's 3D RoPE (rotate-half convention, NTK extrapolation)
-        │   │   ├── dit_layers.py         # Shared DiT attention block (per-head QK-RMSNorm)
-        │   │   └── dit.py                # Cosmos-Predict2.5 DiT (2B or 14B, config-driven), AdaLN-LoRA, per-frame timestep, TP/sequence-parallel-capable
-        │   └── cosmos3/               # Cosmos 3 -- architecturally unrelated to cosmos2_5/ above
-        │       ├── configs.py            # Named hyperparameter presets: NANO_CONFIG/EDGE_CONFIG
-        │       ├── mrope.py              # Interleaved 3D mRoPE (distinct from both Wan's and Cosmos-Predict2.5's RoPE)
-        │       ├── dit_layers.py         # Dual-pathway (causal "und" / full-attention "gen") attention + decoder layer, config-driven per-checkpoint toggles
-        │       └── dit.py                # Cosmos3 DiT (Nano or Edge), no AdaLN, additive timestep injection, TP-capable
-        ├── schedulers/
-        │   ├── flow_match.py     # Euler / Rectified Flow Sampler (Wan)
-        │   └── unipc.py           # Flow-matching UniPC multistep solver (Cosmos-Predict2.5, Cosmos 3)
-        └── translator/            # PyTorch -> JAX Translation Bridge
-            ├── converter.py       # Tensor layout conversion (host-side, numpy)
-            └── mappings/          # Model-specific state-dict key mappings
-                ├── __init__.py            # load_torch_checkpoint_to_jax dispatch table
-                ├── common.py              # Mappers shared by every Wan version
-                ├── wan2_1.py              # Wan2.1-specific VAE/CLIP key mappings
-                ├── wan2_2.py              # Wan2.2-specific VAE key mappings (original repo layout)
-                ├── wan2_2_diffusers.py    # Wan2.2 VAE key mappings, diffusers' AutoencoderKLWan layout (Cosmos3's VAE)
-                ├── cosmos2_5.py           # Cosmos-Predict2.5 DiT key mappings
-                ├── cosmos3.py             # Cosmos3 (Nano/Edge) DiT key mappings
-                └── reason1.py             # Reason1 (Qwen2.5-VL-7B) text-encoder key mappings
-```
+## 📚 References
 
-Neither of vidax's own model implementations depend on `torch`/`transformers`
-— they're used solely to deserialize checkpoints and tokenize text.
+**Wan** — developed by Alibaba's Wan team.
+- Wan2.1: [code](https://github.com/Wan-Video/Wan2.1) | [report](https://arxiv.org/abs/2503.20314) | [weights](https://huggingface.co/Wan-AI)
+- Wan2.2: [code](https://github.com/Wan-Video/Wan2.2) | [report](https://arxiv.org/abs/2503.20314) | [weights](https://huggingface.co/Wan-AI)
+
+**Cosmos-Predict2.5** — developed by NVIDIA.
+- [code](https://github.com/nvidia-cosmos/cosmos-predict2.5) | [report](https://arxiv.org/abs/2511.00062) | [weights](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B)
+
+**Cosmos 3** — developed by NVIDIA.
+- [code](https://github.com/NVIDIA/cosmos) | [report](https://research.nvidia.com/labs/cosmos-lab/cosmos3/technical-report.pdf) | [weights](https://huggingface.co/nvidia/Cosmos3-Nano)
+
+**LTX-Video** — developed by Lightricks.
+- LTX-Video (0.9.8): [code](https://github.com/Lightricks/LTX-Video) | [report](https://arxiv.org/abs/2501.00103) | [weights](https://huggingface.co/Lightricks/LTX-Video)
+
+**LTX-2.5** — developed by Lightricks.
+- [code](https://github.com/Lightricks/LTX-2) | [weights](https://huggingface.co/Lightricks/LTX-2.5)
+
+**Parallelism techniques implemented in this repo:**
+- Megatron-style tensor parallelism — Shoeybi et al., [*Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism*](https://arxiv.org/abs/1909.08053).
+- DeepSpeed-Ulysses sequence parallelism — Jacobs et al., [*DeepSpeed Ulysses: System Optimizations for Enabling Training of Extreme Long Sequence Transformer Models*](https://arxiv.org/abs/2309.14509).
+
+See [`docs/hardware_and_sharding.md`](docs/hardware_and_sharding.md) for how
+both are implemented here.
+
+## 🙏 Acknowledgments
+
+This project was supported by the [Google Cloud TPU Research Cloud (TRC) program](https://sites.research.google/trc/about/).

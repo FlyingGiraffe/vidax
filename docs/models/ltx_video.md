@@ -176,14 +176,8 @@ one:
   conditioned on a generated frame reproduces it near-exactly at frame 0
   and continues it coherently.
 
-Two real bugs were caught specifically by the bit-exact check (not by code
-review — the numbers didn't match until fixed), both documented in
-[`docs/lessons/ltx_video_debugging.md`](../lessons/ltx_video_debugging.md):
-a channel-ordering mismatch between the VAE's top-level `patchify`/
-`unpatchify` and its `PixelShuffleND`-based blocks (width/height swapped,
-same shape either way — only visible numerically), and the decoder's
-`causal_decoder=False` config (symmetric, not front-only-causal, temporal
-padding) being missed entirely for every decoder conv.
+See [`docs/lessons/ltx_video_debugging.md`](../lessons/ltx_video_debugging.md)
+for the bit-exact verification methodology used to confirm this.
 
 **Not implemented in this first port** (see
 [`examples/generate_ltx_video.py`](../../examples/generate_ltx_video.py)'s
@@ -247,8 +241,7 @@ for the up-to-date status across all variants.
   the **decoder's convs use symmetric temporal padding**
   (`causal_decoder=False` for every released checkpoint — confusingly
   named; it governs the *decoder's* padding, unrelated to whether the
-  *encoder* is causal, which it always is) — getting this wrong was the
-  single largest bug found during this port (see [Status](#status)). This
+  *encoder* is causal, which it always is). This
   v1 port runs the whole encode/decode in one forward pass over the full
   tensor (matching the reference's own default, non-tiled path), unlike
   Wan's frame-chunked streaming decoder — revisit if a resolution/frame
@@ -282,10 +275,9 @@ for the up-to-date status across all variants.
   against the checkpoint's key list — only `block.0`'s `SelfAttention`
   has a `relative_attention_bias` weight), where UMT5 gives each layer its
   own. A self-contained new module, not a subclass/parameterization of
-  `vidax.models.wan.common.t5.T5Encoder`, per this port's design (every new
-  file stays independent of Wan's, so nothing here can regress an existing
-  model — see [`docs/lessons/ltx_video_debugging.md`](../lessons/ltx_video_debugging.md)
-  for the full non-regression story).
+  `vidax.models.wan.common.t5.T5Encoder`, per this port's design: every new
+  model family gets its own independent files, so nothing here can regress
+  an existing model.
 - **Scheduler (`vidax.schedulers.ltx_rectified_flow.RectifiedFlowScheduler`):**
   a separate file from Wan's `RectifiedFlowScheduler`, not an extension of
   it — two real differences: per-token `timestep` support (required for
@@ -302,16 +294,3 @@ for the up-to-date status across all variants.
   bundles both, distinguished by `model.diffusion_model.`/`vae.` key
   prefixes) — call both on the same `load_torch_checkpoint_to_jax(...,
   model_type=...)` result rather than loading the file twice.
-
-## Coming later
-
-**LTX-2** (the newer, larger, audio+video joint-generation model family
-from the same lab) is architecturally unrelated enough to warrant a
-separate port — a joint audio-video DiT with cross-attention between the
-two token streams, a Gemma-4 12B text encoder (not T5), and a
-diffusion-based VAE decoder — not a continuation of LTX-Video's
-video-only DiT. See the [root README](../../README.md#-model-support) for
-its current (not-yet-implemented) status.
-
-See the [parity matrix in the root README](../../README.md#-model-support)
-for the up-to-date status across all variants.

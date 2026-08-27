@@ -6,39 +6,40 @@ PyTorch-to-JAX weight translator for modern Video Diffusion Transformers
 eliminates framework overhead with clean, explicit PyTree architectures and
 native multi-chip parallelism (Megatron tensor parallelism and
 DeepSpeed-Ulysses sequence parallelism) across five architecturally distinct
-model families: **Wan 2.1/2.2**, **Cosmos-Predict2.5**, **Cosmos 3** (Nano
-and Edge — an omnimodal Mixture-of-Transformers, not a DiT continuation of
-Cosmos-Predict2.5), **LTX-Video (0.9.8)**, and **LTX-2.5**.
+model families.
 
 ## 🔑 Key Features
 
-- **🚀 Native TPU performance:** `jax.sharding` device meshes and a real
-  Pallas flash-attention kernel, not `jax.nn`'s materializing default.
+- **🚀 Native TPU performance:** `jax.sharding` device meshes, a real Pallas
+  flash-attention kernel (not `jax.nn`'s materializing default), and a
+  custom `scan`/`vmap`-based windowed neighborhood-attention kernel where no
+  native TPU kernel exists.
 - **🔄 Universal weight translator:** loads PyTorch `.safetensors`/`.pth`
   checkpoints straight into Flax pytrees — key mappings and layout
   transpositions handled automatically, verified against every model via
   exact 1:1 parameter-tree matches.
 - **🧵 Two parallelism strategies:** Megatron-style tensor parallelism and
-  DeepSpeed-Ulysses sequence parallelism, picked per model/resolution
-  depending on whether weight or activation memory is the bottleneck — see
+  DeepSpeed-Ulysses sequence parallelism, composable and picked per
+  model/resolution depending on whether weight or activation memory is the
+  bottleneck — see
   [`docs/hardware_and_sharding.md`](docs/hardware_and_sharding.md).
 - **💾 Per-layer weight offloading:** `--offload_dit_weights` keeps a DiT's
   weights host-resident and streams one `--offload_chunk_size`-block group
   into HBM at a time, extending every model's reach to resolutions/frame
   counts that don't fit fully device-resident on a given chip count — see
   [`docs/weight_offloading.md`](docs/weight_offloading.md).
-- **🌊 Flow matching engine:** a Rectified Flow Euler sampler and a
-  from-scratch UniPC multistep predictor-corrector port, covering every
-  supported model's native scheduler (including Cosmos 3's Karras-sigma
-  variant).
-- **🖼️ Faithful image/video conditioning:** each model family's own
-  conditioning mechanism ported exactly, not approximated — CLIP
-  cross-attention, per-token/per-frame latent substitution, and
-  conditioning-mask channels all show up where the reference actually uses
-  them.
-- **🧩 Broad, growing model coverage:** DiTs (Wan 2.1/2.2, Cosmos-Predict2.5)
-  and beyond — Cosmos 3's omnimodal Mixture-of-Transformers, a genuinely
-  different architecture, ported with the same care and verification bar.
+- **🌊 Flow-matching sampling:** deterministic and ancestral (SDE) Euler,
+  plus a from-scratch UniPC multistep predictor-corrector, covering every
+  supported model's native schedule (linear, Karras-sigma, and shift-warped
+  variants alike).
+- **🖼️ Faithful conditioning:** each model's own image/video-conditioning
+  mechanism ported exactly, not approximated — cross-attention, per-token/
+  per-frame latent substitution, and conditioning-mask channels all show up
+  where the reference actually uses them.
+- **🧩 Broad, growing model coverage:** DiTs, dual-pathway
+  Mixture-of-Transformers models, and beyond — every new architecture
+  ported and verified to the same bar (exact checkpoint key/shape matches,
+  bit-exact or real end-to-end checks against the reference).
 
 ## 🎲 Model Support
 
@@ -109,17 +110,13 @@ inference script per family/task under `examples/`. See
 - Wan2.1: [code](https://github.com/Wan-Video/Wan2.1) | [report](https://arxiv.org/abs/2503.20314) | [weights](https://huggingface.co/Wan-AI)
 - Wan2.2: [code](https://github.com/Wan-Video/Wan2.2) | [report](https://arxiv.org/abs/2503.20314) | [weights](https://huggingface.co/Wan-AI)
 
-**Cosmos-Predict2.5** — developed by NVIDIA.
-- [code](https://github.com/nvidia-cosmos/cosmos-predict2.5) | [report](https://arxiv.org/abs/2511.00062) | [weights](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B)
+**Cosmos** — developed by NVIDIA.
+- Cosmos-Predict2.5: [code](https://github.com/nvidia-cosmos/cosmos-predict2.5) | [report](https://arxiv.org/abs/2511.00062) | [weights](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B)
+- Cosmos 3: [code](https://github.com/NVIDIA/cosmos) | [report](https://research.nvidia.com/labs/cosmos-lab/cosmos3/technical-report.pdf) | [weights](https://huggingface.co/nvidia/Cosmos3-Nano)
 
-**Cosmos 3** — developed by NVIDIA.
-- [code](https://github.com/NVIDIA/cosmos) | [report](https://research.nvidia.com/labs/cosmos-lab/cosmos3/technical-report.pdf) | [weights](https://huggingface.co/nvidia/Cosmos3-Nano)
-
-**LTX-Video** — developed by Lightricks.
+**LTX** — developed by Lightricks.
 - LTX-Video (0.9.8): [code](https://github.com/Lightricks/LTX-Video) | [report](https://arxiv.org/abs/2501.00103) | [weights](https://huggingface.co/Lightricks/LTX-Video)
-
-**LTX-2.5** — developed by Lightricks.
-- [code](https://github.com/Lightricks/LTX-2) | [weights](https://huggingface.co/Lightricks/LTX-2.5)
+- LTX-2.5: [code](https://github.com/Lightricks/LTX-2) | [weights](https://huggingface.co/Lightricks/LTX-2.5)
 
 **Parallelism techniques implemented in this repo:**
 - Megatron-style tensor parallelism — Shoeybi et al., [*Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism*](https://arxiv.org/abs/1909.08053).
@@ -130,4 +127,4 @@ both are implemented here.
 
 ## 🙏 Acknowledgments
 
-This project was supported by the [Google Cloud TPU Research Cloud (TRC) program](https://sites.research.google/trc/about/).
+This project is supported by the Google [TPU Research Cloud (TRC)](https://sites.research.google/trc/about/) program.

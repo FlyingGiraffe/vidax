@@ -115,6 +115,28 @@ this section said SP forced weights fully replicated — that was true only
 because nothing combined the two mesh axes yet; see "Combining with
 Megatron TP" below for how that changed and why it was worth doing).
 
+**CogVideoX** (`vidax.models.cogvideo.dit.CogVideoXDiT(sequence_parallel=True)`)
+uses the same scheme with one twist: its attention is a single **joint**
+self-attention over `[text(226); visual]` (no separate cross-attention), so
+`sequence_parallel_self_attention` can't be used directly — naively
+all-to-all-ing the concatenated `[text; visual_chunk]` would replicate the
+text tokens `sp_size` times in the reshuffled KV.
+`vidax.core.attention.sequence_parallel_joint_self_attention` handles it:
+only the visual q/k/v go through the head↔sequence all-to-all, the small
+replicated text q/k/v is sliced to this device's local head range and
+concatenated in before one local flash-attention call over
+`[text(full); visual(full)]`, then the visual output is reshuffled back and
+the text output is `all_gather`ed over the head axis. Per-sample (not
+per-token) AdaLN modulation means only the visual token sequence and the
+RoPE tables need chunking — nothing analogous to Wan2.2's `e0`. CogVideoX
+keeps SP and Megatron TP **mutually exclusive** (`generate_cogvideox.py`
+asserts `--tensor_parallel_size 1` under `--sequence_parallel_size`): the 5B
+DiT fits replicated per chip in bf16, so none of the column/row-parallel
+shape juggling below is threaded through `CogVideoXDiT`. This is what runs
+CogVideoX-1.5 at its native 1360×768 (~45k visual tokens, which the non-SP
+graph never finished compiling) — see
+[`docs/lessons/cogvideox_debugging.md`](lessons/cogvideox_debugging.md).
+
 **A real bug found here:** `attend()`'s i2v CLIP image cross-attention
 branch always dispatched through the mesh-based `dot_product_attention`
 regardless of `sequence_parallel` — which would break inside `shard_map`
@@ -246,6 +268,24 @@ conditioning, or `--tensor_parallel_size 1` alongside
   `jax.device_count() > 1` with no `mesh` given and would otherwise pick the
   slow XLA path, since they can't tell they're already running inside a
   `shard_map`-sharded body.
+- **The `shard_map` requirement is per-*program*, not per-call.** Once
+  *any* part of a `jax.jit`-compiled function is multi-device
+  GSPMD-partitioned (true the moment any of its params carry TP sharding
+  at all), *every* Pallas/Mosaic call anywhere in that same function needs
+  a `shard_map` wrapper — including calls whose own operands are fully
+  replicated. HunyuanVideo-1.5's port hit this directly: its DiT's
+  double/single-stream blocks' attention was correctly wrapped for their
+  TP-sharded Q/K/V, but the small text-refiner submodule (`SingleTokenRefiner`,
+  intentionally left un-sharded — a fused-QKV Dense's contiguous TP split
+  doesn't align with clean per-head boundaries) crashed with the same
+  `NotImplementedError` anyway, since it shares the same jitted program as
+  the (now-partitioned) main blocks. Fixed with a second, fully-replicated
+  `shard_map` wrapper for that caller specifically (`PartitionSpec()` on
+  every arg — a per-device no-op replica, matching how its already-
+  replicated activations are actually laid out) rather than skipping
+  `shard_map` for it — see `vidax.models.hunyuan_video.common.dit_layers
+  ._flash_attention_tpu_segment_masked_replicated` and
+  `docs/lessons/hunyuan_video_1_5_debugging.md`.
 
 ## 5. JIT Compilation Safety
 
@@ -383,6 +423,11 @@ bound as more models are ported. See:
   produced prompt-disconnected video with no crash to flag it, and the
   multi-stage memory/compile-time story behind the NATTEN-based diffusion
   VAE decoder.
+- [`docs/lessons/cogvideox_debugging.md`](lessons/cogvideox_debugging.md) —
+  bf16 T5-XXL going 16–37% off when the encoder is run without an attention
+  mask (CogVideoX passes none), the VAE's stateful spatial-tiling blend, and
+  why CogVideoX's single joint `[text; visual]` attention needs a bespoke
+  DeepSpeed-Ulysses variant.
 - [`docs/weight_offloading.md`](weight_offloading.md) — per-layer weight
   offloading (host RAM, streamed into a small fixed-shape HBM buffer one
   block at a time), implemented for every DiT in this repo that doesn't fit

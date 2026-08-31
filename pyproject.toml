@@ -42,14 +42,17 @@ torch = [
     "torch>=2.0.0",
 ]
 
-# Required for `vidax.models.wan.t5.Umt5Tokenizer` (tokenizing prompts for
-# the T5 text encoder). `sentencepiece` backs the umt5-xxl tokenizer itself.
+# Required for tokenizers/processors across models: `vidax.models.wan.t5.
+# Umt5Tokenizer` (UMT5, `sentencepiece`-backed), HunyuanVideo-1.5's
+# Qwen2.5-VL MLLM and byT5 tokenizers (AutoTokenizer, no sentencepiece
+# needed), and SigLIP's image processor. `transformers>=4.49.0` is the
+# floor with Qwen2.5-VL config/tokenizer support.
 text = [
-    "transformers>=4.40.0",
+    "transformers>=4.49.0",
     "sentencepiece>=0.1.99",
 ]
 
-# Required for examples/generate_wan2_1_i2v.py (loading the conditioning image).
+# Required for I2V examples (loading the conditioning image).
 i2v = [
     "pillow>=10.0.0",
 ]

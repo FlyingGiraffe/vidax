@@ -233,6 +233,83 @@ def sequence_parallel_self_attention(
     return jax.lax.all_to_all(out, sp_axis_name, split_axis=1, concat_axis=2, tiled=True)
 
 
+def sequence_parallel_joint_self_attention(
+    q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray,
+    text_len: int, sp_axis_name: str, scale: Optional[float] = None,
+) -> jnp.ndarray:
+    """DeepSpeed-Ulysses sequence-parallel self-attention over a *joint*
+    ``[text(text_len); visual]`` token sequence in which only the visual
+    tokens are sequence-parallel-chunked across ``sp_axis_name`` and the
+    ``text_len`` text-prefix tokens are fully replicated on every device.
+
+    This is CogVideoX's attention layout (`vidax.models.cogvideo.dit
+    .CogVideoXAttention` -- one joint self-attention per block, no separate
+    cross-attention). `sequence_parallel_self_attention` above can't be used
+    directly: naively all-to-all-ing the concatenated ``[text; visual_chunk]``
+    would replicate the text tokens ``sp_size`` times in the reshuffled KV.
+    Instead the text and visual q/k/v are split apart, only the visual part
+    goes through the Ulysses head<->sequence all-to-all, the (small,
+    replicated) text q/k/v is sliced down to this device's local head range
+    to match, joint local flash attention runs over
+    ``[text(full); visual(full)]`` for that head range, and the two outputs
+    are reshuffled back independently (visual via the reverse all-to-all,
+    text via an ``all_gather`` over the head axis).
+
+    Must be called from *within* an active ``shard_map`` over a mesh with an
+    axis named ``sp_axis_name`` (same requirement as
+    ``sequence_parallel_self_attention``).
+
+    Args:
+        q, k, v: Shape (B, text_len + L_visual_local, num_heads, head_dim) --
+            the text prefix at full length, the visual tokens this device's
+            local sequence chunk; full heads.
+        text_len: Number of text-prefix tokens (static). ``num_heads`` must be
+            divisible by ``sp_axis_name``'s size.
+        sp_axis_name: Name of the mesh axis to reshuffle the visual tokens across.
+        scale: Optional softmax-scale override (default 1/sqrt(head_dim)).
+
+    Returns:
+        (B, text_len + L_visual_local, num_heads, head_dim), same layout as
+        the inputs (text prefix replicated, visual tokens local chunk).
+    """
+    head_dim = q.shape[-1]
+    num_heads = q.shape[2]
+    sm_scale = head_dim ** -0.5 if scale is None else scale
+
+    q_txt, q_vis = q[:, :text_len], q[:, text_len:]
+    k_txt, k_vis = k[:, :text_len], k[:, text_len:]
+    v_txt, v_vis = v[:, :text_len], v[:, text_len:]
+
+    # visual: full heads / local sequence chunk -> local head chunk / full sequence.
+    q_vis = jax.lax.all_to_all(q_vis, sp_axis_name, split_axis=2, concat_axis=1, tiled=True)
+    k_vis = jax.lax.all_to_all(k_vis, sp_axis_name, split_axis=2, concat_axis=1, tiled=True)
+    v_vis = jax.lax.all_to_all(v_vis, sp_axis_name, split_axis=2, concat_axis=1, tiled=True)
+
+    # text: keep exactly the head range the visual all-to-all just handed this
+    # device (heads [rank*hl : (rank+1)*hl]).
+    heads_local = q_vis.shape[2]
+    rank = jax.lax.axis_index(sp_axis_name)
+    q_txt = jax.lax.dynamic_slice_in_dim(q_txt, rank * heads_local, heads_local, axis=2)
+    k_txt = jax.lax.dynamic_slice_in_dim(k_txt, rank * heads_local, heads_local, axis=2)
+    v_txt = jax.lax.dynamic_slice_in_dim(v_txt, rank * heads_local, heads_local, axis=2)
+
+    q_j = jnp.concatenate([q_txt, q_vis], axis=1)
+    k_j = jnp.concatenate([k_txt, k_vis], axis=1)
+    v_j = jnp.concatenate([v_txt, v_vis], axis=1)
+
+    if jax.devices()[0].platform == "tpu":
+        out_j = _flash_attention_tpu(q_j, k_j, v_j, None, sm_scale)
+    else:
+        out_j = jax.nn.dot_product_attention(q_j, k_j, v_j, scale=sm_scale)
+
+    out_txt, out_vis = out_j[:, :text_len], out_j[:, text_len:]
+    # visual: local head chunk / full sequence -> full heads / local sequence chunk.
+    out_vis = jax.lax.all_to_all(out_vis, sp_axis_name, split_axis=1, concat_axis=2, tiled=True)
+    # text: reassemble full heads (identical on every device afterwards).
+    out_txt = jax.lax.all_gather(out_txt, sp_axis_name, axis=2, tiled=True)
+    return jnp.concatenate([out_txt, out_vis], axis=1)
+
+
 def dot_product_attention(
     q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray,
     bias: Optional[jnp.ndarray] = None,

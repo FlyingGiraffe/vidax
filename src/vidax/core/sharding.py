@@ -80,6 +80,9 @@ COLUMN_PARALLEL_NAMES = frozenset([
     "add_q_proj", "add_k_proj", "add_v_proj",  # Cosmos3 "gen" (vision/diffusion) attention
     "ff_proj",                      # LTXDiT FFN up-projection
     "w_gate", "w_up",               # vidax.models.ltx2_5.diffusion_vae.SwiGLU up-projections
+    "linear1_q", "linear1_k", "linear1_v",  # HunyuanVideo-1.5 MMSingleStreamBlock self-attention
+    "linear1_mlp",                  # HunyuanVideo-1.5 MMSingleStreamBlock FFN-in (fused with QKV output width, see docs/hardware_and_sharding.md)
+    "fc1",                          # HunyuanVideo-1.5 MMDoubleStreamBlock's MLP up-projection (`common/dit_layers.py:MLP`)
 ])
 ROW_PARALLEL_NAMES = frozenset([
     "self_attn_o", "cross_attn_o",
@@ -95,6 +98,14 @@ ROW_PARALLEL_NAMES = frozenset([
     "to_add_out",   # Cosmos3 "gen" attention output
     "ff_out",       # LTXDiT FFN down-projection
     "w_down",       # vidax.models.ltx2_5.diffusion_vae.SwiGLU down-projection
+    "img_attn_proj", "txt_attn_proj",  # HunyuanVideo-1.5 MMDoubleStreamBlock attention output
+    "linear2",      # HunyuanVideo-1.5 MMSingleStreamBlock's fused attn+mlp output (row-parallel over
+                     # the concatenated [attn_out, mlp_act_out] input -- correct only because
+                     # linear1_q/k/v/linear1_mlp are correspondingly column-parallel above, so each
+                     # device's local attn_out/mlp_act_out concatenation is already the matching
+                     # contiguous 1/tp_size input slice; this fused-QKV+MLP design is the standard
+                     # Megatron-friendly single-stream block layout (Flux/HunyuanVideo family)).
+    "fc2",          # HunyuanVideo-1.5 MMDoubleStreamBlock's MLP down-projection
 ])
 
 

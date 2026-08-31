@@ -14,6 +14,7 @@ from typing import Dict
 import safetensors.numpy
 
 from .common import map_wan_dit_keys, map_wan_t5_keys
+from .cogvideox import map_cogvideox_dit_keys, map_cogvideox_vae_keys
 from .cosmos2_5 import map_cosmos2_5_dit_keys
 from .cosmos3 import map_cosmos3_dit_keys
 from .ltx_video import map_ltx_video_dit_keys, map_ltx_video_t5_keys, map_ltx_video_vae_keys
@@ -25,6 +26,18 @@ from .ltx2_5 import (
     map_ltx2_5_vae_keys,
 )
 from .reason1 import map_reason1_text_encoder_keys
+from .hunyuan_video_1_5 import (
+    map_hunyuan_video_1_5_byt5_keys,
+    map_hunyuan_video_1_5_dit_keys,
+    map_hunyuan_video_1_5_siglip_keys,
+    map_hunyuan_video_1_5_vae_keys,
+)
+from .hunyuan_video_1_0 import (
+    map_hunyuan_video_1_0_clip_text_keys,
+    map_hunyuan_video_1_0_dit_keys,
+    map_hunyuan_video_1_0_llama_text_keys,
+    map_hunyuan_video_1_0_vae_keys,
+)
 from .wan2_1 import map_wan2_1_clip_keys, map_wan2_1_dit_keys, map_wan2_1_vae_keys
 from .wan2_2 import map_wan2_2_vae_keys
 from .wan2_2_diffusers import map_wan2_2_vae_diffusers_keys
@@ -38,7 +51,17 @@ __all__ = [
     "map_wan2_1_clip_keys",
     "map_wan2_2_vae_keys",
     "map_cosmos2_5_dit_keys",
+    "map_cogvideox_dit_keys",
+    "map_cogvideox_vae_keys",
     "map_reason1_text_encoder_keys",
+    "map_hunyuan_video_1_5_dit_keys",
+    "map_hunyuan_video_1_5_vae_keys",
+    "map_hunyuan_video_1_5_byt5_keys",
+    "map_hunyuan_video_1_5_siglip_keys",
+    "map_hunyuan_video_1_0_dit_keys",
+    "map_hunyuan_video_1_0_vae_keys",
+    "map_hunyuan_video_1_0_llama_text_keys",
+    "map_hunyuan_video_1_0_clip_text_keys",
     "map_cosmos3_dit_keys",
     "map_wan2_2_vae_diffusers_keys",
     "map_ltx_video_dit_keys",
@@ -117,6 +140,10 @@ def load_torch_checkpoint_to_jax(checkpoint_path: str, model_type: str = "wan2.1
         return map_wan_dit_keys(pt_state_dict)
     elif model_type == "cosmos2.5_dit":
         return map_cosmos2_5_dit_keys(pt_state_dict)
+    elif model_type == "cogvideox_dit":
+        return map_cogvideox_dit_keys(pt_state_dict)
+    elif model_type == "cogvideox_vae":
+        return map_cogvideox_vae_keys(pt_state_dict)
     elif model_type == "wan2.1_vae":
         return map_wan2_1_vae_keys(pt_state_dict)
     elif model_type == "wan2.1_clip":
@@ -156,5 +183,24 @@ def load_torch_checkpoint_to_jax(checkpoint_path: str, model_type: str = "wan2.1
         # Wan2.2's DiT). Confirmed against the real checkpoint: exact 1:1
         # parameter-tree match against `Qwen2TextModel`'s init'd params.
         return map_reason1_text_encoder_keys(pt_state_dict)
+    elif model_type == "hunyuan_video_1_5_dit":
+        return map_hunyuan_video_1_5_dit_keys(pt_state_dict)
+    elif model_type == "hunyuan_video_1_5_vae":
+        return map_hunyuan_video_1_5_vae_keys(pt_state_dict)
+    elif model_type == "hunyuan_video_1_5_byt5":
+        return map_hunyuan_video_1_5_byt5_keys(pt_state_dict)
+    elif model_type == "hunyuan_video_1_5_siglip":
+        return map_hunyuan_video_1_5_siglip_keys(pt_state_dict)
+    elif model_type == "hunyuan_video_1_0_dit":
+        # HunyuanVideo 1.0's DiT (T2V only) -- cross-checked against the
+        # real downloaded checkpoint. See
+        # `hunyuan_video_1_0.map_hunyuan_video_1_0_dit_keys`'s module docstring.
+        return map_hunyuan_video_1_0_dit_keys(pt_state_dict)
+    elif model_type == "hunyuan_video_1_0_vae":
+        return map_hunyuan_video_1_0_vae_keys(pt_state_dict)
+    elif model_type == "hunyuan_video_1_0_llama_text":
+        return map_hunyuan_video_1_0_llama_text_keys(pt_state_dict)
+    elif model_type == "hunyuan_video_1_0_clip_text":
+        return map_hunyuan_video_1_0_clip_text_keys(pt_state_dict)
     else:
         raise NotImplementedError(f"Model type '{model_type}' is not supported.")

@@ -1,9 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/wordmark-light.svg">
-    <img alt="vidax" src="assets/wordmark-light.svg" height="100">
-  </picture>
+  <img alt="vidax" src="assets/wordmark.svg" height="100">
 </p>
 
 <p align="center">
@@ -19,7 +15,7 @@ PyTorch-to-JAX weight translator for modern Video Diffusion Transformers
 (DiTs) and beyond. Built for **Google Cloud TPUs (v4, v5e, v6e)**, it
 eliminates framework overhead with clean, explicit PyTree architectures and
 native multi-chip parallelism (Megatron tensor parallelism and
-DeepSpeed-Ulysses sequence parallelism) across five architecturally distinct
+DeepSpeed-Ulysses sequence parallelism) across architecturally distinct
 model families.
 
 <p align="center">
@@ -84,18 +80,17 @@ I2V, Wan2.2's A14B).
 | LTX-Video (0.9.8) | 13B (dev) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Link](https://huggingface.co/Lightricks/LTX-Video) |
 | LTX-Video (0.9.8) | 13B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Link](https://huggingface.co/Lightricks/LTX-Video) |
 | LTX-Video (0.9.8) | 2B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Link](https://huggingface.co/Lightricks/LTX-Video) |
-| HunyuanVideo1.5 | 8.3B | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Link](https://huggingface.co/tencent/HunyuanVideo-1.5) |
-| HunyuanVideo | 13B | T2V/I2V | ❌/❌/❌ | To appear | 🤗[Link](https://huggingface.co/tencent/HunyuanVideo) |
-| CogVideoX1.5 | 5B | I2V | ❌/❌/❌ | To appear | 🤗[Link](https://huggingface.co/THUDM/CogVideoX1.5-5B-I2V) |
-| CogVideoX1.5 | 5B | T2V | ❌/❌/❌ | To appear | 🤗[Link](https://huggingface.co/THUDM/CogVideoX1.5-5B) |
-| CogVideoX | 5B | I2V | ❌/❌/❌ | To appear | 🤗[Link](https://huggingface.co/THUDM/CogVideoX-5b-I2V) |
-| CogVideoX | 5B | T2V | ❌/❌/❌ | To appear | 🤗[Link](https://huggingface.co/THUDM/CogVideoX-5b) |
-| CogVideoX | 2B | T2V | ❌/❌/❌ | To appear | 🤗[Link](https://huggingface.co/THUDM/CogVideoX-2b) |
+| HunyuanVideo-1.5 | 8.3B | T2V/I2V | ✅/❌/❌ | [hunyuan_video_1_5.md](docs/models/hunyuan_video_1_5.md) | 🤗[Link](https://huggingface.co/tencent/HunyuanVideo-1.5) |
+| HunyuanVideo | 13B | T2V | ✅/❌/❌ | [hunyuan_video_1_0.md](docs/models/hunyuan_video_1_0.md) | 🤗[Link](https://huggingface.co/tencent/HunyuanVideo) |
+| CogVideoX1.5 | 5B | I2V | ✅/❌/❌ | [cogvideox.md](docs/models/cogvideox.md) | 🤗[Link](https://huggingface.co/THUDM/CogVideoX1.5-5B-I2V) |
+| CogVideoX1.5 | 5B | T2V | ✅/❌/❌ | [cogvideox.md](docs/models/cogvideox.md) | 🤗[Link](https://huggingface.co/THUDM/CogVideoX1.5-5B) |
+| CogVideoX | 5B | T2V | ✅/❌/❌ | [cogvideox.md](docs/models/cogvideox.md) | 🤗[Link](https://huggingface.co/THUDM/CogVideoX-5b) |
+| CogVideoX | 5B | I2V | ✅/❌/❌ | [cogvideox.md](docs/models/cogvideox.md) | 🤗[Link](https://huggingface.co/THUDM/CogVideoX-5b-I2V) |
+| CogVideoX | 2B | T2V | ✅/❌/❌ | [cogvideox.md](docs/models/cogvideox.md) | 🤗[Link](https://huggingface.co/THUDM/CogVideoX-2b) |
 
-Per-model checkpoint sources, CLI flags, architecture notes, and
-verification status live in each **Guide** link above. Measured
-latency/memory numbers for every row above live in
-[`docs/benchmarking.md`](docs/benchmarking.md).
+Per-model checkpoint sources, CLI flags, and architecture notes live in
+each **Guide** link above. Measured latency/memory numbers for every row
+above live in [`docs/benchmarking.md`](docs/benchmarking.md).
 
 ## 🚀 Quickstart
 
@@ -132,6 +127,9 @@ inference script per family/task under `examples/`. See
 | Cosmos-Predict2.5 | NVIDIA | [code](https://github.com/nvidia-cosmos/cosmos-predict2.5) | [report](https://arxiv.org/abs/2511.00062) | [weights](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B) | [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license) |
 | LTX-2.5 | Lightricks | [code](https://github.com/Lightricks/LTX-2) | [report](https://arxiv.org/abs/2601.03233) | [weights](https://huggingface.co/Lightricks/LTX-2.5) | [LTX-2 Community License](https://github.com/Lightricks/LTX-2/blob/main/LICENSE.md) |
 | LTX-Video (0.9.8) | Lightricks | [code](https://github.com/Lightricks/LTX-Video) | [report](https://arxiv.org/abs/2501.00103) | [weights](https://huggingface.co/Lightricks/LTX-Video) | [LTX-Video Open Weights License](https://huggingface.co/Lightricks/LTX-Video/blob/main/LTX-Video-Open-Weights-License-0.X.txt) |
+| HunyuanVideo-1.5 | Tencent | [code](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) | [report](https://arxiv.org/abs/2511.18870) | [weights](https://huggingface.co/tencent/HunyuanVideo-1.5) | [Tencent Hunyuan Community License](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5/blob/main/LICENSE) |
+| HunyuanVideo | Tencent | [code](https://github.com/Tencent-Hunyuan/HunyuanVideo) | [report](https://arxiv.org/abs/2412.03603) | [weights](https://huggingface.co/tencent/HunyuanVideo) | [Tencent Hunyuan Community License](https://github.com/Tencent-Hunyuan/HunyuanVideo/blob/main/LICENSE.txt) |
+| CogVideoX / 1.5 | THUDM / ZhipuAI | [code](https://github.com/THUDM/CogVideo) | [report](https://arxiv.org/abs/2408.06072) | [weights](https://huggingface.co/THUDM) | [CogVideoX License](https://huggingface.co/THUDM/CogVideoX-5b/blob/main/LICENSE) |
 
 **Parallelism techniques implemented in this repo:**
 - Megatron-style tensor parallelism — Shoeybi et al., [*Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism*](https://arxiv.org/abs/1909.08053).

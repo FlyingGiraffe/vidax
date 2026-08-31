@@ -72,12 +72,46 @@ when configs are genuinely identical (documented per-row).
 | LTX-Video (0.9.8) | 13B (dev) | T2V | v4-8 | 4/- | 1216x704 | 121 | 30 | bf16 | bf16 | - | 134.7 | 156.0 | 5.2 | 15.3 |
 | LTX-Video (0.9.8) | 13B (distilled) | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16 | - | 136.4 | 104.2 | 13.0 | 15.3 |
 | LTX-Video (0.9.8) | 2B (distilled) | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16 | - | 83.5 | 47.3 | 5.9 | 8.8 |
+| HunyuanVideo-1.5 | 8.3B (720p) | T2V | v4-8 | 4/- | 1280x720 | 121 | 30 | bf16 | bf16 | - | 410.8 | 6629.8 | 221.0 | 30.3 |
+| HunyuanVideo-1.5 | 8.3B (720p) | I2V | v4-8 | 4/- | 832x1104\* | 121 | 30 | bf16 | bf16 | - | 416.7 | 6575.6 | 219.2 | 32.0 |
+| HunyuanVideo-1.5 | 8.3B (480p) | T2V | v4-8 | 4/- | 832x480 | 121 | 30 | bf16 | bf16 | - | 362.3 | 3583.8 | 119.5 | 29.1 |
+| HunyuanVideo-1.5 | 8.3B (480p) | I2V | v4-8 | 4/- | 544x720\* | 121 | 30 | bf16 | bf16 | - | 362.4 | 3386.4 | 112.9 | 31.4 |
+| CogVideoX1.5 | 5B | T2V | v4-8 | 1/4 | 1360x768 | 81 | 50 | bf16 | bf16 | - | 306.6 | 2639.8 | 52.8 | 31.5 |
+| CogVideoX1.5 | 5B | I2V | v4-8 | 1/4 | 1360x768 | 81 | 50 | bf16 | bf16 | - | 304.2 | 2639.8 | 52.8 | 31.5 |
+| CogVideoX | 5B | T2V | v4-8 | 4/1 | 720x480 | 49 | 50 | bf16 | bf16 | - | 105.8 | 470.6 | 9.4 | 23.2 |
+| CogVideoX | 5B | I2V | v4-8 | 4/1 | 720x480 | 49 | 50 | bf16 | bf16 | - | 106.1 | 470.6 | 9.4 | 23.3 |
+| CogVideoX | 2B | T2V | v4-8 | 2/1 | 720x480 | 49 | 50 | bf16 | bf16† | - | 48.4 | 211.5 | 4.2 | 17.2 |
+
 
 Resolution/frame/step columns are each model's reference default — not
 necessarily what fits this hardware today (see each model's own
 `docs/models/` guide). Every row uses the same standardized prompt/image/
 video (see [`benchmarks/common.py`](../benchmarks/common.py)), so results
 are comparable across model families.
+
+The CogVideoX VAE decode runs eagerly (not `jax.jit`-wrapped — the
+tiled/chunked loop unrolled by jit OOMs), so its cost is folded into
+`generation_s`, not `compile_s` (same treatment as Wan's VAE). CogVideoX-2b
+runs at `tp=2`/`dp=2` (its 30 attention heads aren't divisible by 4); the
+5b / 5b-i2v rows are `tp=4`.
+
+The **CogVideoX-1.5 rows run at their native 1360×768** (~45k visual tokens
+after `patch_size_t=2`) via DeepSpeed-Ulysses sequence parallelism
+(`--sequence_parallel_size 4`, `tp=1` — the two are mutually exclusive for
+CogVideoX). Under plain Megatron TP that DiT-step graph never finished XLA
+compilation on a v4-8 (killed after 30+ min) and the per-block activations
+didn't fit a chip anyway; SP shrinks each device's block-loop sequence to
+~11k tokens, compiling in ~5 min and fitting the full 81-frame clip — at
+**31.5 GB/chip peak, right at the v4's HBM ceiling** (so this leaves no room
+for a larger frame count or batch without also offloading). Per-step is
+~7.5× the 720×480 number, roughly tracking the 3× token count plus the
+all-to-all/all-gather traffic 42 blocks × 5 collectives adds. See
+`docs/hardware_and_sharding.md` §3 and
+`docs/lessons/cogvideox_debugging.md`.
+
+† CogVideoX-2b's checkpoint ships as **float16** (all others bf16); it's
+cast to bf16 here to keep the Weight-dtype column comparable, at a small
+precision cost (fp16 has 2 more mantissa bits).
 
 ## Why some rows need offloading and/or sequence parallelism
 
@@ -93,6 +127,8 @@ The full reasoning, investigation, and every config's numbers live in
 | Wan2.2 5B | neither | Weight-sharding alone (`tp=4`) is enough — the opposite tradeoff from A14B: DiT weight residency dominates here, not per-token activation memory. |
 | LTX-Video (all 3 T2V rows) | TP only | Even the 2B checkpoint's own weights fit replicated on a single chip, but the reference's full `704x1216`/121-frame token count's self-attention activations don't (confirmed OOM at `tp=1`) — `tp=4` shards both and fits every variant at the same reference resolution, no offloading or sequence parallelism needed. |
 | LTX-2.5 (both T2V rows) | TP **+** offloading (for a different reason than every other offloaded row) | `tp=4` is required just for the 22B DiT's/12B Gemma-4's own bf16 weights to fit at all (unlike LTX-Video, where `tp=1`'s weights fit and only activations forced `tp=4`). Offloading (`--offload_chunk_size 8`, the largest divisor of 48 that still fits) is needed too, but *not* because DiT weight residency is the bottleneck (it isn't — ~6.6GB/chip at tp=4, comfortable) — the fused 48-block forward pass's own per-block activations were measured not to be freed across blocks (temp memory scaled ~linearly with block count), and offloading's side effect of splitting the trace into per-chunk `jax.jit` calls fixes that regardless of whether weight streaming itself is needed. See `docs/lessons/ltx2_5_debugging.md` for the full investigation — this combination is what got the reference's own `704x1216`/121-frame default working after it previously OOM'd even at `tp=4` alone. |
+| HunyuanVideo-1.5 (all rows) | TP only (no offloading yet) | The 8.3B DiT's own bf16 weights (~16.6GB) don't fit replicated alongside the other components (Qwen2.5-VL ~14GB, VAE ~2.5GB, byT5 ~0.5GB, all simply replicated across the same mesh) on one TPU v4 chip — `tp=4` shards the DiT's Q/K/V/output/FFN Dense layers, leaving ~29GB/chip peak (see the table above), comfortable at 480p. VAE decode also needed spatial tiling (`--vae_tile_latent_size`, independent of TP) to fit the reference's real 121-frame default — see `docs/lessons/hunyuan_video_1_5_debugging.md`. |
+| CogVideoX-1.5 (T2V, I2V) | SP only | The 5B DiT's bf16 weights fit replicated per chip, but at native 1360×768 the ~45k-visual-token joint attention's per-block activations don't — and the non-SP graph over that sequence never finished compiling. `--sequence_parallel_size 4` (DeepSpeed-Ulysses over the visual tokens; mutually exclusive with `--tensor_parallel_size` here) shrinks each device's block-loop sequence to ~11k tokens. Fits at 31.5GB/chip — at the ceiling, so a larger frame count would also need offloading. The 1.0 rows (2b / 5b / 5b-i2v) need neither: they fit natively at 720×480 with plain `tp`. |
 
 `--offload_chunk_size` varies row to row because it trades resident-weight
 headroom for transfer/compute overlap — larger where there's HBM to spare
@@ -171,7 +207,9 @@ See [`docs/models/cosmos3.md`](models/cosmos3.md)/
 [`docs/models/wan2_2.md`](models/wan2_2.md)/
 [`docs/models/wan2_1.md`](models/wan2_1.md)/
 [`docs/models/ltx2_5.md`](models/ltx2_5.md)/
-[`docs/models/ltx_video.md`](models/ltx_video.md) for per-model
+[`docs/models/ltx_video.md`](models/ltx_video.md)/
+[`docs/models/hunyuan_video_1_5.md`](models/hunyuan_video_1_5.md)/
+[`docs/models/cogvideox.md`](models/cogvideox.md) for per-model
 implementation and verification status, and
 [`docs/hardware_and_sharding.md`](hardware_and_sharding.md) for the
 sharding/parallelism engineering behind the Peak HBM/chip numbers above.

@@ -196,25 +196,6 @@ replica — only the text prompt varies).
 | `--fps` | `16` | Output video frame rate. Matches the reference's training/inference fps. |
 | `--output_path` | `output_cosmos2_5.mp4` | With multiple prompts, each video is saved as `<output_path>_<i>.mp4`. |
 
-### Quick testing
-
-Full-resolution (704x1280), full-step (35) runs are slow to iterate with —
-use a much smaller config while making changes, and only go full-size for
-an actual quality check:
-
-```bash
-python examples/generate_cosmos2_5.py \
-  --dit_checkpoint_path ... --vae_checkpoint_path ... --reason1_checkpoint_path ... \
-  --prompt "..." \
-  --height 256 --width 256 --num_frames 9 --num_steps 20 \
-  --output_path out/quick_test.mp4
-```
-
-This still exercises the full pipeline (DiT, VAE, Reason1, UniPC) end to
-end; it just produces a smaller, lower-fidelity, faster result — enough to
-tell "did this crash / does the output look structurally different" apart
-from a full quality judgment, which still needs the native resolution.
-
 ---
 
 ## Architecture notes

@@ -2,7 +2,7 @@
 
 T2V only (I2V lives in a separate, un-cloned upstream repo and is out of
 scope). One standalone TPU inference script lives in `examples/`:
-`generate_hunyuan_video_1_0.py`, covering the single released checkpoint
+`generate_hunyuan_video.py`, covering the single released checkpoint
 variant (`tencent/HunyuanVideo`'s `hunyuan-video-t2v-720p`, the
 `"HYVideo-T/2-cfgdistill"` preset). `--model-resolution`/544p in the
 reference is dead code for the default CLI path (only ever consulted when
@@ -12,7 +12,7 @@ on this one 720p-native checkpoint.
 
 | Script | Model | Params | Task | Checkpoint |
 | --- | --- | --- | --- | --- |
-| `generate_hunyuan_video_1_0.py` | HunyuanVideo (1.0) | 13B DiT | T2V | `hunyuan-video-t2v-720p/` |
+| `generate_hunyuan_video.py` | HunyuanVideo (1.0) | 13B DiT | T2V | `hunyuan-video-t2v-720p/` |
 
 Conditioning requires two separate text towers on top of the DiT itself: a
 Llama3-8B decoder-only text encoder (extracted from
@@ -30,7 +30,7 @@ pip install -e ".[tpu,torch,text]"
 
 ---
 
-## HunyuanVideo (1.0, 720p, T2V) — `generate_hunyuan_video_1_0.py`
+## HunyuanVideo (1.0, 720p, T2V) — `generate_hunyuan_video.py`
 
 `--checkpoint_dir` should point at `tencent/HunyuanVideo`'s downloaded root
 (containing `config.json`, `hunyuan-video-t2v-720p/{transformers,vae}/`);
@@ -40,7 +40,7 @@ below); `--clip_checkpoint_dir` at `openai/clip-vit-large-patch14`'s
 downloaded root.
 
 ```bash
-python examples/generate_hunyuan_video_1_0.py \
+python examples/generate_hunyuan_video.py \
   --checkpoint_dir "./checkpoints/HunyuanVideo" \
   --text_encoder_dir "./checkpoints/HunyuanVideo/text_encoder" \
   --clip_checkpoint_dir "./checkpoints/HunyuanVideo/clip-vit-large-patch14" \
@@ -100,14 +100,6 @@ at inference time.
 | `--tensor_parallel_size` | every local device | Megatron-shards the DiT's double/single-stream blocks' Q/K/V/output/FFN Dense layers across this many chips. Must divide `heads_num` (24). Required in practice — the 13B DiT doesn't fit replicated on one TPU v4 chip. |
 | `--vae_tile_latent_size` | reference default | Latent-space spatial tile size for the tiled VAE decode. Shrink (e.g. `8`) if VAE decode OOMs. |
 | `--output_path` | `output.mp4` | Output video path. |
-
-**Scope**:
-- T2V only (see module docstring).
-- No `--sequence_parallel_size`/weight offloading yet — only Megatron
-  tensor parallelism (`--tensor_parallel_size`) for the DiT.
-- No distilled/fp8 checkpoint variants.
-- No VAE temporal tiling (the reference itself never supports it for this
-  VAE) — spatial tiling (`--vae_tile_latent_size`) is implemented.
 
 ---
 

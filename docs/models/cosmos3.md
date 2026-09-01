@@ -260,33 +260,6 @@ like *"This video is of 832x480 resolution."* to the prompt. Every real
 usage example in `refs/cosmos-main` passes `false` for both — do the same
 unless you have a specific reason not to.
 
-### Scope
-
-This port covers **text2video and image2video only** — a deliberate,
-explicit scope decision, not a partial/interrupted port. Cosmos 3 also
-supports several other surfaces this repo doesn't implement:
-
-- **Video2video, action-conditioned generation, sound-conditioned
-  generation** — the reference pipeline supports all three (`video`,
-  `action`, `enable_sound` arguments), but none are wired up here.
-- **The "Reasoner" surface** (causal-LM-only, text/vision-in, text-out —
-  world understanding, captioning, grounding) — this port never loads
-  `lm_head` or `vision_encoder/` (`Qwen3VLVisionModel`) at all, since
-  neither is needed for pure generation: text conditioning goes through
-  `embed_tokens` directly (no separate text encoder, unlike
-  Cosmos-Predict2.5's Reason1), and image conditioning for image2video goes
-  through the *VAE*, not a vision encoder tower.
-
-If any of these become interesting later, the packed dual-pathway
-transformer (`vidax.models.cosmos3.dit.Cosmos3Transformer`) and mRoPE module
-are already shared, general-purpose infrastructure — most of the additional
-work would be in the pipeline script (packing/position-id construction for
-the extra modality) and, for the Reasoner surface, porting
-`vision_encoder`/`lm_head` and switching the packed-sequence design back
-toward something closer to the reference's ragged/multi-item batching (see
-[Architecture notes](#architecture-notes)'s note on why this port doesn't
-need that for T2V/I2V specifically).
-
 ---
 
 ## Architecture notes

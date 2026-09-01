@@ -139,17 +139,6 @@ and [`docs/lessons/cogvideox_debugging.md`](../lessons/cogvideox_debugging.md).
 | `--fps` | `16` | Output video frame rate. |
 | `--output_path` | `output_cogvideox.mp4` | With multiple prompts, each video is saved as `<output_path>_<i>.mp4`. |
 
-### Scope
-
-**Not implemented in this port:**
-
-- **V2V** (video-to-video) — the diffusers pipeline supports it; this script
-  does not.
-- **Combined `--tensor_parallel_size` + `--sequence_parallel_size`** — the
-  two are mutually exclusive for CogVideoX (see [Tensor and sequence
-  parallelism](#tensor-and-sequence-parallelism)). The 5B DiT never needs
-  both at once on this hardware.
-
 ---
 
 ## Architecture notes

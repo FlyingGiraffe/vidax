@@ -156,30 +156,6 @@ There is no `--sequence_parallel_size` yet — see [Scope](#scope).
 | `--fps` | `24` | Output video frame rate. |
 | `--output_path` | `output_video.mp4` | With multiple prompts, each video is saved as `<output_path>_<i>.mp4`. |
 
-### Scope
-
-**Not implemented in this first port** (see
-[`examples/generate_ltx_video.py`](../../examples/generate_ltx_video.py)'s
-module docstring):
-
-- **Multi-scale two-pass generation** (the reference's default pipeline:
-  a low-res first pass, a learned `LatentUpsampler`, then a high-res second
-  pass continuing from there) — this port always runs single-scale,
-  single-pass.
-- **STG (spatio-temporal guidance)** and **`cfg_star_rescale`** — both
-  pure inference-loop guidance tricks layered on a working base model, not
-  architectural; skipped to keep the first port's surface area minimal.
-  Plain CFG only, with one constant `--guidance_scale` for the whole run
-  (the reference's own configs use a per-step schedule).
-- **`--sequence_parallel_size`** — `LTXDiT` has no sequence-parallel
-  wiring yet; `--tensor_parallel_size` alone is what this port has, and
-  what every current benchmark row uses (see
-  [`docs/benchmarking.md`](../benchmarking.md)).
-- **V2V** — the reference's conditioning mechanism (VAE-encode + lerp +
-  per-token mask) is the same one I2V already uses, just anchored at an
-  interior/later frame instead of frame 0 — architecturally close, just
-  not wired into the example script yet.
-
 ---
 
 ## Architecture notes

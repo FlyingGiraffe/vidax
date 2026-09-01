@@ -45,7 +45,7 @@ vidax/                          # Repository Root
 │   │   ├── ltx_video.md        # Full CLI reference & usage for LTX-Video (0.9.8)
 │   │   ├── ltx2_5.md           # Full CLI reference & usage for LTX-2.5
 │   │   ├── hunyuan_video_1_5.md # Full CLI reference & usage for HunyuanVideo-1.5
-│   │   ├── hunyuan_video_1_0.md  # HunyuanVideo 1.0 (T2V) -- DiT/translator only, partial port
+│   │   ├── hunyuan_video.md    # HunyuanVideo 1.0 (T2V) -- DiT/translator only, partial port
 │   │   └── cogvideox.md        # Full CLI reference & usage for CogVideoX (all 5 variants)
 │   ├── lessons/                # Model-specific debugging postmortems
 │   ├── hardware_and_sharding.md # General sharding/JIT/dtype engineering notes
@@ -62,8 +62,8 @@ vidax/                          # Repository Root
 │   ├── generate_ltx_video.py       # LTX-Video 0.9.8, --model_size {2b-distilled,13b-dev,13b-distilled}, t2v + i2v
 │   ├── generate_ltx2_5.py          # LTX-2.5, both 22B checkpoints (dev/distilled), t2v + i2v
 │   ├── generate_hunyuan_video_1_5.py # HunyuanVideo-1.5, --resolution {480p,720p}, t2v + i2v
-│   ├── generate_hunyuan_video_1_0.py # HunyuanVideo (1.0), 720p-native single checkpoint, t2v only
-│   └── generate_cogvideox.py      # CogVideoX, --variant {2b,5b,5b-i2v,1.5-5b,1.5-5b-i2v}, t2v + i2v
+│   ├── generate_hunyuan_video.py   # HunyuanVideo (1.0), 720p-native single checkpoint, t2v only
+│   └── generate_cogvideox.py       # CogVideoX, --variant {2b,5b,5b-i2v,1.5-5b,1.5-5b-i2v}, t2v + i2v
 └── src/
     └── vidax/                  # Core Python Package
         ├── __init__.py

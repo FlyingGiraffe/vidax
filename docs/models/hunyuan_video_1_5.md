@@ -105,15 +105,6 @@ python examples/generate_hunyuan_video_1_5.py \
 | `--vae_tile_latent_size` | reference default (16) | Latent-space spatial tile size for the tiled VAE decode (pixel tile = this × `ffactor_spatial`). Shrink (e.g. `8`) if VAE decode OOMs — more likely at `--tensor_parallel_size > 1`, where the other (replicated) components leave less per-chip headroom. |
 | `--output_path` | `output.mp4` | Output video path. |
 
-**Scope** (see [Architecture notes](#architecture-notes)):
-- No `--sequence_parallel_size`/weight offloading yet — only Megatron
-  tensor parallelism (`--tensor_parallel_size`) for the DiT.
-- No distilled/step-distilled/sparse-attention (`ssta_attention.py`) or
-  super-resolution checkpoint variants.
-- No VAE temporal tiling (the reference itself never supports it for this
-  VAE) — spatial tiling (`--vae_tile_latent_size`) is implemented and is
-  what makes the reference's own 121-frame default decode without OOM.
-
 ---
 
 ## Architecture notes

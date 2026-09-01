@@ -1,6 +1,6 @@
 """Benchmark harness for HunyuanVideo 1.0 (T2V only, one checkpoint
 variant -- `tencent/HunyuanVideo`'s `hunyuan-video-t2v-720p`). Imports and
-calls the real `examples/generate_hunyuan_video_1_0.py`'s `main(args)` (no
+calls the real `examples/generate_hunyuan_video.py`'s `main(args)` (no
 separate reimplementation of the generation loop -- see `benchmarks/
 common.py`'s module docstring).
 
@@ -13,7 +13,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "examples"))
-import generate_hunyuan_video_1_0  # noqa: E402
+import generate_hunyuan_video  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common  # noqa: E402

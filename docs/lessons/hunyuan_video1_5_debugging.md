@@ -2,7 +2,7 @@
 
 Findings from porting HunyuanVideo-1.5's DiT/VAE/text-and-vision-encoders
 to JAX/Flax. See
-[`docs/models/hunyuan_video_1_5.md`](../models/hunyuan_video_1_5.md) for
+[`docs/models/hunyuan_video1_5.md`](../models/hunyuan_video1_5.md) for
 the full port and its architecture.
 
 ## `attn_mode="flash"` masks only key positions, not query+key

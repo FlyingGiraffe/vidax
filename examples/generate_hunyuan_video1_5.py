@@ -3,12 +3,12 @@
 #
 # T2V and I2V share this one script (same DiT class/checkpoint-shape
 # family for a given --resolution/--task -- see
-# vidax.models.hunyuan_video.hunyuan_video_1_5.dit's module docstring):
+# vidax.models.hunyuan_video.hunyuan_video1_5.dit's module docstring):
 # pass --image_path for I2V, omit it for T2V. --resolution/--task select
 # which of the 4 core checkpoint variants (480p_t2v/480p_i2v/720p_t2v/
 # 720p_i2v) to load and the matching default flow-match --shift.
 #
-# Scope for this first landing (see docs/models/hunyuan_video_1_5.md):
+# Scope for this first landing (see docs/models/hunyuan_video1_5.md):
 # - Supports Megatron-style 1D tensor parallelism (--tensor_parallel_size)
 #   for the DiT's double/single-stream blocks -- plain GSPMD
 #   auto-partitioning (`vidax.core.sharding.shard_wan_params`), *not*
@@ -20,7 +20,7 @@
 # - VAE decode is spatially tiled (--vae_tile_latent_size) so the
 #   reference's own 121-frame default decodes without OOM -- see
 #   spatial_tiled_vae_decode below and
-#   docs/lessons/hunyuan_video_1_5_debugging.md. No temporal tiling (the
+#   docs/lessons/hunyuan_video1_5_debugging.md. No temporal tiling (the
 #   reference VAE doesn't support it either).
 # - No distilled/sparse-attention/SR checkpoint variants.
 # - Real classifier-free guidance (uncond + guidance_scale * (cond -
@@ -41,21 +41,21 @@ from PIL import Image
 
 from vidax.core.sharding import build_tpu_mesh, configure_jax_cache, get_replicated_sharding, shard_wan_params
 from vidax.models.cosmos2_5.reason1 import Qwen2TextModel
-from vidax.models.hunyuan_video.hunyuan_video_1_5.byt5 import byt5_encoder
-from vidax.models.hunyuan_video.hunyuan_video_1_5.configs import (
+from vidax.models.hunyuan_video.hunyuan_video1_5.byt5 import byt5_encoder
+from vidax.models.hunyuan_video.hunyuan_video1_5.configs import (
     dit_kwargs_from_transformer_config,
     default_shift_for,
-    load_hunyuan_video_1_5_transformer_config,
-    load_hunyuan_video_1_5_vae_config,
+    load_hunyuan_video1_5_transformer_config,
+    load_hunyuan_video1_5_vae_config,
     vae_kwargs_from_vae_config,
 )
-from vidax.models.hunyuan_video.hunyuan_video_1_5.dit import HunyuanVideo15DiT
-from vidax.models.hunyuan_video.hunyuan_video_1_5.qwen_text import (
+from vidax.models.hunyuan_video.hunyuan_video1_5.dit import HunyuanVideo15DiT
+from vidax.models.hunyuan_video.hunyuan_video1_5.qwen_text import (
     HunyuanVideoMLLMTokenizer,
     extract_hunyuan_mllm_embeddings,
 )
-from vidax.models.hunyuan_video.hunyuan_video_1_5.siglip import SiglipVisionEncoder, siglip_kwargs_from_config
-from vidax.models.hunyuan_video.hunyuan_video_1_5.vae import HunyuanVideo15VAE, blend_h, blend_v
+from vidax.models.hunyuan_video.hunyuan_video1_5.siglip import SiglipVisionEncoder, siglip_kwargs_from_config
+from vidax.models.hunyuan_video.hunyuan_video1_5.vae import HunyuanVideo15VAE, blend_h, blend_v
 from vidax.schedulers.flow_match import RectifiedFlowScheduler
 from vidax.translator.mappings import load_torch_checkpoint_to_jax
 
@@ -145,7 +145,7 @@ def main(args):
 
     # --- DiT ---
     transformer_dir = os.path.join(args.checkpoint_dir, "transformer", variant)
-    dit_config = load_hunyuan_video_1_5_transformer_config(transformer_dir)
+    dit_config = load_hunyuan_video1_5_transformer_config(transformer_dir)
     dit_kwargs = dit_kwargs_from_transformer_config(dit_config)
     assert dit_kwargs["heads_num"] % tp_size == 0, (
         f"HunyuanVideo15DiT's heads_num ({dit_kwargs['heads_num']}) must be divisible by "
@@ -153,17 +153,17 @@ def main(args):
     dit_model = HunyuanVideo15DiT(**dit_kwargs, mesh=mesh)
     dit_params = load_torch_checkpoint_to_jax(
         os.path.join(transformer_dir, "diffusion_pytorch_model.safetensors"),
-        model_type="hunyuan_video_1_5_dit")
+        model_type="hunyuan_video1_5_dit")
     dit_params = cast_to_dtype(dit_params, dit_dtype)
     dit_params = jax.device_put(dit_params, shard_wan_params(dit_params, mesh))
 
     # --- VAE ---
     vae_dir = os.path.join(args.checkpoint_dir, "vae")
-    vae_config = load_hunyuan_video_1_5_vae_config(vae_dir)
+    vae_config = load_hunyuan_video1_5_vae_config(vae_dir)
     vae_kwargs = vae_kwargs_from_vae_config(vae_config)
     vae_model = HunyuanVideo15VAE(**vae_kwargs)
     vae_params = load_torch_checkpoint_to_jax(
-        os.path.join(vae_dir, "diffusion_pytorch_model.safetensors"), model_type="hunyuan_video_1_5_vae")
+        os.path.join(vae_dir, "diffusion_pytorch_model.safetensors"), model_type="hunyuan_video1_5_vae")
     vae_params = jax.device_put(cast_to_dtype(vae_params, dtype), replicated)
     scaling_factor = vae_config["scaling_factor"]
     shift_factor = vae_config.get("shift_factor")
@@ -191,7 +191,7 @@ def main(args):
     byt5_model = byt5_encoder(byt5_vocab_size)
     byt5_params = load_torch_checkpoint_to_jax(
         os.path.join(args.checkpoint_dir, "text_encoder", "Glyph-SDXL-v2", "checkpoints", "byt5_model.pt"),
-        model_type="hunyuan_video_1_5_byt5")
+        model_type="hunyuan_video1_5_byt5")
     byt5_params = jax.device_put(cast_to_dtype(byt5_params, dtype), replicated)
     byt5_tokenizer = ByT5PromptTokenizer(os.path.join(args.checkpoint_dir, "text_encoder", "byt5-small"))
 
@@ -206,7 +206,7 @@ def main(args):
         siglip_model = SiglipVisionEncoder(**siglip_kwargs_from_config(siglip_config))
         siglip_params = load_torch_checkpoint_to_jax(
             os.path.join(args.siglip_checkpoint_dir, "image_encoder", "model.safetensors"),
-            model_type="hunyuan_video_1_5_siglip")
+            model_type="hunyuan_video1_5_siglip")
         siglip_params = jax.device_put(cast_to_dtype(siglip_params, dtype), replicated)
         from transformers import SiglipImageProcessor
         siglip_processor = SiglipImageProcessor.from_pretrained(

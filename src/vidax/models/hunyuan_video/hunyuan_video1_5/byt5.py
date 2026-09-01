@@ -4,7 +4,7 @@ Structural port of ``hyvideo/models/text_encoders/byT5/__init__.py``. Two
 pieces:
   - ``ByT5Mapper``: the small MLP that projects byT5's raw per-byte
     embeddings up to the DiT's ``hidden_size`` (this is what
-    ``hunyuan_video_1_5/dit.py``'s ``byt5_in`` uses directly).
+    ``hunyuan_video1_5/dit.py``'s ``byt5_in`` uses directly).
   - The underlying T5-encoder-only tower (Glyph-SDXL-v2 fine-tuned on top
     of ``google/byt5-small``, ``T5ForConditionalGeneration.from_pretrained(
     ...).get_encoder()`` in the reference) that produces those raw

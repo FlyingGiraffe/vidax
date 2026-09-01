@@ -80,7 +80,7 @@ I2V, Wan2.2's A14B).
 | LTX-Video (0.9.8) | 13B (dev) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Link](https://huggingface.co/Lightricks/LTX-Video) |
 | LTX-Video (0.9.8) | 13B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Link](https://huggingface.co/Lightricks/LTX-Video) |
 | LTX-Video (0.9.8) | 2B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Link](https://huggingface.co/Lightricks/LTX-Video) |
-| HunyuanVideo-1.5 | 8.3B | T2V/I2V | ✅/❌/❌ | [hunyuan_video_1_5.md](docs/models/hunyuan_video_1_5.md) | 🤗[Link](https://huggingface.co/tencent/HunyuanVideo-1.5) |
+| HunyuanVideo-1.5 | 8.3B | T2V/I2V | ✅/❌/❌ | [hunyuan_video1_5.md](docs/models/hunyuan_video1_5.md) | 🤗[Link](https://huggingface.co/tencent/HunyuanVideo-1.5) |
 | HunyuanVideo | 13B | T2V | ✅/❌/❌ | [hunyuan_video.md](docs/models/hunyuan_video.md) | 🤗[Link](https://huggingface.co/tencent/HunyuanVideo) |
 | CogVideoX1.5 | 5B | I2V | ✅/❌/❌ | [cogvideox.md](docs/models/cogvideox.md) | 🤗[Link](https://huggingface.co/THUDM/CogVideoX1.5-5B-I2V) |
 | CogVideoX1.5 | 5B | T2V | ✅/❌/❌ | [cogvideox.md](docs/models/cogvideox.md) | 🤗[Link](https://huggingface.co/THUDM/CogVideoX1.5-5B) |

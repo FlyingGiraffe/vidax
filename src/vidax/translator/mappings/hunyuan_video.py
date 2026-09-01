@@ -8,10 +8,10 @@ mp_rank_00_model_states.pt`, `ckpt["module"]`, 856 leaves, 20 double blocks
 the `"HYVideo-T/2-cfgdistill"` variant) -- every regex below (fused-QKV
 splitting included) matches the real key names byte-for-byte; the earlier
 `TODO(real-checkpoint)` markers are resolved. Target Flax module tree:
-`vidax.models.hunyuan_video.hunyuan_video_1_0.dit.HunyuanVideo10DiT` (+ shared
+`vidax.models.hunyuan_video.hunyuan_video.dit.HunyuanVideoDiT` (+ shared
 `common/dit_layers.py`).
 
-**Key structural difference from `hunyuan_video_1_5.py`'s DiT mapper**:
+**Key structural difference from `hunyuan_video1_5.py`'s DiT mapper**:
 1.0's real checkpoint stores **fused** QKV/QKV+MLP-in Linears
 (`img_attn_qkv`/`txt_attn_qkv`: `Linear(hidden, 3*hidden)`;
 `single_blocks.N.linear1`: `Linear(hidden, 3*hidden+mlp_hidden)`), not
@@ -23,14 +23,14 @@ straight across.
 
 **VAE/text-encoder mappers**, added this session, all cross-checked against
 real downloaded checkpoints:
-- `map_hunyuan_video_1_0_vae_keys`: `AutoencoderKLCausal3D`'s real
-  `pytorch_model.pt` (248 leaves) -- see `hunyuan_video_1_0.vae`'s module
+- `map_hunyuan_video_vae_keys`: `AutoencoderKLCausal3D`'s real
+  `pytorch_model.pt` (248 leaves) -- see `hunyuan_video.vae`'s module
   docstring for the exact key/name correspondence.
-- `map_hunyuan_video_1_0_llama_text_keys`: the extracted
+- `map_hunyuan_video_llama_text_keys`: the extracted
   `xtuner/llava-llama-3-8b-v1_1-transformers`'s `.language_model`
   (`LlamaModel`, 290 leaves, no `model.` prefix since only the bare
   sub-module was saved).
-- `map_hunyuan_video_1_0_clip_text_keys`: `openai/clip-vit-large-patch14`'s
+- `map_hunyuan_video_clip_text_keys`: `openai/clip-vit-large-patch14`'s
   `text_model.*` (197 leaves), pooled-output-only (no vision tower).
 """
 import re
@@ -100,7 +100,7 @@ _REFINER_ADALN_RE = re.compile(
 _FINAL_ADALN_RE = re.compile(r"^final_layer\.adaLN_modulation\.1\.(weight|bias)$")
 
 
-def map_hunyuan_video_1_0_dit_keys(pt_state_dict: Dict) -> Dict:
+def map_hunyuan_video_dit_keys(pt_state_dict: Dict) -> Dict:
     """Cross-checked against the real downloaded checkpoint -- see module
     docstring. `mp_rank_00_model_states.pt` (this model predates broad
     safetensors adoption -- a raw DeepSpeed-style `.pt`, confirmed via
@@ -128,7 +128,7 @@ def map_hunyuan_video_1_0_dit_keys(pt_state_dict: Dict) -> Dict:
         if pt_key == "img_in.proj.weight":
             # Conv3d (out, in, pt, ph, pw), kernel==stride patchify -> flatten
             # to a plain Dense kernel, same reasoning as
-            # `hunyuan_video_1_5.py`'s identical branch (this file's
+            # `hunyuan_video1_5.py`'s identical branch (this file's
             # `_patchify` uses the same (c, pt, ph, pw) flatten order).
             arr_np = pt_tensor_to_numpy(arr)
             out_ch = arr_np.shape[0]
@@ -300,7 +300,7 @@ def map_hunyuan_video_1_0_dit_keys(pt_state_dict: Dict) -> Dict:
 
 def _conv(jax_params: dict, path: list, pt_key: str, arr) -> None:
     """`nn.Conv` (used for every causal conv *and* the 1x1 GroupNorm-free
-    shortcut/quant convs in `hunyuan_video_1_0.vae`) -- Flax param name
+    shortcut/quant convs in `hunyuan_video.vae`) -- Flax param name
     `kernel`, not `weight`. `convert_pt_tensor_to_jax` already transposes
     5D (Conv3d) arrays to Flax's (T,H,W,In,Out) layout.
     """
@@ -333,11 +333,11 @@ _VAE_NORM_OUT_RE = re.compile(r"^(encoder|decoder)\.conv_norm_out\.(weight|bias)
 _VAE_QUANT_CONV_RE = re.compile(r"^(quant_conv|post_quant_conv)\.(weight|bias)$")
 
 
-def map_hunyuan_video_1_0_vae_keys(pt_state_dict: Dict) -> Dict:
+def map_hunyuan_video_vae_keys(pt_state_dict: Dict) -> Dict:
     """`AutoencoderKLCausal3D`'s real `pytorch_model.pt` (248 leaves,
     cross-checked directly against `tencent/HunyuanVideo/hunyuan-video-
     t2v-720p/vae/pytorch_model.pt`) -> `vidax.models.hunyuan_video.
-    hunyuan_video_1_0.vae.HunyuanVideo10VAE`'s param tree. See that module's
+    hunyuan_video.vae.HunyuanVideoVAE`'s param tree. See that module's
     docstring for the encoder/decoder/mid-block naming correspondence this
     mapper relies on (e.g. `encoder.down_blocks.I.resnets.J.*` ->
     `["encoder", f"down_blocks_{I}_resnets_{J}", ...]`).
@@ -417,10 +417,10 @@ def _rmsnorm(jax_params: dict, path: list, arr) -> None:
     _set_nested_dict(jax_params, path + ["scale"], convert_pt_tensor_to_jax("weight", arr))
 
 
-def map_hunyuan_video_1_0_llama_text_keys(pt_state_dict: Dict) -> Dict:
+def map_hunyuan_video_llama_text_keys(pt_state_dict: Dict) -> Dict:
     """The extracted `xtuner/llava-llama-3-8b-v1_1-transformers`'s
     `.language_model` (plain HF `LlamaModel`, 290 leaves, no `model.`
-    prefix -- see `hunyuan_video_1_0.llama_text`'s module docstring) -> that
+    prefix -- see `hunyuan_video.llama_text`'s module docstring) -> that
     module's `LlamaTextModel` param tree. All Dense layers are bias-free
     (`attention_bias=False`, `mlp_bias=False`), confirmed against the real
     checkpoint (no `*.bias` keys for any q/k/v/o/gate/up/down proj).
@@ -469,11 +469,11 @@ _CLIP_ATTN_RE = re.compile(
 _CLIP_MLP_RE = re.compile(r"^text_model\.encoder\.layers\.(\d+)\.mlp\.(fc1|fc2)\.(weight|bias)$")
 
 
-def map_hunyuan_video_1_0_clip_text_keys(pt_state_dict: Dict) -> Dict:
+def map_hunyuan_video_clip_text_keys(pt_state_dict: Dict) -> Dict:
     """`openai/clip-vit-large-patch14`'s `text_model.*` (197 leaves,
     pooled-output-only -- no `vision_model`/`visual_projection`/`logit_scale`
     keys are mapped, since only the text tower's pooled output is ever used,
-    see `hunyuan_video_1_0.clip_text`'s module docstring) -> that module's
+    see `hunyuan_video.clip_text`'s module docstring) -> that module's
     `ClipTextModel` param tree.
     """
     jax_params: Dict = {}
@@ -508,4 +508,110 @@ def map_hunyuan_video_1_0_clip_text_keys(pt_state_dict: Dict) -> Dict:
         # logit_scale/position_ids buffer) -- left unmapped, matches
         # ClipTextModel's text-tower-only scope.
 
+    return {"params": jax_params}
+
+
+# ---------------------------------------------------------------------------
+# HunyuanVideo-I2V's ``token_replace`` mode -- the *full* multimodal
+# ``xtuner/llava-llama-3-8b-v1_1-transformers`` (`LlavaForConditionalGeneration`:
+# CLIP ViT-L/14-336 vision tower + 2-layer MLP projector + the same Llama
+# decoder tower as T2V, just keyed under a `language_model.model.` prefix
+# instead of being pre-extracted into its own standalone checkpoint -- see
+# `hunyuan_video.llava_vision`/`hunyuan_video.llava_text`'s module
+# docstrings for the architecture). Cross-checked against the real
+# downloaded checkpoint (`xtuner/llava-llama-3-8b-v1_1-transformers`'s own
+# `model.safetensors.index.json`, 686 leaves): `language_model.model.*`
+# (Llama decoder, same shape/key layout as T2V's pre-extracted
+# `.language_model` once this prefix is stripped -- confirmed byte-for-byte
+# by diffing the two checkpoints' key sets modulo the prefix),
+# `vision_tower.vision_model.*` (standard HF `CLIPVisionModel` layout),
+# `multi_modal_projector.linear_{1,2}.{weight,bias}`. The DiT checkpoint
+# itself (`tencent/HunyuanVideo-I2V`'s `hunyuan-video-i2v-720p/transformers/
+# mp_rank_00_model_states.pt`) needs **no separate mapper at all** --
+# `token_replace` doesn't change `in_channels`, and the real checkpoint's
+# 856 leaves were confirmed to produce an exact 1:1 param-tree match
+# against `HunyuanVideoDiT`'s own init'd params via the *existing*
+# `map_hunyuan_video_dit_keys` unmodified (0 missing/extra/mismatched of
+# 856). The VAE is also unchanged: `hunyuan-video-i2v-720p/vae/
+# pytorch_model.pt` is byte-identical (same sha256) to the T2V VAE
+# checkpoint already downloaded -- `map_hunyuan_video_vae_keys` applies
+# as-is, no new checkpoint needed.
+# ---------------------------------------------------------------------------
+
+def map_hunyuan_video_llava_llama_text_keys(pt_state_dict: Dict) -> Dict:
+    """Strips the full checkpoint's `language_model.model.` prefix and
+    reuses `map_hunyuan_video_llama_text_keys` unmodified -- same Llama
+    tower, same key layout underneath the prefix (confirmed against the
+    real checkpoint, not assumed)."""
+    stripped = {
+        pt_key[len("language_model.model."):]: arr
+        for pt_key, arr in pt_state_dict.items()
+        if pt_key.startswith("language_model.model.")
+    }
+    return map_hunyuan_video_llama_text_keys(stripped)
+
+
+_CLIP_VISION_LAYER_NORM_RE = re.compile(
+    r"^vision_tower\.vision_model\.encoder\.layers\.(\d+)\.(layer_norm1|layer_norm2)\.(weight|bias)$")
+_CLIP_VISION_ATTN_RE = re.compile(
+    r"^vision_tower\.vision_model\.encoder\.layers\.(\d+)\.self_attn\.(q|k|v|out)_proj\.(weight|bias)$")
+_CLIP_VISION_MLP_RE = re.compile(
+    r"^vision_tower\.vision_model\.encoder\.layers\.(\d+)\.mlp\.(fc1|fc2)\.(weight|bias)$")
+
+
+def map_hunyuan_video_clip_vision_keys(pt_state_dict: Dict) -> Dict:
+    """`vision_tower.vision_model.*` (standard HF `CLIPVisionModel`, 24
+    layers, `post_layernorm`/pooling never mapped -- `hunyuan_video.
+    llava_vision.ClipVisionModel` never reaches them, see that module's
+    docstring on `vision_feature_layer`) -> `ClipVisionModel`'s param tree.
+    """
+    jax_params: Dict = {}
+    for pt_key, arr in pt_state_dict.items():
+        if pt_key == "vision_tower.vision_model.embeddings.patch_embedding.weight":
+            # Conv2d weight (out, in, kh, kw) -> Flax Conv kernel (kh, kw, in, out).
+            _set_nested_dict(jax_params, ["patch_embedding", "kernel"], pt_tensor_to_numpy(arr).transpose(2, 3, 1, 0))
+            continue
+        if pt_key == "vision_tower.vision_model.embeddings.class_embedding":
+            _set_nested_dict(jax_params, ["class_embedding"], pt_tensor_to_numpy(arr))
+            continue
+        if pt_key == "vision_tower.vision_model.embeddings.position_embedding.weight":
+            _set_nested_dict(jax_params, ["position_embedding", "embedding"], pt_tensor_to_numpy(arr))
+            continue
+        if pt_key in ("vision_tower.vision_model.pre_layrnorm.weight", "vision_tower.vision_model.pre_layrnorm.bias"):
+            _ln(jax_params, ["pre_layrnorm"], pt_key, arr)
+            continue
+        m = _CLIP_VISION_LAYER_NORM_RE.match(pt_key)
+        if m:
+            i, sub, _kind = m.groups()
+            _ln(jax_params, [f"encoder_layers_{i}", sub], pt_key, arr)
+            continue
+        m = _CLIP_VISION_ATTN_RE.match(pt_key)
+        if m:
+            i, sub, _kind = m.groups()
+            name = {"q": "self_attn_q_proj", "k": "self_attn_k_proj", "v": "self_attn_v_proj", "out": "self_attn_out_proj"}[sub]
+            _lin(jax_params, [f"encoder_layers_{i}", name], pt_key, arr)
+            continue
+        m = _CLIP_VISION_MLP_RE.match(pt_key)
+        if m:
+            i, sub, _kind = m.groups()
+            name = {"fc1": "mlp_fc1", "fc2": "mlp_fc2"}[sub]
+            _lin(jax_params, [f"encoder_layers_{i}", name], pt_key, arr)
+            continue
+        # Unrecognized key (e.g. language_model.*/multi_modal_projector.*/
+        # vision_tower.vision_model.post_layernorm.*/position_ids buffer)
+        # -- left unmapped, matches ClipVisionModel's scope.
+
+    return {"params": jax_params}
+
+
+def map_hunyuan_video_llava_projector_keys(pt_state_dict: Dict) -> Dict:
+    """`multi_modal_projector.linear_{1,2}.{weight,bias}` ->
+    `LlavaMultiModalProjector`'s param tree."""
+    jax_params: Dict = {}
+    for pt_key, arr in pt_state_dict.items():
+        if pt_key.startswith("multi_modal_projector.linear_1."):
+            _lin(jax_params, ["linear_1"], pt_key.replace("multi_modal_projector.", ""), arr)
+        elif pt_key.startswith("multi_modal_projector.linear_2."):
+            _lin(jax_params, ["linear_2"], pt_key.replace("multi_modal_projector.", ""), arr)
+        # Unrecognized key -- left unmapped.
     return {"params": jax_params}

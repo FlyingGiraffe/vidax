@@ -18,7 +18,7 @@ deferred as documented follow-up, same precedent as this repo's DiT
 
 Real ``block_out_channels``/``layers_per_block``/etc. come from the
 downloaded checkpoint's ``vae/config.json`` (read via ``configs.py``'s
-``load_hunyuan_video_1_5_vae_config`` + a kwargs builder -- not hardcoded
+``load_hunyuan_video1_5_vae_config`` + a kwargs builder -- not hardcoded
 here), transcribed at the time of writing as: ``block_out_channels=
 [128,256,512,1024,1024]``, ``layers_per_block=2``, ``ffactor_spatial=16``,
 ``ffactor_temporal=4``, ``latent_channels=32``, ``in_channels=out_channels=
@@ -332,7 +332,7 @@ class Decoder(nn.Module):
         levels rather than being bounded by any one level's own compute.
         Calling each level as its own top-level `jax.jit`'d
         `decoder.apply(params, h, i_level, method=Decoder.stage_level)`
-        (see `examples/generate_hunyuan_video_1_5.py`'s `vae_decode`)
+        (see `examples/generate_hunyuan_video1_5.py`'s `vae_decode`)
         gives every level's temporaries a real chance to be freed between
         levels, at the cost of `len(block_out_channels)` separate
         compiles instead of one.
@@ -408,7 +408,7 @@ def blend_h(a: jnp.ndarray, b: jnp.ndarray, blend_extent: int) -> jnp.ndarray:
     """Linear cross-fade of ``b``'s left edge into ``a``'s right edge along
     the width axis (channel-last: axis -2) -- port of
     ``AutoencoderKLConv3D.blend_h`` (channel-first there, blending along its
-    last axis). Used by ``examples/generate_hunyuan_video_1_5.py``'s
+    last axis). Used by ``examples/generate_hunyuan_video1_5.py``'s
     spatial-tiled decode to stitch adjacent tiles without a visible seam.
     """
     blend_extent = min(a.shape[-2], b.shape[-2], blend_extent)

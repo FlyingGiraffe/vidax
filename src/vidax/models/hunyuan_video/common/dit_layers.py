@@ -14,7 +14,7 @@ in the reference are irrelevant here.
 
 **Key-only attention masking.** The reference's joint (image+text)
 attention receives a 1D per-key validity mask (``text_mask``, extended to
-cover byT5/vision tokens -- see ``hunyuan_video_1_5/dit.py``), left-padded
+cover byT5/vision tokens -- see ``hunyuan_video1_5/dit.py``), left-padded
 with ``True`` for every image-token key position (``F.pad(text_mask,
 (sequence_length, 0), value=True)`` in ``modules/attention.py``'s
 ``sequence_parallel_attention``). Under ``flash_attn_no_pad``'s
@@ -44,12 +44,31 @@ from vidax.models.hunyuan_video.common.rope import apply_rope3d
 _NEG_INF = -1e9
 
 
-def modulate(x: jnp.ndarray, shift: Optional[jnp.ndarray], scale: Optional[jnp.ndarray]) -> jnp.ndarray:
+def modulate(
+    x: jnp.ndarray, shift: Optional[jnp.ndarray], scale: Optional[jnp.ndarray],
+    tr_shift: Optional[jnp.ndarray] = None, tr_scale: Optional[jnp.ndarray] = None,
+    first_frame_token_num: Optional[int] = None,
+) -> jnp.ndarray:
     """``x * (1 + scale) + shift``, shift/scale broadcast over the sequence axis.
 
     Matches ``modules/modulate_layers.py:modulate`` exactly (shift/scale
     each shaped (B, C), unsqueezed to (B, 1, C)).
+
+    ``tr_shift``/``tr_scale``/``first_frame_token_num`` implement
+    HunyuanVideo-I2V's ``i2v_condition_type="token_replace"`` (see
+    ``hunyuan_video.dit``'s module docstring): when given, the first
+    ``first_frame_token_num`` *image* tokens (the reference image's own
+    clean, un-noised latent frame, substituted in before the block loop)
+    get modulated with ``tr_shift``/``tr_scale`` (computed from an
+    as-if-t=0 timestep vector) instead of the ordinary ``shift``/``scale``
+    (computed from the real, noisy diffusion timestep) that every other
+    token uses. `None` for both (the default) reproduces plain T2V/1.5
+    behavior exactly -- unused by any existing caller.
     """
+    if tr_shift is not None:
+        x_zero = x[:, :first_frame_token_num] * (1 + tr_scale[:, None, :]) + tr_shift[:, None, :]
+        x_orig = x[:, first_frame_token_num:] * (1 + scale[:, None, :]) + shift[:, None, :]
+        return jnp.concatenate([x_zero, x_orig], axis=1)
     if scale is None and shift is None:
         return x
     if shift is None:
@@ -59,8 +78,20 @@ def modulate(x: jnp.ndarray, shift: Optional[jnp.ndarray], scale: Optional[jnp.n
     return x * (1 + scale[:, None, :]) + shift[:, None, :]
 
 
-def apply_gate(x: jnp.ndarray, gate: Optional[jnp.ndarray]) -> jnp.ndarray:
-    """``x * gate``, gate (B, C) broadcast over the sequence axis."""
+def apply_gate(
+    x: jnp.ndarray, gate: Optional[jnp.ndarray],
+    tr_gate: Optional[jnp.ndarray] = None, first_frame_token_num: Optional[int] = None,
+) -> jnp.ndarray:
+    """``x * gate``, gate (B, C) broadcast over the sequence axis.
+
+    ``tr_gate``/``first_frame_token_num``: see ``modulate``'s docstring --
+    same token_replace split, `None` (the default) unused by any existing
+    (non-I2V) caller.
+    """
+    if tr_gate is not None:
+        x_zero = x[:, :first_frame_token_num] * tr_gate[:, None, :]
+        x_orig = x[:, first_frame_token_num:] * gate[:, None, :]
+        return jnp.concatenate([x_zero, x_orig], axis=1)
     if gate is None:
         return x
     return x * gate[:, None, :]
@@ -72,14 +103,22 @@ class ModulateDiT(nn.Module):
     factor: int
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        x = nn.silu(x)
-        return nn.Dense(
+    def __call__(self, x: jnp.ndarray, token_replace_x: Optional[jnp.ndarray] = None):
+        """Returns just the modulation vector, or, when ``token_replace_x``
+        is given (I2V's ``token_replace`` mode -- see ``modulate``'s
+        docstring), a ``(modulation, token_replace_modulation)`` pair, both
+        run through the *same* Linear (weight-tied, matching the
+        reference's single ``self.linear`` called twice)."""
+        linear = nn.Dense(
             self.factor * self.hidden_size,
             kernel_init=nn.initializers.zeros,
             bias_init=nn.initializers.zeros,
             name="linear",
-        )(x)
+        )
+        out = linear(nn.silu(x))
+        if token_replace_x is not None:
+            return out, linear(nn.silu(token_replace_x))
+        return out
 
 
 class MLP(nn.Module):
@@ -266,7 +305,7 @@ def masked_self_attention(
     multi-device/mesh dispatch heuristic checks *global*
     `jax.device_count()`, not whether this call's own q/k/v are actually
     sharded -- wrong for this port's current single-device-per-component
-    placement (see `examples/generate_hunyuan_video_1_5.py`) on a
+    placement (see `examples/generate_hunyuan_video1_5.py`) on a
     multi-chip host; and its dense-bias flash path
     (`_flash_attention_tpu(..., bias=...)`) still materializes an O(S^2)
     tensor, unsuitable here regardless (see
@@ -341,19 +380,33 @@ class MMDoubleStreamBlock(nn.Module):
         img: jnp.ndarray, txt: jnp.ndarray, vec: jnp.ndarray,
         freqs: Tuple[jnp.ndarray, jnp.ndarray],
         key_valid: jnp.ndarray,
+        token_replace_vec: Optional[jnp.ndarray] = None,
+        first_frame_token_num: Optional[int] = None,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """``token_replace_vec``/``first_frame_token_num``: I2V's
+        ``token_replace`` mode only (see ``modulate``'s docstring) --
+        `None` (the default) reproduces plain T2V/1.5 behavior exactly."""
         mlp_hidden = int(self.hidden_size * self.mlp_width_ratio)
+        tr = token_replace_vec is not None
 
-        img_mod = ModulateDiT(self.hidden_size, factor=6, name="img_mod")(vec)
+        img_mod_out = ModulateDiT(self.hidden_size, factor=6, name="img_mod")(vec, token_replace_vec if tr else None)
+        img_mod, tr_img_mod = img_mod_out if tr else (img_mod_out, None)
         (img_mod1_shift, img_mod1_scale, img_mod1_gate,
          img_mod2_shift, img_mod2_scale, img_mod2_gate) = jnp.split(img_mod, 6, axis=-1)
+        if tr:
+            (tr_img_mod1_shift, tr_img_mod1_scale, tr_img_mod1_gate,
+             tr_img_mod2_shift, tr_img_mod2_scale, tr_img_mod2_gate) = jnp.split(tr_img_mod, 6, axis=-1)
 
         txt_mod = ModulateDiT(self.hidden_size, factor=6, name="txt_mod")(vec)
         (txt_mod1_shift, txt_mod1_scale, txt_mod1_gate,
          txt_mod2_shift, txt_mod2_scale, txt_mod2_gate) = jnp.split(txt_mod, 6, axis=-1)
 
         img_normed = nn.LayerNorm(use_bias=False, use_scale=False, epsilon=1e-6, name="img_norm1")(img)
-        img_normed = modulate(img_normed, img_mod1_shift, img_mod1_scale)
+        if tr:
+            img_normed = modulate(img_normed, img_mod1_shift, img_mod1_scale,
+                                   tr_img_mod1_shift, tr_img_mod1_scale, first_frame_token_num)
+        else:
+            img_normed = modulate(img_normed, img_mod1_shift, img_mod1_scale)
         img_q, img_k, img_v = QKVHead(self.hidden_size, self.heads_num, self.qkv_bias, self.qk_norm, name="img_attn")(img_normed)
         img_q = apply_rope3d(img_q, freqs)
         img_k = apply_rope3d(img_k, freqs)
@@ -369,9 +422,17 @@ class MMDoubleStreamBlock(nn.Module):
         img_len = img.shape[1]
         img_attn, txt_attn = attn[:, :img_len], attn[:, img_len:]
 
-        img = img + apply_gate(nn.Dense(self.hidden_size, use_bias=self.qkv_bias, name="img_attn_proj")(img_attn), img_mod1_gate)
-        img_mlp_in = modulate(nn.LayerNorm(use_bias=False, use_scale=False, epsilon=1e-6, name="img_norm2")(img), img_mod2_shift, img_mod2_scale)
-        img = img + apply_gate(MLP(mlp_hidden, self.hidden_size, self.mlp_act_type, name="img_mlp")(img_mlp_in), img_mod2_gate)
+        img_attn_out = nn.Dense(self.hidden_size, use_bias=self.qkv_bias, name="img_attn_proj")(img_attn)
+        if tr:
+            img = img + apply_gate(img_attn_out, img_mod1_gate, tr_img_mod1_gate, first_frame_token_num)
+            img_mlp_in = modulate(nn.LayerNorm(use_bias=False, use_scale=False, epsilon=1e-6, name="img_norm2")(img),
+                                   img_mod2_shift, img_mod2_scale, tr_img_mod2_shift, tr_img_mod2_scale, first_frame_token_num)
+            img = img + apply_gate(MLP(mlp_hidden, self.hidden_size, self.mlp_act_type, name="img_mlp")(img_mlp_in),
+                                    img_mod2_gate, tr_img_mod2_gate, first_frame_token_num)
+        else:
+            img = img + apply_gate(img_attn_out, img_mod1_gate)
+            img_mlp_in = modulate(nn.LayerNorm(use_bias=False, use_scale=False, epsilon=1e-6, name="img_norm2")(img), img_mod2_shift, img_mod2_scale)
+            img = img + apply_gate(MLP(mlp_hidden, self.hidden_size, self.mlp_act_type, name="img_mlp")(img_mlp_in), img_mod2_gate)
 
         txt = txt + apply_gate(nn.Dense(self.hidden_size, use_bias=self.qkv_bias, name="txt_attn_proj")(txt_attn), txt_mod1_gate)
         txt_mlp_in = modulate(nn.LayerNorm(use_bias=False, use_scale=False, epsilon=1e-6, name="txt_norm2")(txt), txt_mod2_shift, txt_mod2_scale)
@@ -400,13 +461,30 @@ class MMSingleStreamBlock(nn.Module):
         x: jnp.ndarray, vec: jnp.ndarray, txt_len: int,
         freqs: Tuple[jnp.ndarray, jnp.ndarray],
         key_valid: jnp.ndarray,
+        token_replace_vec: Optional[jnp.ndarray] = None,
+        first_frame_token_num: Optional[int] = None,
     ) -> jnp.ndarray:
+        """``token_replace_vec``/``first_frame_token_num``: see
+        ``MMDoubleStreamBlock.__call__``'s docstring -- same I2V-only,
+        default-`None`, backward-compatible split. Unlike the double-stream
+        block (whose ``txt_mod`` never gets the split), this single fused
+        modulation covers the *entire* [img; txt] sequence's tokens, so the
+        first ``first_frame_token_num`` tokens (always image tokens, since
+        img is concatenated before txt when entering the single-stream
+        loop) get the split -- matching the reference exactly."""
         mlp_hidden = int(self.hidden_size * self.mlp_width_ratio)
         head_dim = self.hidden_size // self.heads_num
+        tr = token_replace_vec is not None
 
-        mod = ModulateDiT(self.hidden_size, factor=3, name="modulation")(vec)
+        mod_out = ModulateDiT(self.hidden_size, factor=3, name="modulation")(vec, token_replace_vec if tr else None)
+        mod, tr_mod = mod_out if tr else (mod_out, None)
         mod_shift, mod_scale, mod_gate = jnp.split(mod, 3, axis=-1)
-        x_mod = modulate(nn.LayerNorm(use_bias=False, use_scale=False, epsilon=1e-6, name="pre_norm")(x), mod_shift, mod_scale)
+        if tr:
+            tr_mod_shift, tr_mod_scale, tr_mod_gate = jnp.split(tr_mod, 3, axis=-1)
+            x_mod = modulate(nn.LayerNorm(use_bias=False, use_scale=False, epsilon=1e-6, name="pre_norm")(x),
+                              mod_shift, mod_scale, tr_mod_shift, tr_mod_scale, first_frame_token_num)
+        else:
+            x_mod = modulate(nn.LayerNorm(use_bias=False, use_scale=False, epsilon=1e-6, name="pre_norm")(x), mod_shift, mod_scale)
 
         b, s, _ = x_mod.shape
         q = nn.Dense(self.hidden_size, name="linear1_q")(x_mod).reshape(b, s, self.heads_num, head_dim)
@@ -430,6 +508,8 @@ class MMSingleStreamBlock(nn.Module):
         fused_in = jnp.concatenate([attn, mlp_act], axis=-1)
         out = nn.Dense(self.hidden_size, name="linear2")(fused_in)
 
+        if tr:
+            return x + apply_gate(out, mod_gate, tr_mod_gate, first_frame_token_num)
         return x + apply_gate(out, mod_gate)
 
 

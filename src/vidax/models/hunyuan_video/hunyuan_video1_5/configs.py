@@ -39,13 +39,13 @@ DEFAULT_SHIFT = {
 }
 
 
-def load_hunyuan_video_1_5_transformer_config(transformer_dir: str) -> Dict[str, Any]:
+def load_hunyuan_video1_5_transformer_config(transformer_dir: str) -> Dict[str, Any]:
     """Reads ``<transformer_dir>/config.json`` (e.g. ``.../transformer/480p_t2v``)."""
     with open(os.path.join(transformer_dir, "config.json")) as f:
         return json.load(f)
 
 
-def load_hunyuan_video_1_5_vae_config(vae_dir: str) -> Dict[str, Any]:
+def load_hunyuan_video1_5_vae_config(vae_dir: str) -> Dict[str, Any]:
     """Reads ``<vae_dir>/config.json`` (e.g. ``.../vae``)."""
     with open(os.path.join(vae_dir, "config.json")) as f:
         return json.load(f)

@@ -285,7 +285,7 @@ conditioning, or `--tensor_parallel_size 1` alongside
   replicated activations are actually laid out) rather than skipping
   `shard_map` for it — see `vidax.models.hunyuan_video.common.dit_layers
   ._flash_attention_tpu_segment_masked_replicated` and
-  `docs/lessons/hunyuan_video_1_5_debugging.md`.
+  `docs/lessons/hunyuan_video1_5_debugging.md`.
 
 ## 5. JIT Compilation Safety
 

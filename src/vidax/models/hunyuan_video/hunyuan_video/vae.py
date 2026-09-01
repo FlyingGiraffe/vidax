@@ -4,7 +4,7 @@
 ``ResnetBlockCausal3D``/``UNetMidBlockCausal3D``/``DownsampleCausal3D``/
 ``UpsampleCausal3D``/``CausalConv3d``.
 
-**Genuinely different from ``hunyuan_video_1_5/vae.py``** (confirmed by
+**Genuinely different from ``hunyuan_video1_5/vae.py``** (confirmed by
 reading both reference repos directly, not assumed from the shared
 "causal 3D-conv KL-VAE" family name): this is diffusers' standard
 ``AutoencoderKLCausal3D`` (GroupNorm, plain-conv down/upsample, a diffusers
@@ -12,7 +12,7 @@ reading both reference repos directly, not assumed from the shared
 design -- so this is a fresh port, not a reuse. Real key names/shapes
 confirmed directly against the downloaded
 ``tencent/HunyuanVideo/hunyuan-video-t2v-720p/vae/pytorch_model.pt`` (248
-leaves) -- see ``docs/lessons/hunyuan_video_1_debugging.md``.
+leaves) -- see ``docs/lessons/hunyuan_video_debugging.md``.
 
 **Layout**: channel-last (B, T, H, W, C) throughout, matching this repo's
 established VAE convention -- the reference is channel-first (B, C, T, H, W);
@@ -60,10 +60,10 @@ instead of RMSNorm before the QKV projections.
 
 Only spatial tiling is implemented (mirroring 1.5's VAE + this repo's
 general precedent) -- staged per-level decode (same OOM-avoidance rationale
-as ``hunyuan_video_1_5/vae.py``'s ``stage_level``/``stage_level_block``/
+as ``hunyuan_video1_5/vae.py``'s ``stage_level``/``stage_level_block``/
 ``stage_level_upsample`` docstrings) is provided via
 ``decode_stage_*``/``num_decoder_levels``/``num_blocks_per_level``, used by
-``examples/generate_hunyuan_video_1_0.py``'s own ``spatial_tiled_vae_decode``.
+``examples/generate_hunyuan_video.py``'s own ``spatial_tiled_vae_decode``.
 """
 import math
 from typing import Tuple
@@ -99,7 +99,7 @@ class AttnBlock(nn.Module):
     """Diffusers ``Attention`` (single-head, ``group_norm`` + ``to_q``/
     ``to_k``/``to_v``/``to_out_0``), with the same causal
     (frame_q >= frame_k) full-spatial-attention mask as
-    ``hunyuan_video_1_5.vae.AttnBlock`` -- see module docstring.
+    ``hunyuan_video1_5.vae.AttnBlock`` -- see module docstring.
     """
     in_channels: int
 
@@ -253,7 +253,7 @@ class Decoder(nn.Module):
     def stage_level(self, h: jnp.ndarray, i_level: int) -> jnp.ndarray:
         """One up-level's ``layers_per_block + 1`` ResnetBlocks + optional
         Upsample, as its own separately-jit-able call -- see
-        ``hunyuan_video_1_5/vae.py``'s ``Decoder.stage_level`` docstring for
+        ``hunyuan_video1_5/vae.py``'s ``Decoder.stage_level`` docstring for
         why real frame counts need this split rather than a single fused
         ``Decoder.__call__``.
         """
@@ -299,7 +299,7 @@ class Decoder(nn.Module):
 
 def blend_h(a: jnp.ndarray, b: jnp.ndarray, blend_extent: int) -> jnp.ndarray:
     """Linear cross-fade along the width axis (channel-last: -2) -- see
-    ``hunyuan_video_1_5.vae.blend_h``'s identical docstring."""
+    ``hunyuan_video1_5.vae.blend_h``'s identical docstring."""
     blend_extent = min(a.shape[-2], b.shape[-2], blend_extent)
     if blend_extent <= 0:
         return b
@@ -324,7 +324,7 @@ def blend_v(a: jnp.ndarray, b: jnp.ndarray, blend_extent: int) -> jnp.ndarray:
     return jnp.concatenate([blended, b[..., blend_extent:, :, :]], axis=-3)
 
 
-class HunyuanVideo10VAE(nn.Module):
+class HunyuanVideoVAE(nn.Module):
     """Top-level channel-last KL-VAE, port of ``AutoencoderKLCausal3D``.
     ``scaling_factor`` (no ``shift_factor`` for this VAE) is applied by the
     caller, matching diffusers convention -- this module operates on raw

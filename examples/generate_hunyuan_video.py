@@ -6,13 +6,13 @@
 # `"HYVideo-T/2-cfgdistill"` preset, `guidance_embed=True`) -- confirmed by
 # reading `hyvideo/config.py`'s `--dit-weight` default and the real
 # checkpoint's own `guidance_in.*` keys (see
-# docs/lessons/hunyuan_video_1_debugging.md). `--model-resolution`/544p in
+# docs/lessons/hunyuan_video_debugging.md). `--model-resolution`/544p in
 # the reference is dead code for the default CLI path (only ever consulted
 # when `--dit-weight` is *not* given, which it always is) -- there is no
 # separate 544p checkpoint, just a different runtime `--height`/`--width`
 # on this one 720p-native checkpoint, so no `--resolution` flag here.
 #
-# Scope for this landing (see docs/models/hunyuan_video_1_0.md):
+# Scope for this landing (see docs/models/hunyuan_video.md):
 # - T2V only.
 # - Real classifier-free guidance is optional (`--guidance_scale`, default
 #   1.0 == off, matching the reference's own `sample_video.py` default) on
@@ -21,21 +21,23 @@
 #   `guidance_in` since this checkpoint's `guidance_embed=True`) -- both
 #   branches are always computed in one jitted program regardless of
 #   `--guidance_scale`'s value, same convention as
-#   `generate_hunyuan_video_1_5.py`.
+#   `generate_hunyuan_video1_5.py`.
 # - VAE decode is spatially tiled (`--vae_tile_latent_size`), same staged
-#   per-level/per-block decode pattern as `generate_hunyuan_video_1_5.py`
-#   (see that script's module docstring + `hunyuan_video_1_0.vae`'s
+#   per-level/per-block decode pattern as `generate_hunyuan_video1_5.py`
+#   (see that script's module docstring + `hunyuan_video.vae`'s
 #   `Decoder.stage_level`/`stage_level_block`/`stage_level_upsample`
 #   docstrings for why a fused decode OOMs at real frame counts). No
 #   temporal tiling (the reference VAE doesn't support it either).
 # - Supports `--tensor_parallel_size` (Megatron-style, via
 #   `vidax.core.sharding.shard_wan_params`) for the DiT, matching
-#   `generate_hunyuan_video_1_5.py`.
+#   `generate_hunyuan_video1_5.py`.
 
 import argparse
 import functools
+import gc
 import logging
 import os
+import time
 
 import imageio
 import jax
@@ -43,16 +45,17 @@ import jax.numpy as jnp
 import numpy as np
 
 from vidax.core.sharding import build_tpu_mesh, configure_jax_cache, get_replicated_sharding, shard_wan_params
-from vidax.models.hunyuan_video.hunyuan_video_1_0.clip_text import ClipTextModel, extract_clip_pooled
-from vidax.models.hunyuan_video.hunyuan_video_1_0.configs import (
+from vidax.models.hunyuan_video.common.dit_layers import MMDoubleStreamBlock, MMSingleStreamBlock
+from vidax.models.hunyuan_video.hunyuan_video.clip_text import ClipTextModel, extract_clip_pooled
+from vidax.models.hunyuan_video.hunyuan_video.configs import (
     DIT_CONFIGS,
     dit_kwargs_from_config,
-    load_hunyuan_video_1_0_vae_config,
+    load_hunyuan_video_vae_config,
     vae_kwargs_from_vae_config,
 )
-from vidax.models.hunyuan_video.hunyuan_video_1_0.dit import HunyuanVideo10DiT
-from vidax.models.hunyuan_video.hunyuan_video_1_0.llama_text import LlamaTextModel, extract_hunyuan_llm_embeddings
-from vidax.models.hunyuan_video.hunyuan_video_1_0.vae import HunyuanVideo10VAE, blend_h, blend_v
+from vidax.models.hunyuan_video.hunyuan_video.dit import HunyuanVideoDiT
+from vidax.models.hunyuan_video.hunyuan_video.llama_text import LlamaTextModel, extract_hunyuan_llm_embeddings
+from vidax.models.hunyuan_video.hunyuan_video.vae import HunyuanVideoVAE, blend_h, blend_v
 from vidax.schedulers.flow_match import RectifiedFlowScheduler
 from vidax.translator.mappings import load_torch_checkpoint_to_jax
 
@@ -144,22 +147,78 @@ def main(args):
     dit_config = DIT_CONFIGS[args.model]
     dit_kwargs = dit_kwargs_from_config(dit_config)
     assert dit_kwargs["heads_num"] % tp_size == 0, (
-        f"HunyuanVideo10DiT's heads_num ({dit_kwargs['heads_num']}) must be divisible by "
+        f"HunyuanVideoDiT's heads_num ({dit_kwargs['heads_num']}) must be divisible by "
         f"--tensor_parallel_size ({tp_size}).")
-    dit_model = HunyuanVideo10DiT(**dit_kwargs, mesh=mesh)
+    dit_model = HunyuanVideoDiT(**dit_kwargs, mesh=mesh)
     dit_params = load_torch_checkpoint_to_jax(
         os.path.join(args.checkpoint_dir, "hunyuan-video-t2v-720p", "transformers", "mp_rank_00_model_states.pt"),
-        model_type="hunyuan_video_1_0_dit")
+        model_type="hunyuan_video_dit")
     dit_params = cast_to_dtype(dit_params, dit_dtype)
-    dit_params = jax.device_put(dit_params, shard_wan_params(dit_params, mesh))
+    dit_shardings = shard_wan_params(dit_params, mesh)
+
+    # `--offload_dit_weights`: keep the double/single-stream blocks'
+    # ("double_blocks_*"/"single_blocks_*") params as a host-resident numpy
+    # pytree instead of `device_put`-ing the whole tree -- only offloaded
+    # into a small HBM buffer, `--offload_chunk_size_{double,single}`
+    # consecutive blocks of one stream at a time, inside the sampling loop
+    # itself (see `single_step_offloaded` below and
+    # docs/weight_offloading.md). Two
+    # separate chunk pools (double vs. single) since the two block types
+    # have different param shapes -- the "every chunk is interchangeable"
+    # trick from docs/weight_offloading.md still holds *within* each pool.
+    # The rest of the DiT's params (patchify/time/text-embed/txt_in/
+    # final_layer) are a tiny fraction of the 60-block total, so they're
+    # still `device_put` once, same as always.
+    if args.offload_dit_weights:
+        # The two streams' chunk sizes are independent -- they're offloaded
+        # via entirely separate chunk pools/jit calls below, so there's no
+        # actual reason to force one shared size that divides both 20 and
+        # 40 (the old constraint here needlessly kept single-stream blocks
+        # at 2 chunks of 20 instead of 1 chunk of 40 whenever
+        # --offload_chunk_size was set to double's full depth). Each
+        # defaults to its own full block depth (i.e. "offload once per
+        # stream") unless overridden down for tighter HBM budgets.
+        n_double = dit_model.mm_double_blocks_depth
+        n_single = dit_model.mm_single_blocks_depth
+        double_chunk_size = args.offload_chunk_size_double or n_double
+        single_chunk_size = args.offload_chunk_size_single or n_single
+        assert n_double % double_chunk_size == 0, (
+            f"--offload_chunk_size_double ({double_chunk_size}) must divide "
+            f"HunyuanVideoDiT.mm_double_blocks_depth ({n_double}) -- see docs/weight_offloading.md.")
+        assert n_single % single_chunk_size == 0, (
+            f"--offload_chunk_size_single ({single_chunk_size}) must divide "
+            f"HunyuanVideoDiT.mm_single_blocks_depth ({n_single}) -- see docs/weight_offloading.md.")
+
+        double_chunks_host = [
+            [dit_params["params"][f"double_blocks_{i}"] for i in range(c, c + double_chunk_size)]
+            for c in range(0, n_double, double_chunk_size)
+        ]
+        single_chunks_host = [
+            [dit_params["params"][f"single_blocks_{i}"] for i in range(c, c + single_chunk_size)]
+            for c in range(0, n_single, single_chunk_size)
+        ]
+        double_chunk_sharding = [dit_shardings["params"]["double_blocks_0"]] * double_chunk_size
+        single_chunk_sharding = [dit_shardings["params"]["single_blocks_0"]] * single_chunk_size
+
+        nonblock_params = {
+            k: v for k, v in dit_params["params"].items()
+            if not (k.startswith("double_blocks_") or k.startswith("single_blocks_"))
+        }
+        nonblock_shardings = {
+            k: v for k, v in dit_shardings["params"].items()
+            if not (k.startswith("double_blocks_") or k.startswith("single_blocks_"))
+        }
+        dit_params = jax.device_put({"params": nonblock_params}, {"params": nonblock_shardings})
+    else:
+        dit_params = jax.device_put(dit_params, dit_shardings)
 
     # --- VAE ---
     vae_dir = os.path.join(args.checkpoint_dir, "hunyuan-video-t2v-720p", "vae")
-    vae_config = load_hunyuan_video_1_0_vae_config(vae_dir)
+    vae_config = load_hunyuan_video_vae_config(vae_dir)
     vae_kwargs = vae_kwargs_from_vae_config(vae_config)
-    vae_model = HunyuanVideo10VAE(**vae_kwargs)
+    vae_model = HunyuanVideoVAE(**vae_kwargs)
     vae_params = load_torch_checkpoint_to_jax(
-        os.path.join(vae_dir, "pytorch_model.pt"), model_type="hunyuan_video_1_0_vae")
+        os.path.join(vae_dir, "pytorch_model.pt"), model_type="hunyuan_video_vae")
     vae_params = jax.device_put(cast_to_dtype(vae_params, dtype), replicated)
     scaling_factor = vae_config["scaling_factor"]
     ffs = 2 ** int(np.log2(vae_kwargs["spatial_compression_ratio"]))
@@ -170,14 +229,14 @@ def main(args):
     # --- Llama text tower ---
     llama_model = LlamaTextModel()
     llama_params = load_torch_checkpoint_to_jax(
-        os.path.join(args.text_encoder_dir, "model.safetensors.index.json"), model_type="hunyuan_video_1_0_llama_text")
+        os.path.join(args.text_encoder_dir, "model.safetensors.index.json"), model_type="hunyuan_video_llama_text")
     llama_params = jax.device_put(cast_to_dtype(llama_params, dtype), replicated)
     llama_tokenizer = LlamaPromptTokenizer(args.text_encoder_dir)
 
     # --- CLIP-L pooled text encoder ---
     clip_model = ClipTextModel()
     clip_params = load_torch_checkpoint_to_jax(
-        os.path.join(args.clip_checkpoint_dir, "model.safetensors"), model_type="hunyuan_video_1_0_clip_text")
+        os.path.join(args.clip_checkpoint_dir, "model.safetensors"), model_type="hunyuan_video_clip_text")
     clip_params = jax.device_put(cast_to_dtype(clip_params, dtype), replicated)
     clip_tokenizer = ClipPromptTokenizer(args.clip_checkpoint_dir)
 
@@ -203,6 +262,20 @@ def main(args):
     negative_prompt = args.negative_prompt if args.negative_prompt else (
         NEGATIVE_PROMPT if args.guidance_scale != 1.0 else "")
     neg_text_states, neg_text_mask, neg_text_states_2 = encode(negative_prompt)
+
+    # `llama_params`/`clip_params` are `replicated` (a full copy on *every*
+    # chip, not TP-sharded like the DiT) -- the 8B Llama tower alone is
+    # ~16GB/chip in bf16. Nothing below this line needs them again, but
+    # they (and `encode`, which closes over them) stay reachable as local
+    # variables for the rest of `main()`'s scope, so without an explicit
+    # `del` their device buffers sit resident in HBM through the entire
+    # DiT sampling loop that follows -- confirmed to be the dominant cause
+    # of this port's real-resolution OOMs (see docs/lessons/
+    # hunyuan_video_debugging.md). Freeing them here, before the loop
+    # allocates its own activations, trades a few seconds of Python/XLA
+    # buffer-deletion overhead for tens of GB of HBM headroom.
+    del encode, llama_model, llama_params, llama_tokenizer, clip_model, clip_params, clip_tokenizer
+    gc.collect()
 
     # --- Resolution / frame count ---
     height = align_to(args.height, 16)
@@ -246,8 +319,125 @@ def main(args):
         new_latents = latents.astype(jnp.float32) - v * dsigma
         return new_latents.astype(latents.dtype)
 
+    if args.offload_dit_weights:
+        # `pre_apply`/`mid_process`/`post_apply`/`chunk_forward_double`/
+        # `chunk_forward_single` are each their own `jax.jit` (bar
+        # `mid_process`, a trivial params-free concat run as plain Python),
+        # compiled once and reused for every chunk and every step -- the
+        # outer `range(num_chunks)` loops below must stay plain Python, not
+        # jax.jit-traced, or every chunk's weights would get unrolled into
+        # one HLO program's buffer space, defeating the entire point of
+        # offloading (see docs/weight_offloading.md). `mesh=mesh` is not
+        # optional on the block reconstructions below -- see
+        # generate_wan2_1_t2v.py's identical comment on `attend`'s Pallas
+        # flash-attention kernel needing `shard_map`, not a bare `jax.jit`,
+        # once any part of the program is multi-device-partitioned.
+        # Cond/uncond are batched together (batch=2) through the offloaded
+        # path, not run as two separate passes like the non-offloaded
+        # `sampling_step` above -- halves the number of host-to-device
+        # weight transfers per step, the actual scarce resource here.
+        # `img_len`/`tt`/`th`/`tw` can't be returned as-is from inside
+        # `jax.jit` -- plain Python ints aren't valid jitted-function
+        # *outputs* (unlike *inputs*, where static values are fine); JIT
+        # would otherwise silently turn them into traced 0-d arrays, which
+        # then fail `post_apply`'s `static_argnums` (a concrete-but-still-
+        # ArrayImpl value isn't hashable) -- see generate_wan2_1_t2v.py's
+        # identical comment on `input_dtype`/`grid`. So `_pre_process_body`
+        # only returns the actual array outputs the block loops need;
+        # `sampling_step_offloaded` below recomputes `img_len`/`tt`/`th`/
+        # `tw` directly from `lat_cf_2b`'s own (static) shape instead --
+        # exact, not an approximation, since `pre_process` computes them
+        # the same way from the same shape.
+        def _pre_process_body(params, hidden_states, timestep, text_states, text_mask, text_states_2, guidance):
+            img, txt, vec, freqs, key_valid, _img_len, _tt, _th, _tw = dit_model.apply(
+                params, hidden_states, timestep, text_states, text_mask, text_states_2,
+                guidance=guidance, method=dit_model.pre_process)
+            return img, txt, vec, freqs, key_valid
+
+        pre_apply = jax.jit(_pre_process_body)
+
+        def _chunk_forward_double_body(chunk_params, img, txt, vec, freqs, key_valid):
+            for layer_params in chunk_params:
+                img, txt = MMDoubleStreamBlock(
+                    hidden_size=dit_model.hidden_size, heads_num=dit_model.heads_num,
+                    mlp_width_ratio=dit_model.mlp_width_ratio, mlp_act_type=dit_model.mlp_act_type,
+                    qk_norm=dit_model.qk_norm, qkv_bias=dit_model.qkv_bias, mesh=mesh,
+                ).apply({"params": layer_params}, img, txt, vec, freqs, key_valid)
+            return img, txt
+
+        chunk_forward_double = jax.jit(_chunk_forward_double_body, donate_argnums=(0,))
+
+        def _chunk_forward_single_body(chunk_params, x, vec, txt_len, freqs, key_valid):
+            for layer_params in chunk_params:
+                x = MMSingleStreamBlock(
+                    hidden_size=dit_model.hidden_size, heads_num=dit_model.heads_num,
+                    mlp_width_ratio=dit_model.mlp_width_ratio, mlp_act_type=dit_model.mlp_act_type,
+                    qk_norm=dit_model.qk_norm, mesh=mesh,
+                ).apply({"params": layer_params}, x, vec, txt_len, freqs, key_valid)
+            return x
+
+        # `txt_len` must be a static arg: `MMSingleStreamBlock` uses it for
+        # slice bounds (`q[:, :-txt_len]`), which JAX requires to be a
+        # concrete Python int, not a traced jitted value -- constant across
+        # every call here (one fixed text-token count per run), so this
+        # never triggers a retrace.
+        chunk_forward_single = jax.jit(_chunk_forward_single_body, static_argnums=(3,), donate_argnums=(0,))
+
+        # `img_len`/`tt`/`th`/`tw` must be `static_argnums`, not ordinary
+        # jitted arguments (plain Python ints, not abstractable arrays) --
+        # constant across every call in this script (one fixed resolution
+        # per run), so this never triggers a retrace.
+        post_apply = jax.jit(
+            lambda params, x, vec, img_len, tt, th, tw: dit_model.apply(
+                params, x, vec, img_len, tt, th, tw, method=dit_model.post_process),
+            static_argnums=(3, 4, 5, 6))
+
+        def sampling_step_offloaded(
+            nonblock_params, latents, timestep, dsigma,
+            text_states, text_mask, text_states_2,
+            neg_text_states, neg_text_mask, neg_text_states_2,
+            embedded_guidance, guidance_scale,
+        ):
+            lat_cf = jnp.moveaxis(latents, -1, 1)
+            lat_cf_2b = jnp.concatenate([lat_cf, lat_cf], axis=0)
+            t_2b = jnp.concatenate([timestep, timestep], axis=0)
+            text_states_2b = jnp.concatenate([text_states, neg_text_states], axis=0)
+            text_mask_2b = jnp.concatenate([text_mask, neg_text_mask], axis=0)
+            text_states_2_2b = jnp.concatenate([text_states_2, neg_text_states_2], axis=0)
+            guidance_2b = (
+                jnp.concatenate([embedded_guidance, embedded_guidance], axis=0)
+                if embedded_guidance is not None else None)
+
+            # Matches `pre_process`'s own internal computation exactly, from
+            # the same (static) shape -- see the comment on `_pre_process_body`.
+            pt, ph, pw = dit_model.patch_size
+            _, _, ot, oh, ow = lat_cf_2b.shape
+            tt, th, tw = ot // pt, oh // ph, ow // pw
+
+            img, txt, vec, freqs, key_valid = pre_apply(
+                nonblock_params, lat_cf_2b, t_2b, text_states_2b, text_mask_2b, text_states_2_2b, guidance_2b)
+            img_len = img.shape[1]
+            for chunk_host in double_chunks_host:
+                chunk_params = jax.device_put(chunk_host, double_chunk_sharding)
+                img, txt = chunk_forward_double(chunk_params, img, txt, vec, freqs, key_valid)
+
+            x, txt_len = HunyuanVideoDiT.mid_process(img, txt)
+
+            for chunk_host in single_chunks_host:
+                chunk_params = jax.device_put(chunk_host, single_chunk_sharding)
+                x = chunk_forward_single(chunk_params, x, vec, txt_len, freqs, key_valid)
+
+            v_2b = post_apply(nonblock_params, x, vec, img_len, tt, th, tw)
+            v_cond, v_uncond = jnp.split(v_2b, 2, axis=0)
+            v_cond = jnp.moveaxis(v_cond, 1, -1)
+            v_uncond = jnp.moveaxis(v_uncond, 1, -1)
+            v = (v_uncond + guidance_scale * (v_cond - v_uncond)).astype(jnp.float32)
+
+            new_latents = latents.astype(jnp.float32) - v * dsigma
+            return new_latents.astype(latents.dtype)
+
     # --- Staged (per-decoder-level) VAE decode -- see module docstring and
-    # `hunyuan_video_1_0.vae.Decoder.stage_level`'s docstring for why real
+    # `hunyuan_video.vae.Decoder.stage_level`'s docstring for why real
     # frame counts need this instead of one fused `Decoder.__call__`. ---
     @jax.jit
     def vae_decode_stage_in_and_mid(vae_params, z):
@@ -302,16 +492,19 @@ def main(args):
         return jnp.clip((dec + 1) * 127.5, 0, 255).astype(jnp.uint8)
 
     guidance_scale = jnp.asarray(args.guidance_scale, dtype=jnp.float32)
+    step_fn = sampling_step_offloaded if args.offload_dit_weights else sampling_step
     for step in range(args.num_steps):
         t = jax.device_put(jnp.reshape(scheduler.timesteps[step], (1,)), replicated)
         dsigma = jax.device_put((scheduler.sigmas[step] - scheduler.sigmas[step + 1]).astype(jnp.float32), replicated)
 
-        latents = sampling_step(
+        step_t0 = time.perf_counter()
+        latents = step_fn(
             dit_params, latents, t, dsigma,
             text_states, text_mask, text_states_2,
             neg_text_states, neg_text_mask, neg_text_states_2,
             embedded_guidance, guidance_scale)
-        logger.info("step %d/%d done", step + 1, args.num_steps)
+        jax.block_until_ready(latents)  # otherwise this only times async dispatch, not the real step.
+        logger.info("step %d/%d done (%.1fs)", step + 1, args.num_steps, time.perf_counter() - step_t0)
 
     # --- VAE decode ---
     latents_for_decode = jax.device_put((latents.astype(dtype) / scaling_factor), replicated)
@@ -361,5 +554,26 @@ if __name__ == "__main__":
     parser.add_argument("--vae_tile_latent_size", type=int, default=None,
                          help="Latent-space spatial tile size for the tiled VAE decode. Defaults to the "
                               "reference's own `sample_size // ffactor_spatial`; shrink (e.g. 8) if VAE decode OOMs.")
+    parser.add_argument("--offload_dit_weights", action="store_true",
+                         help="Keep the double/single-stream blocks' weights host-resident and offload one "
+                              "--offload_chunk_size_{double,single}-block group's worth into HBM at a time during "
+                              "the sampling loop, instead of the whole DiT tree staying HBM-resident for the "
+                              "entire script (same idea as DeepSpeed's ZeRO-Offload / diffusers' "
+                              "enable_sequential_cpu_offload, applied per-layer here). The 13B DiT's own compute "
+                              "already fits at native 720p/129 frames under --tensor_parallel_size 4 -- what "
+                              "doesn't fit is the DiT staying fully HBM-resident *plus* the sampling loop's own "
+                              "activations at that scale (only 4 TPU chips means TP can't be pushed further); "
+                              "see docs/weight_offloading.md and docs/lessons/hunyuan_video_debugging.md.")
+    parser.add_argument("--offload_chunk_size_double", type=int, default=None,
+                         help="Number of consecutive double-stream blocks grouped into one offloaded HBM buffer / "
+                              "one jax.jit compile when --offload_dit_weights is set (ignored otherwise). Must "
+                              "divide mm_double_blocks_depth (20). Defaults to 20 (all double-stream blocks in "
+                              "one chunk -- confirmed to fit at the real 129-frame/720p default; the single/double "
+                              "streams' chunk sizes are independent, unlike the shared --offload_chunk_size this "
+                              "replaces). Shrink for a tighter HBM budget, at the cost of more separate "
+                              "host-to-device transfers and jax.jit dispatches per step.")
+    parser.add_argument("--offload_chunk_size_single", type=int, default=None,
+                         help="Same as --offload_chunk_size_double, for the single-stream blocks. Must divide "
+                              "mm_single_blocks_depth (40). Defaults to 40 (all single-stream blocks in one chunk).")
     args = parser.parse_args()
     main(args)

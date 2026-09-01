@@ -2,7 +2,7 @@
 
 Findings from porting HunyuanVideo (1.0)'s DiT/VAE/text-encoders to
 JAX/Flax. See
-[`docs/models/hunyuan_video_1_0.md`](../models/hunyuan_video_1_0.md) for the
+[`docs/models/hunyuan_video.md`](../models/hunyuan_video.md) for the
 full port and its architecture.
 
 ## A padded-tokenizer test can look like a real numeric bug when it's actually a padding-side mismatch
@@ -19,7 +19,7 @@ checkpoint like llava-llama-3), which breaks this port's "causal mask
 alone is sufficient under right-padding" argument (a *left*-padded
 sequence lets every valid, later token's causal-visible span include the
 leading padding as keys, which does change its output). `LlamaPromptTokenizer`
-in `examples/generate_hunyuan_video_1_0.py` explicitly passes
+in `examples/generate_hunyuan_video.py` explicitly passes
 `padding_side="right"` at `AutoTokenizer.from_pretrained(...)` for exactly
 this reason — general lesson for any decoder-only text encoder reused
 across model families: never trust a checkpoint's own saved tokenizer

@@ -163,7 +163,7 @@ class HunyuanVideo15DiT(nn.Module):
             self.vision_in = None
 
         if self.glyph_byT5_v2:
-            from vidax.models.hunyuan_video.hunyuan_video_1_5.byt5 import ByT5Mapper
+            from vidax.models.hunyuan_video.hunyuan_video1_5.byt5 import ByT5Mapper
             self.byt5_in = ByT5Mapper(
                 in_dim=1472, hidden_dim=2048, out_dim1=self.hidden_size, name="byt5_in")
 

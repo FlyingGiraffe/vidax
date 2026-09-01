@@ -1,7 +1,7 @@
 # HunyuanVideo-1.5 — Usage Guide
 
 One standalone TPU inference script lives in `examples/`:
-`generate_hunyuan_video_1_5.py` — a single script covering both T2V and
+`generate_hunyuan_video1_5.py` — a single script covering both T2V and
 I2V for a given `--resolution`/task variant (pass `--image_path` for I2V,
 omit it for T2V; both share the same DiT class and checkpoint-shape
 family for a given `--resolution`/task, differing only in which
@@ -12,10 +12,10 @@ non-sparse-attention, non-super-resolution) checkpoint variants:
 
 | Script | Model | Params | Task | Checkpoint variant |
 | --- | --- | --- | --- | --- |
-| `generate_hunyuan_video_1_5.py` | HunyuanVideo-1.5 | 8.3B DiT | T2V | `transformer/480p_t2v/` |
-| `generate_hunyuan_video_1_5.py` | HunyuanVideo-1.5 | 8.3B DiT | I2V | `transformer/480p_i2v/` |
-| `generate_hunyuan_video_1_5.py` | HunyuanVideo-1.5 | 8.3B DiT | T2V | `transformer/720p_t2v/` |
-| `generate_hunyuan_video_1_5.py` | HunyuanVideo-1.5 | 8.3B DiT | I2V | `transformer/720p_i2v/` |
+| `generate_hunyuan_video1_5.py` | HunyuanVideo-1.5 | 8.3B DiT | T2V | `transformer/480p_t2v/` |
+| `generate_hunyuan_video1_5.py` | HunyuanVideo-1.5 | 8.3B DiT | I2V | `transformer/480p_i2v/` |
+| `generate_hunyuan_video1_5.py` | HunyuanVideo-1.5 | 8.3B DiT | T2V | `transformer/720p_t2v/` |
+| `generate_hunyuan_video1_5.py` | HunyuanVideo-1.5 | 8.3B DiT | I2V | `transformer/720p_i2v/` |
 
 Conditioning requires three separate text/vision towers on top of the DiT
 itself: a Qwen2.5-VL-7B-Instruct text-only tower (the MLLM), a byT5-small
@@ -39,7 +39,7 @@ pip install -e ".[tpu,torch,text,i2v]"
 
 ---
 
-## HunyuanVideo-1.5 (480p/720p, T2V/I2V) — `generate_hunyuan_video_1_5.py`
+## HunyuanVideo-1.5 (480p/720p, T2V/I2V) — `generate_hunyuan_video1_5.py`
 
 `--checkpoint_dir` should point at `tencent/HunyuanVideo-1.5`'s downloaded
 root (containing `transformer/`, `vae/`, `text_encoder/{llm,byt5-small,
@@ -50,12 +50,12 @@ Glyph-SDXL-v2}/`); `--siglip_checkpoint_dir` (I2V only) at
 Every architecture hyperparameter (DiT `hidden_size`/block depths/RoPE
 dims, VAE `block_out_channels`/compression factors, SigLIP dims) is read
 directly from each checkpoint's own `config.json` (`vidax.models.
-hunyuan_video.hunyuan_video_1_5.configs`), never hardcoded.
+hunyuan_video.hunyuan_video1_5.configs`), never hardcoded.
 
 ### Text-to-video
 
 ```bash
-python examples/generate_hunyuan_video_1_5.py \
+python examples/generate_hunyuan_video1_5.py \
   --checkpoint_dir "./checkpoints/HunyuanVideo-1.5" \
   --resolution 480p \
   --prompt "A golden retriever running on a beach at sunset, cinematic, high detail" \
@@ -71,7 +71,7 @@ reference](#cli-reference)'s `--max_area`) — a portrait image produces a
 portrait video, not a squished landscape one.
 
 ```bash
-python examples/generate_hunyuan_video_1_5.py \
+python examples/generate_hunyuan_video1_5.py \
   --checkpoint_dir "./checkpoints/HunyuanVideo-1.5" \
   --siglip_checkpoint_dir "./checkpoints/FLUX.1-Redux-dev" \
   --resolution 480p \
@@ -109,7 +109,7 @@ python examples/generate_hunyuan_video_1_5.py \
 
 ## Architecture notes
 
-- **DiT (`vidax.models.hunyuan_video.hunyuan_video_1_5.dit.
+- **DiT (`vidax.models.hunyuan_video.hunyuan_video1_5.dit.
   HunyuanVideo15DiT`, shared blocks in `vidax.models.hunyuan_video.common.
   dit_layers`):** a dual-stream + single-stream MMDiT, structurally the
   same family as HunyuanVideo 1.0/Flux (`MMDoubleStreamBlock`/
@@ -155,7 +155,7 @@ python examples/generate_hunyuan_video_1_5.py \
   sequence lengths; the naive dense form OOMs a single TPU v4 chip well
   before 480p resolution.
 - **Text encoder — Qwen2.5-VL-7B-Instruct MLLM
-  (`vidax.models.hunyuan_video.hunyuan_video_1_5.qwen_text`):** reuses
+  (`vidax.models.hunyuan_video.hunyuan_video1_5.qwen_text`):** reuses
   `vidax.models.cosmos2_5.reason1.Qwen2TextModel` **unmodified** — it's
   architecturally the exact same Qwen2.5-VL-7B-Instruct text-only decoder
   tower Cosmos-Predict2.5-2B's Reason1 text encoder already ports,
@@ -171,7 +171,7 @@ python examples/generate_hunyuan_video_1_5.py \
   norm reapplied) — different from Cosmos's own usage of the same tower
   (which mean/std-normalizes and concatenates all 28 layers instead).
 - **Glyph/color encoder — byT5-small
-  (`vidax.models.hunyuan_video.hunyuan_video_1_5.byt5`):** the Glyph-SDXL-
+  (`vidax.models.hunyuan_video.hunyuan_video1_5.byt5`):** the Glyph-SDXL-
   v2 fine-tune of `google/byt5-small`'s encoder is architecturally
   identical to `vidax.models.ltx_video.t5.T5Encoder` (bidirectional
   relative-position bucketing, gated-GELU FFN, one shared
@@ -188,7 +188,7 @@ python examples/generate_hunyuan_video_1_5.py \
   project's own SDXL LoRA pipeline. The real `byt5_in.*` weights the DiT
   uses live inside the main DiT checkpoint itself.
 - **Vision encoder — SigLIP
-  (`vidax.models.hunyuan_video.hunyuan_video_1_5.siglip`):** a standard
+  (`vidax.models.hunyuan_video.hunyuan_video1_5.siglip`):** a standard
   pre-LN ViT (`SiglipVisionEncoder`, patch embed + learned absolute
   position embed + N pre-LN transformer blocks + final LayerNorm, no CLS
   token, no pooling head — only `last_hidden_state` is ever consumed),
@@ -206,7 +206,7 @@ python examples/generate_hunyuan_video_1_5.py \
   SigLIP's 729 patch tokens (per conditioning frame) are projected
   (`VisionProjection`: LN→Linear→GELU→Linear→LN) and merged into the
   joint text/glyph/vision token stream described above.
-- **VAE (`vidax.models.hunyuan_video.hunyuan_video_1_5.vae.
+- **VAE (`vidax.models.hunyuan_video.hunyuan_video1_5.vae.
   HunyuanVideo15VAE`):** causal 3D-conv KL-VAE, channel-last internally
   (matching this repo's `wan/common/vae_layers.py` convention). 16×
   spatial / 4× temporal compression, `RMS_norm` (not GroupNorm)
@@ -229,7 +229,7 @@ python examples/generate_hunyuan_video_1_5.py \
   needed because a single fused decode (even of one small tile) doesn't
   free one stage's temporaries before the next, the same class of issue
   `docs/lessons/ltx2_5_debugging.md` documents for LTX-2.5's DiT (see
-  `docs/lessons/hunyuan_video_1_5_debugging.md` for the specific OOM
+  `docs/lessons/hunyuan_video1_5_debugging.md` for the specific OOM
   numbers this fixed at the reference's real 121-frame/480p default).
 - **Tensor parallelism:** Megatron-style 1D TP for `double_blocks`/
   `single_blocks`' Q/K/V/output/FFN Dense layers is plain GSPMD
@@ -253,6 +253,6 @@ python examples/generate_hunyuan_video_1_5.py \
   schedulers' Euler update rules are algebraically the same once the sign
   convention (reversed 1→0 sigma schedule) is accounted for.
 - **Checkpoint translator (`vidax.translator.mappings.
-  hunyuan_video_1_5`):** 5 weight-bearing components — DiT (8,326,608,160
+  hunyuan_video1_5`):** 5 weight-bearing components — DiT (8,326,608,160
   params), VAE (1,260,634,115), byT5 (219,314,944), SigLIP (412,987,248),
   plus Qwen2.5-VL, which reuses Cosmos's existing translator unmodified.

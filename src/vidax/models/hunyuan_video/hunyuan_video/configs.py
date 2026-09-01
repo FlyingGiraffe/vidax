@@ -7,11 +7,11 @@ embedded in Python source (`hyvideo/modules/models.py`'s
 `hyvideo/constants.py`). This module transcribes those directly (values
 confirmed by reading the reference source, cited inline), matching this
 repo's `wan2_1.py`/`wan2_2.py`-style *named preset* pattern rather than
-`ltx2_5`'s / `hunyuan_video_1_5`'s checkpoint-embedded-metadata pattern --
+`ltx2_5`'s / `hunyuan_video1_5`'s checkpoint-embedded-metadata pattern --
 revisit once a real `tencent/HunyuanVideo` checkpoint is downloaded (it may
 ship its own `config.json`/`args.json` inside the `mp_rank_00_model_states.pt`
 that should take precedence over these transcribed defaults; not checked
-this pass, see docs/lessons/hunyuan_video_1_debugging.md).
+this pass, see docs/lessons/hunyuan_video_debugging.md).
 """
 import json
 import os
@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional, Tuple
 
 
 @dataclass(frozen=True)
-class HunyuanVideo10DiTConfig:
+class HunyuanVideoDiTConfig:
     """Mirrors `HYVideoDiffusionTransformer.__init__`'s real defaults
     (`hyvideo/modules/models.py`) for the `"HYVideo-T/2"` (real CFG) /
     `"HYVideo-T/2-cfgdistill"` (`guidance_embed=True`) presets -- both share
@@ -47,11 +47,11 @@ class HunyuanVideo10DiTConfig:
 
 
 # "HYVideo-T/2": real classifier-free guidance, no embedded/distilled guidance.
-HYVIDEO_T2_CONFIG = HunyuanVideo10DiTConfig(guidance_embed=False)
+HYVIDEO_T2_CONFIG = HunyuanVideoDiTConfig(guidance_embed=False)
 
 # "HYVideo-T/2-cfgdistill": the config.py argparse default and the most
 # widely released T2V checkpoint variant -- embedded/distilled guidance.
-HYVIDEO_T2_CFGDISTILL_CONFIG = HunyuanVideo10DiTConfig(guidance_embed=True)
+HYVIDEO_T2_CFGDISTILL_CONFIG = HunyuanVideoDiTConfig(guidance_embed=True)
 
 DIT_CONFIGS = {
     "HYVideo-T/2": HYVIDEO_T2_CONFIG,
@@ -63,8 +63,8 @@ DIT_CONFIGS = {
 DEFAULT_SHIFT = 7.0
 
 
-def dit_kwargs_from_config(config: HunyuanVideo10DiTConfig) -> dict:
-    """Builds `HunyuanVideo10DiT` constructor kwargs from a named preset."""
+def dit_kwargs_from_config(config: HunyuanVideoDiTConfig) -> dict:
+    """Builds `HunyuanVideoDiT` constructor kwargs from a named preset."""
     return dict(
         patch_size=config.patch_size,
         in_channels=config.in_channels,
@@ -92,8 +92,8 @@ def dit_kwargs_from_config(config: HunyuanVideo10DiTConfig) -> dict:
 # (`"<down><down><down>-<latent_channels>c-hy"`, read literally: 8x8x4).
 # Real `block_out_channels`/`layers_per_block`/etc. are read from the
 # downloaded checkpoint's own `vae/config.json` via
-# `load_hunyuan_video_1_0_vae_config`/`vae_kwargs_from_vae_config` below (same
-# pattern as `hunyuan_video_1_5.configs`), not hardcoded here -- confirmed
+# `load_hunyuan_video_vae_config`/`vae_kwargs_from_vae_config` below (same
+# pattern as `hunyuan_video1_5.configs`), not hardcoded here -- confirmed
 # real values (2025-08, `tencent/HunyuanVideo`'s
 # `hunyuan-video-t2v-720p/vae/config.json`): `block_out_channels=
 # [128,256,512,512]`, `layers_per_block=2`, `latent_channels=16`,
@@ -110,14 +110,14 @@ VAE_LATENT_CHANNELS = 16
 VAE_SPATIAL_COMPRESSION_RATIO = 8  # AutoencoderKLCausal3D.__init__'s own default.
 
 
-def load_hunyuan_video_1_0_vae_config(vae_dir: str) -> Dict[str, Any]:
+def load_hunyuan_video_vae_config(vae_dir: str) -> Dict[str, Any]:
     """Reads ``<vae_dir>/config.json`` (e.g. ``.../hunyuan-video-t2v-720p/vae``)."""
     with open(os.path.join(vae_dir, "config.json")) as f:
         return json.load(f)
 
 
 def vae_kwargs_from_vae_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Builds ``HunyuanVideo10VAE`` constructor kwargs from a real ``vae/config.json``."""
+    """Builds ``HunyuanVideoVAE`` constructor kwargs from a real ``vae/config.json``."""
     return dict(
         in_channels=config["in_channels"],
         out_channels=config["out_channels"],

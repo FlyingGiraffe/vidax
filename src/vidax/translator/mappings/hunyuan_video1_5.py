@@ -4,7 +4,7 @@ Built from ``hyvideo/models/transformers/hunyuanvideo_1_5_transformer.py``
 and ``hyvideo/models/autoencoders/hunyuanvideo_15_vae.py``'s real
 ``nn.Module`` attribute names (== state_dict key prefixes), cross-checked
 against the actual downloaded checkpoints' key sets (never guessed).
-Target Flax module trees are ``vidax.models.hunyuan_video.hunyuan_video_1_5.
+Target Flax module trees are ``vidax.models.hunyuan_video.hunyuan_video1_5.
 dit.HunyuanVideo15DiT`` (+ ``common/dit_layers.py``) and ``...vae.
 HunyuanVideo15VAE``.
 """
@@ -49,7 +49,7 @@ _REFINER_ADALN_RE = re.compile(
 _VISION_SEQ_NAMES = {"0": "ln_0", "1": "linear_1", "3": "linear_3", "4": "ln_4"}
 
 
-def map_hunyuan_video_1_5_dit_keys(pt_state_dict: Dict) -> Dict:
+def map_hunyuan_video1_5_dit_keys(pt_state_dict: Dict) -> Dict:
     jax_params: Dict = {}
 
     for pt_key, arr in pt_state_dict.items():
@@ -224,7 +224,7 @@ def map_hunyuan_video_1_5_dit_keys(pt_state_dict: Dict) -> Dict:
 # ---------------------------------------------------------------------------
 # VAE (AutoencoderKLConv3D): Encoder/Decoder built from CausalConv3d/RMS_norm/
 # ResnetBlock/AttnBlock/Downsample/Upsample -- see
-# vidax.models.hunyuan_video.hunyuan_video_1_5.vae for the Flax-side names
+# vidax.models.hunyuan_video.hunyuan_video1_5.vae for the Flax-side names
 # each regex below targets.
 # ---------------------------------------------------------------------------
 
@@ -269,7 +269,7 @@ def _map_attn_block_submodule(sub_key: str, jax_block_path: list, jax_params: di
     return False
 
 
-def map_hunyuan_video_1_5_vae_keys(pt_state_dict: Dict) -> Dict:
+def map_hunyuan_video1_5_vae_keys(pt_state_dict: Dict) -> Dict:
     jax_params: Dict = {}
 
     for pt_key, arr in pt_state_dict.items():
@@ -352,7 +352,7 @@ def map_hunyuan_video_1_5_vae_keys(pt_state_dict: Dict) -> Dict:
 # prefix -- unlike ltx_video's full `T5EncoderModel` checkpoint, see
 # `mappings/ltx_video.py:map_ltx_video_t5_keys`, whose `encoder.`-prefixed
 # pattern this closely mirrors minus that prefix). Target: `vidax.models.
-# ltx_video.t5.T5Encoder` (reused directly, see hunyuan_video_1_5/byt5.py).
+# ltx_video.t5.T5Encoder` (reused directly, see hunyuan_video1_5/byt5.py).
 # Checkpoint's own `module.text_tower.encoder.` prefix must already be
 # stripped by the caller (matching the reference's own `create_byt5`
 # loader) before calling this.
@@ -361,10 +361,10 @@ def map_hunyuan_video_1_5_vae_keys(pt_state_dict: Dict) -> Dict:
 _BYT5_BLOCK_RE = re.compile(r"^block\.(\d+)\.layer\.(0|1)\.(.*)$")
 
 
-def map_hunyuan_video_1_5_siglip_keys(pt_state_dict: Dict) -> Dict:
+def map_hunyuan_video1_5_siglip_keys(pt_state_dict: Dict) -> Dict:
     """Translates a real `SiglipVisionModel` state_dict (``black-forest-labs/
     FLUX.1-Redux-dev``'s ``image_encoder`` subfolder -- gated, not yet
-    downloaded/verified against, see ``hunyuan_video_1_5/siglip.py``'s
+    downloaded/verified against, see ``hunyuan_video1_5/siglip.py``'s
     module docstring) into a Flax param tree for ``SiglipVisionEncoder``.
     Ignores the (unused-by-HunyuanVideo-1.5) ``vision_model.head.*``
     pooling-head keys, since ``SiglipVisionEncoder`` doesn't port them.
@@ -425,7 +425,7 @@ def map_hunyuan_video_1_5_siglip_keys(pt_state_dict: Dict) -> Dict:
     return {"params": jax_params}
 
 
-def map_hunyuan_video_1_5_byt5_keys(pt_state_dict: Dict) -> Dict:
+def map_hunyuan_video1_5_byt5_keys(pt_state_dict: Dict) -> Dict:
     jax_params: Dict = {}
 
     for pt_key, arr in pt_state_dict.items():
@@ -474,6 +474,6 @@ def map_hunyuan_video_1_5_byt5_keys(pt_state_dict: Dict) -> Dict:
 # HunyuanVideo-1.5. The real `byt5_in.*` weights the DiT actually uses live
 # inside the main DiT checkpoint itself (`transformer/<variant>/
 # diffusion_pytorch_model.safetensors`, `byt5_in.{layernorm,fc1,fc2,fc3}.*`
-# keys -- already handled by `map_hunyuan_video_1_5_dit_keys` above and
+# keys -- already handled by `map_hunyuan_video1_5_dit_keys` above and
 # confirmed present against the real checkpoint). No separate mapper/loader
 # needed for it.

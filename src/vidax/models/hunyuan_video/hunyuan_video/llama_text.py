@@ -54,6 +54,7 @@ for the same right-padding-plus-causal-mask setup.
 from typing import List, Optional, Tuple
 
 import flax.linen as nn
+import jax
 import jax.numpy as jnp
 
 from vidax.core.attention import RMSNorm, dot_product_attention
@@ -159,10 +160,27 @@ class LlamaTextModel(nn.Module):
     rope_theta: float = 500_000.0
 
     @nn.compact
-    def __call__(self, input_ids: jnp.ndarray) -> Tuple[jnp.ndarray, ...]:
+    def __call__(
+        self, input_ids: jnp.ndarray,
+        image_embeds: Optional[jnp.ndarray] = None,
+        image_start: Optional[int] = None, image_end: Optional[int] = None,
+    ) -> Tuple[jnp.ndarray, ...]:
         """
         Args:
             input_ids: (B, S) int32 token ids.
+            image_embeds: I2V only -- (B, image_end - image_start,
+                hidden_size) projected image patch embeddings (see
+                ``hunyuan_video.llava_vision.get_llava_image_features``),
+                spliced into the token embedding sequence at
+                ``[image_start:image_end)`` before the decoder stack runs
+                -- matches ``LlavaModel``'s own `inputs_merger`, specialized
+                to this checkpoint's fixed template positions (a contiguous
+                span, not a general scatter-by-mask) rather than a generic
+                (position-independent) merge. `None` (the default)
+                reproduces plain T2V text-only behavior exactly.
+            image_start/image_end: static Python ints, the fixed splice
+                span (``constants.py``'s ``image_emb_start``/``image_emb_end``,
+                5/581 for this checkpoint's prompt templates).
 
         Returns:
             Tuple of ``num_hidden_layers + 1`` hidden-state tensors, each
@@ -175,6 +193,8 @@ class LlamaTextModel(nn.Module):
         head_dim = self.hidden_size // self.num_attention_heads
 
         x = nn.Embed(self.vocab_size, self.hidden_size, name="embed_tokens")(input_ids)
+        if image_embeds is not None:
+            x = jax.lax.dynamic_update_slice(x, image_embeds.astype(x.dtype), (0, image_start, 0))
         cos, sin = _rope_cos_sin(s, head_dim, self.rope_theta)
         causal_mask = jnp.tril(jnp.ones((s, s), dtype=bool))[None, None]
 
@@ -200,7 +220,7 @@ def extract_hunyuan_llm_embeddings(
     ``hidden_states[-3]`` -- **not** the final ``norm``-ed layer
     (``apply_final_norm`` defaults to ``False``, see module docstring).
     Cropping (``crop_start``) and the pooled attention-mask slice are done
-    by the caller (see ``examples/generate_hunyuan_video_1_0.py``), matching
+    by the caller (see ``examples/generate_hunyuan_video.py``), matching
     ``TextEncoder.encode``'s own separation of concerns.
 
     Args:

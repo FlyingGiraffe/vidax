@@ -105,8 +105,8 @@ at inference time.
 
 ## Architecture notes
 
-- **DiT (`vidax.models.hunyuan_video.hunyuan_video_1_0.dit.
-  HunyuanVideo1DiT`, shared blocks in `vidax.models.hunyuan_video.common.
+- **DiT (`vidax.models.hunyuan_video.hunyuan_video.dit.
+  HunyuanVideoDiT`, shared blocks in `vidax.models.hunyuan_video.common.
   dit_layers`/`common.rope`):** the same dual-stream (`MMDoubleStreamBlock`
   ×20) + single-stream (`MMSingleStreamBlock` ×40) MMDiT family as
   HunyuanVideo-1.5, `hidden_size=3072`, `heads_num=24` (head_dim=128),
@@ -118,7 +118,7 @@ at inference time.
 - **Real (non-degenerate) patchify.** Unlike 1.5's `patch_size=(1,1,1)`,
   1.0 uses `patch_size=(1,2,2)` — a real spatial downsample, implemented as
   a reshape-then-`Dense` (`_patchify`/`_unpatchify` in `dit.py`, duplicated
-  from `hunyuan_video_1_5/dit.py`'s identical functions rather than
+  from `hunyuan_video1_5/dit.py`'s identical functions rather than
   imported): mathematically exact for any `patch_size` because the
   reference's `Conv3d`(kernel==stride) has no overlap between patches.
 - **Text conditioning is a single LLM + a separate pooled CLIP-L vector —
@@ -135,7 +135,7 @@ at inference time.
   (`vec = time_in(t) + vector_in(text_states_2) [+ guidance_in(guidance)]`,
   confirmed by reading `HYVideoDiffusionTransformer.forward` directly).
 - **Text encoder — Llama3-8B decoder tower
-  (`vidax.models.hunyuan_video.hunyuan_video_1_0.llama_text`):** a fresh,
+  (`vidax.models.hunyuan_video.hunyuan_video.llama_text`):** a fresh,
   small port (not a reuse of `cosmos2_5.reason1.Qwen2TextModel` — that
   module hardcodes Qwen2's `q`/`k`/`v_proj` bias convention, which this
   Llama checkpoint doesn't have; see `llama_text.py`'s module docstring for
@@ -146,17 +146,17 @@ at inference time.
   (head_dim=128), `intermediate_size=14336`, `rope_theta=500000`,
   `vocab_size=128320` (larger than stock Llama-3-8B's 128256 — xtuner added
   special image tokens), every Dense layer bias-free. See `docs/lessons/
-  hunyuan_video_1_debugging.md` for the right-vs-left-padding pitfall
+  hunyuan_video_debugging.md` for the right-vs-left-padding pitfall
   verifying this tower caught.
 - **Text encoder — CLIP-L pooled vector
-  (`vidax.models.hunyuan_video.hunyuan_video_1_0.clip_text`):** a fresh,
+  (`vidax.models.hunyuan_video.hunyuan_video.clip_text`):** a fresh,
   standard pre-LN CLIP text tower port (`hidden_size=768`, 12 layers, 12
   heads, `quick_gelu`, causal self-attention, `max_position_embeddings=77`)
   — no existing CLIP *text* tower port in vidax (`wan/wan2_1/clip_vision.py`
   is CLIP *vision*, a different tower). Pooled via the original CLIP
   tokenizer's `argmax(input_ids)` EOS-position rule.
-- **VAE (`vidax.models.hunyuan_video.hunyuan_video_1_0.vae.
-  HunyuanVideo1VAE`, `"884-16c-hy"`):** diffusers' standard
+- **VAE (`vidax.models.hunyuan_video.hunyuan_video.vae.
+  HunyuanVideoVAE`, `"884-16c-hy"`):** diffusers' standard
   `AutoencoderKLCausal3D` — GroupNorm (32 groups, not RMSNorm), plain
   strided `CausalConv3d` down/upsample (no pixel-(un)shuffle scheme, unlike
   1.5's VAE), a single-head diffusers-style `Attention` mid-block with the
@@ -183,9 +183,9 @@ at inference time.
   mp_rank_00_model_states.pt` is a raw DeepSpeed-style `.pt` (this model
   predates broad safetensors adoption) wrapping the actual state_dict one
   level down under a `"module"` key — unwrapped by
-  `map_hunyuan_video_1_0_dit_keys` itself (not the generic loader, since this
+  `map_hunyuan_video_dit_keys` itself (not the generic loader, since this
   nesting is specific to this one checkpoint's save format).
-- **Checkpoint translator (`vidax.translator.mappings.hunyuan_video_1_0`):**
+- **Checkpoint translator (`vidax.translator.mappings.hunyuan_video`):**
   the DiT's one real structural difference from 1.5's mapper: 1.0's
   checkpoint stores **fused** QKV Linears (`img_attn_qkv`/`txt_attn_qkv`/
   `single_blocks.N.linear1`, 856 leaves total across 20 double blocks / 40

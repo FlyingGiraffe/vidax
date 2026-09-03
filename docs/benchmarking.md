@@ -76,6 +76,8 @@ when configs are genuinely identical (documented per-row).
 | HunyuanVideo-1.5 | 8.3B (720p) | I2V | v4-8 | 4/- | 832x1104\* | 121 | 30 | bf16 | bf16 | - | 416.7 | 6575.6 | 219.2 | 32.0 |
 | HunyuanVideo-1.5 | 8.3B (480p) | T2V | v4-8 | 4/- | 832x480 | 121 | 30 | bf16 | bf16 | - | 362.3 | 3583.8 | 119.5 | 29.1 |
 | HunyuanVideo-1.5 | 8.3B (480p) | I2V | v4-8 | 4/- | 544x720\* | 121 | 30 | bf16 | bf16 | - | 362.4 | 3386.4 | 112.9 | 31.4 |
+| HunyuanVideo | 13B | T2V | v4-8 | 4/- | 1280x720 | 129 | 50 | bf16 | bf16 | chunk 20/40\*\*\*\* | 506.7 | 14980.7 | 299.6 | 18.4 |
+| HunyuanVideo | 13B | I2V | v4-8 | 4/- | 832x1088\* | 129 | 50 | bf16 | bf16 | chunk 20/40\*\*\*\* | 557.3 | 15318.5 | 306.4 | 18.4 |
 | CogVideoX1.5 | 5B | T2V | v4-8 | 1/4 | 1360x768 | 81 | 50 | bf16 | bf16 | - | 306.6 | 2639.8 | 52.8 | 31.5 |
 | CogVideoX1.5 | 5B | I2V | v4-8 | 1/4 | 1360x768 | 81 | 50 | bf16 | bf16 | - | 304.2 | 2639.8 | 52.8 | 31.5 |
 | CogVideoX | 5B | T2V | v4-8 | 4/1 | 720x480 | 49 | 50 | bf16 | bf16 | - | 105.8 | 470.6 | 9.4 | 23.2 |
@@ -144,9 +146,19 @@ resolution choice made for this benchmark.
 
 ## Notes
 
+All Wan2.1 rows use `fp32` DiT weights (`--dit_dtype float32`): the
+reference keeps its residual stream in float32 even under bf16 autocast, and
+rounding weights to bf16 causes visible corruption at large token counts. See
+[`docs/lessons/wan2_1_debugging.md`](lessons/wan2_1_debugging.md).
+
 \* I2V output resolution is derived from the standardized conditioning
-image's aspect ratio + `--max_area`, not a fixed `--height`/`--width` — so
-these rows are portrait, unlike every other row's landscape resolution.
+image's own aspect ratio, not a fixed `--height`/`--width` — so these rows
+are portrait, unlike every other row's landscape resolution. Wan2.1/
+Wan2.2/HunyuanVideo-1.5 derive it via aspect ratio + `--max_area`;
+HunyuanVideo (1.0) derives it via `--i2v_resolution`'s bucketed candidate
+sizes (`get_closest_ratio`, matching the reference's own bucketing) —
+different mechanisms, same idea, see each model's own doc for the exact
+formula.
 
 \*\* LTX-2.5's DiT weights are almost entirely bf16 (4059 of 4349 tensors
 in the real checkpoint), **except** every `scale_shift_table`/
@@ -173,10 +185,22 @@ difference, dominated by its own compile time (`~478s`) more than actual
 decode compute. See `docs/lessons/ltx2_5_debugging.md`'s "Diffusion
 (NATTEN) VAE decoder: the full compile-time and memory story" for why.
 
-All Wan2.1 rows use `fp32` DiT weights (`--dit_dtype float32`): the
-reference keeps its residual stream in float32 even under bf16 autocast, and
-rounding weights to bf16 causes visible corruption at large token counts. See
-[`docs/lessons/wan2_1_debugging.md`](lessons/wan2_1_debugging.md).
+\*\*\*\* HunyuanVideo (1.0)'s two rows report `chunk 20/40`, not a single
+`chunk N`: `--offload_dit_weights` offloads its 20 double-stream and 40
+single-stream blocks through two independent chunk pools (different param
+shapes per stream), each defaulting to its own full depth (one chunk for
+all 20 double blocks, one chunk for all 40 single blocks) — see
+`docs/weight_offloading.md` and `docs/lessons/hunyuan_video_debugging.md`.
+Needed to fit the reference's real 129-frame/720p default in HBM at all
+(unlike every other `chunk N` row here, which offloads only to trade
+resident-memory headroom for the *next* pipeline stage, not because the
+DiT's own sampling loop doesn't fit) — the per-step cost is dominated by
+this offloading tax, not an implementation inefficiency: HunyuanVideo-1.5
+(same block family, *zero* offloading) is already the slowest non-offloaded
+row in this table at 221.0 s/step, over 4x slower than Wan2.1 14B at
+comparable settings — a property of the architecture (joint global
+self-attention over the full image+text token sequence, no windowing),
+not something specific to the offloading path.
 
 ## Weight-offloading chunk-size sweep
 

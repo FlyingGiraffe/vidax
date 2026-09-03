@@ -302,8 +302,8 @@ conditioning, or `--tensor_parallel_size 1` alongside
   OOM even though DiT sampling (a much bigger model) had already succeeded.
   Instead, jit only the per-iteration function (its shape/dtype signature
   is identical every call, so this never recompiles) and call it from a
-  plain Python loop: the sampling loops in all three `examples/generate_*`
-  scripts do exactly this (with `donate_argnums` on the latents carry, so
+  plain Python loop: every `examples/generate_*` script's sampling loop
+  does exactly this (with `donate_argnums` on the latents carry, so
   each step reuses the previous step's buffer in place).
 
 ### The VAE decode "hang" that wasn't a hang

@@ -5,18 +5,18 @@ Same pattern as `vidax.models.ltx_video.configs`: LTX-2.5's DiT/VAE
 checkpoints are single-file `.safetensors` with their architecture config
 embedded as file metadata (`safetensors.safe_open(path).metadata()
 ["config"]`) -- the authoritative source, read directly by
-`load_ltx2_5_dit_metadata`/`load_ltx2_5_vae_metadata` rather than hardcoded.
+`load_ltx2_5_metadata` rather than hardcoded.
 `VAE_CONFIG` below is a verified transcription of the real
 `ltx-2.5-video-vae-conv-bf16.safetensors` checkpoint's own embedded
 `config.vae` (read during this port), kept as documentation/test fixture
 the same way `vidax.models.ltx_video.configs.VAE_CONFIG` is -- **not** used
 to build the model at runtime.
 
-`DIT_22B_CONFIG` is filled in from the real
+`DIT_22B_CONFIG`/`CONNECTOR_CONFIG` are verified transcriptions of the real
 `ltx-2.5-22b-{dev,distilled}-transformer-bf16.safetensors` checkpoints'
-embedded metadata once downloaded (see this module's TODO once verified);
-until then, load DiT config via `load_ltx2_5_dit_metadata` directly rather
-than trusting this dict's dims.
+embedded `config.transformer`, kept as documentation/test fixtures only --
+at runtime, build kwargs via `load_ltx2_5_metadata` +
+`dit_kwargs_from_transformer_config` rather than trusting these dicts' dims.
 """
 import json
 

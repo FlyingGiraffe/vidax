@@ -81,7 +81,7 @@ transfers per step instead of one — whether JAX/XLA's async dispatch overlaps
 a given layer's transfer with the *previous* layer's compute is what
 determines whether this stays close to free or becomes additive latency.
 Measured on Wan2.1 14B T2V at native 720P, `--offload_chunk_size 1`:
-**130.0s/step offloaded vs. 26.1s/step non-offloaded at 480P** (not a
+**141.7s/step offloaded vs. 26.1s/step non-offloaded at 480P** (not a
 perfectly matched comparison — 720P has more tokens too — but a direct probe
 already confirmed 720P's *non-offloaded* sampling loop completes fine, so the
 gap is real) at 15.2GB peak HBM/chip (well under budget). The per-layer

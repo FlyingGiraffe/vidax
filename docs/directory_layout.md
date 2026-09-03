@@ -45,7 +45,7 @@ vidax/                          # Repository Root
 │   │   ├── ltx_video.md        # Full CLI reference & usage for LTX-Video (0.9.8)
 │   │   ├── ltx2_5.md           # Full CLI reference & usage for LTX-2.5
 │   │   ├── hunyuan_video1_5.md # Full CLI reference & usage for HunyuanVideo-1.5
-│   │   ├── hunyuan_video.md # HunyuanVideo 1.0 (T2V) -- full port, checked against real checkpoints
+│   │   ├── hunyuan_video.md   # Full CLI reference & usage for HunyuanVideo (1.0, T2V)
 │   │   └── cogvideox.md        # Full CLI reference & usage for CogVideoX (all 5 variants)
 │   ├── lessons/                # Model-specific debugging postmortems
 │   ├── hardware_and_sharding.md # General sharding/JIT/dtype engineering notes
@@ -104,32 +104,32 @@ vidax/                          # Repository Root
         │   │   ├── patchifier.py        # Latent<->pixel coordinate bookkeeping (patch_size=1 at the transformer level)
         │   │   ├── rope.py              # Full-tensor, fractional-pixel-coordinate RoPE
         │   │   └── t5.py                # Standard (non-UMT5) T5-XXL text encoder
-        │   ├── ltx2_5/               # LTX-2.5 -- shares the LTX VAE lineage, otherwise unrelated to ltx_video/
-        │       ├── configs.py           # Checkpoint-embedded-metadata loader (DiT, connector, VAE, Gemma-4)
-        │       ├── dit.py               # LTX-2.5 DiT: cross-attention AdaLN, per-head gated attention
-        │       ├── connector.py         # 8-layer embeddings connector (Gemma-4 features -> DiT cross-attention space)
-        │       ├── vae.py               # Conv-decoder VAE variant (PixelNorm, pixel-unshuffle, self-normalizing encoder)
-        │       ├── diffusion_vae.py     # NATTEN-based transformer VAE decoder variant (--vae_variant diffusion)
-        │       ├── patchifier.py        # Latent<->pixel coordinate bookkeeping, fps-aware temporal RoPE bounds
-        │       ├── rope.py              # Split (rotate-half), per-head, float64-precision RoPE
-        │       └── gemma4.py            # Gemma-4 12B text encoder + embedded-tokenizer extraction
-        │   └── hunyuan_video/        # HunyuanVideo 1.0 / 1.5 -- shares only the dual/single-stream MMDiT block shapes
-        │       ├── common/              # Shared between HunyuanVideo versions
-        │       │   ├── dit_layers.py        # MMDoubleStreamBlock/MMSingleStreamBlock/SingleTokenRefiner, segment-masked flash attention
-        │       │   └── rope.py              # 3D axial RoPE (interleaved-pair -- reuses vidax.core.rope3d.apply_rope3d)
-        │       └── hunyuan_video1_5/
-        │           ├── configs.py           # config.json loaders + DiT/VAE kwargs builders
-        │           ├── dit.py               # HunyuanVideo15DiT: T2V+I2V unified, token-concat text/glyph/vision conditioning
-        │           ├── vae.py               # Causal 3D-conv VAE, channel-last, pixel-(un)shuffle Down/Upsample
-        │           ├── qwen_text.py         # Qwen2.5-VL-7B MLLM wrapper (reuses cosmos2_5.reason1.Qwen2TextModel)
-        │           ├── byt5.py              # byT5 glyph encoder (reuses ltx_video.t5.T5Encoder) + ByT5Mapper
-        │           └── siglip.py            # SigLIP vision encoder (I2V conditioning)
-        │       └── hunyuan_video/     # HunyuanVideo 1.0, T2V only (I2V is a separate, un-cloned upstream repo)
-        │           ├── configs.py           # Named DiT presets + vae/config.json loader/kwargs builder
-        │           ├── dit.py               # HunyuanVideoDiT -- single-LLM-encoder text conditioning, no I2V channel-concat
-        │           ├── vae.py               # AutoencoderKLCausal3D port: GroupNorm, plain strided Down/Upsample (different family from 1.5's)
-        │           ├── llama_text.py        # Llama3-8B decoder tower (extracted xtuner/llava-llama-3-8b-v1_1-transformers)
-        │           └── clip_text.py         # CLIP-L pooled text encoder (openai/clip-vit-large-patch14)
+        │   ├── ltx2_5/              # LTX-2.5 -- shares the LTX VAE lineage, otherwise unrelated to ltx_video/
+        │   │   ├── configs.py           # Checkpoint-embedded-metadata loader (DiT, connector, VAE, Gemma-4)
+        │   │   ├── dit.py               # LTX-2.5 DiT: cross-attention AdaLN, per-head gated attention
+        │   │   ├── connector.py         # 8-layer embeddings connector (Gemma-4 features -> DiT cross-attention space)
+        │   │   ├── vae.py               # Conv-decoder VAE variant (PixelNorm, pixel-unshuffle, self-normalizing encoder)
+        │   │   ├── diffusion_vae.py     # NATTEN-based transformer VAE decoder variant (--vae_variant diffusion)
+        │   │   ├── patchifier.py        # Latent<->pixel coordinate bookkeeping, fps-aware temporal RoPE bounds
+        │   │   ├── rope.py              # Split (rotate-half), per-head, float64-precision RoPE
+        │   │   └── gemma4.py            # Gemma-4 12B text encoder + embedded-tokenizer extraction
+        │   ├── hunyuan_video/       # HunyuanVideo 1.0 / 1.5 -- shares only the dual/single-stream MMDiT block shapes
+        │   │   ├── common/              # Shared between HunyuanVideo versions
+        │   │   │   ├── dit_layers.py        # MMDoubleStreamBlock/MMSingleStreamBlock/SingleTokenRefiner, segment-masked flash attention
+        │   │   │   └── rope.py              # 3D axial RoPE (interleaved-pair -- reuses vidax.core.rope3d.apply_rope3d)
+        │   │   ├── hunyuan_video1_5/
+        │   │   │   ├── configs.py           # config.json loaders + DiT/VAE kwargs builders
+        │   │   │   ├── dit.py               # HunyuanVideo15DiT: T2V+I2V unified, token-concat text/glyph/vision conditioning
+        │   │   │   ├── vae.py               # Causal 3D-conv VAE, channel-last, pixel-(un)shuffle Down/Upsample
+        │   │   │   ├── qwen_text.py         # Qwen2.5-VL-7B MLLM wrapper (reuses cosmos2_5.reason1.Qwen2TextModel)
+        │   │   │   ├── byt5.py              # byT5 glyph encoder (reuses ltx_video.t5.T5Encoder) + ByT5Mapper
+        │   │   │   └── siglip.py            # SigLIP vision encoder (I2V conditioning)
+        │   │   └── hunyuan_video/       # HunyuanVideo 1.0, T2V only (I2V is a separate, un-cloned upstream repo)
+        │   │       ├── configs.py           # Named DiT presets + vae/config.json loader/kwargs builder
+        │   │       ├── dit.py               # HunyuanVideoDiT -- single-LLM-encoder text conditioning, no I2V channel-concat
+        │   │       ├── vae.py               # AutoencoderKLCausal3D port: GroupNorm, plain strided Down/Upsample (different family from 1.5's)
+        │   │       ├── llama_text.py        # Llama3-8B decoder tower (extracted xtuner/llava-llama-3-8b-v1_1-transformers)
+        │   │       └── clip_text.py         # CLIP-L pooled text encoder (openai/clip-vit-large-patch14)
         │   └── cogvideo/            # CogVideoX 1.0 / 1.5 -- one diffusers transformer class covers both (flat)
         │       ├── configs.py           # Named presets for all 5 checkpoints (2b/5b/5b-I2V/1.5-5B/1.5-5B-I2V)
         │       ├── dit.py               # CogVideoXDiT: joint [text;visual] self-attn, LayerNormZero, partial-RoPE, patch_size_t (1.5)

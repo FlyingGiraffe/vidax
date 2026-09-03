@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]  # or "flit_core>=3.2,<4"
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [
-    { name = "Your Name", email = "your.email@example.com" }
+    { name = "FlyingGiraffe" }
 ]
 
 # Core dependencies required by anyone using `vidax`
@@ -42,7 +42,7 @@ torch = [
     "torch>=2.0.0",
 ]
 
-# Required for tokenizers/processors across models: `vidax.models.wan.t5.
+# Required for tokenizers/processors across models: `vidax.models.wan.common.t5.
 # Umt5Tokenizer` (UMT5, `sentencepiece`-backed), HunyuanVideo-1.5's
 # Qwen2.5-VL MLLM and byT5 tokenizers (AutoTokenizer, no sentencepiece
 # needed), and SigLIP's image processor. `transformers>=4.49.0` is the

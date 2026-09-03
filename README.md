@@ -81,7 +81,7 @@ I2V, Wan2.2's A14B).
 | LTX-Video (0.9.8) | 13B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Link](https://huggingface.co/Lightricks/LTX-Video) |
 | LTX-Video (0.9.8) | 2B (distilled) | T2V/I2V | ✅/❌/❌ | [ltx_video.md](docs/models/ltx_video.md) | 🤗[Link](https://huggingface.co/Lightricks/LTX-Video) |
 | HunyuanVideo-1.5 | 8.3B | T2V/I2V | ✅/❌/❌ | [hunyuan_video1_5.md](docs/models/hunyuan_video1_5.md) | 🤗[Link](https://huggingface.co/tencent/HunyuanVideo-1.5) |
-| HunyuanVideo | 13B | T2V | ✅/❌/❌ | [hunyuan_video.md](docs/models/hunyuan_video.md) | 🤗[Link](https://huggingface.co/tencent/HunyuanVideo) |
+| HunyuanVideo | 13B | T2V/I2V | ✅/❌/❌ | [hunyuan_video.md](docs/models/hunyuan_video.md) | 🤗[Link](https://huggingface.co/tencent/HunyuanVideo) |
 | CogVideoX1.5 | 5B | I2V | ✅/❌/❌ | [cogvideox.md](docs/models/cogvideox.md) | 🤗[Link](https://huggingface.co/THUDM/CogVideoX1.5-5B-I2V) |
 | CogVideoX1.5 | 5B | T2V | ✅/❌/❌ | [cogvideox.md](docs/models/cogvideox.md) | 🤗[Link](https://huggingface.co/THUDM/CogVideoX1.5-5B) |
 | CogVideoX | 5B | T2V | ✅/❌/❌ | [cogvideox.md](docs/models/cogvideox.md) | 🤗[Link](https://huggingface.co/THUDM/CogVideoX-5b) |
@@ -129,6 +129,7 @@ inference script per family/task under `examples/`. See
 | LTX-Video (0.9.8) | Lightricks | [code](https://github.com/Lightricks/LTX-Video) | [report](https://arxiv.org/abs/2501.00103) | [weights](https://huggingface.co/Lightricks/LTX-Video) | [LTX-Video Open Weights License](https://huggingface.co/Lightricks/LTX-Video/blob/main/LTX-Video-Open-Weights-License-0.X.txt) |
 | HunyuanVideo-1.5 | Tencent | [code](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) | [report](https://arxiv.org/abs/2511.18870) | [weights](https://huggingface.co/tencent/HunyuanVideo-1.5) | [Tencent Hunyuan Community License](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5/blob/main/LICENSE) |
 | HunyuanVideo | Tencent | [code](https://github.com/Tencent-Hunyuan/HunyuanVideo) | [report](https://arxiv.org/abs/2412.03603) | [weights](https://huggingface.co/tencent/HunyuanVideo) | [Tencent Hunyuan Community License](https://github.com/Tencent-Hunyuan/HunyuanVideo/blob/main/LICENSE.txt) |
+| HunyuanVideo-I2V | Tencent | [code](https://github.com/Tencent-Hunyuan/HunyuanVideo-I2V) | [report](https://arxiv.org/abs/2412.03603) | [weights](https://huggingface.co/tencent/HunyuanVideo-I2V) | [Tencent Hunyuan Community License](https://github.com/Tencent-Hunyuan/HunyuanVideo-I2V/blob/main/LICENSE.txt) |
 | CogVideoX / 1.5 | THUDM / ZhipuAI | [code](https://github.com/THUDM/CogVideo) | [report](https://arxiv.org/abs/2408.06072) | [weights](https://huggingface.co/THUDM) | [CogVideoX License](https://huggingface.co/THUDM/CogVideoX-5b/blob/main/LICENSE) |
 
 **Parallelism techniques implemented in this repo:**

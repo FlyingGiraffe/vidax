@@ -349,7 +349,12 @@ def main(args):
         # exact, not an approximation, since `pre_process` computes them
         # the same way from the same shape.
         def _pre_process_body(params, hidden_states, timestep, text_states, text_mask, text_states_2, guidance):
-            img, txt, vec, freqs, key_valid, _img_len, _tt, _th, _tw = dit_model.apply(
+            # `pre_process` now also returns `token_replace_vec`/
+            # `first_frame_token_num` (I2V's `token_replace` mode -- see
+            # generate_hunyuan_video_i2v.py) -- both `None` here since this
+            # script never sets `i2v_condition_type`, discarded same as
+            # the other static/unneeded values.
+            img, txt, vec, freqs, key_valid, _img_len, _tt, _th, _tw, _tr_vec, _tr_n = dit_model.apply(
                 params, hidden_states, timestep, text_states, text_mask, text_states_2,
                 guidance=guidance, method=dit_model.pre_process)
             return img, txt, vec, freqs, key_valid

@@ -12,11 +12,6 @@ release process.
 _Small, non-code changes (benchmark-number refreshes, README link fixes, etc.)
 land here between releases and ship with the next tagged version._
 
-### Changed
-
-- Removed dead imports / unused locals across `src/` and `examples/`; `ruff`
-  (`select = ["F"]`) is now enforced clean in CI.
-
 ## [0.1.0] - UNRELEASED
 
 First public release.

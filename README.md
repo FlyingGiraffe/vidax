@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
+  <a href="NOTICE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
   <!-- Uncomment once the package is published to PyPI:
   <a href="https://pypi.org/project/vidax/"><img alt="PyPI" src="https://img.shields.io/pypi/v/vidax.svg"></a>
   -->
@@ -145,6 +145,26 @@ inference script per family/task under `examples/`. See
 [`docs/directory_layout.md`](docs/directory_layout.md) for the full tree, and
 [`docs/index.md`](docs/index.md) for the documentation map.
 
+## ⚖️ License
+
+`vidax`'s source code is released under the [Apache License 2.0](LICENSE),
+**except** for the JAX re-implementations of **HunyuanVideo**,
+**HunyuanVideo-1.5** and **LTX-2.5**. Those were written with reference to
+upstream code released under the *Tencent Hunyuan Community License* and the
+*LTX-2.x Community License* respectively, and use of those modules is
+additionally subject to those licenses — which are **not** permissive
+open-source licenses (they carry territorial restrictions and acceptable-use /
+commercial-scale conditions). The affected paths are listed in
+[`NOTICE`](NOTICE), with a `LICENSE` file in each affected directory. If you
+can't accept those terms, don't use those modules; the rest of `vidax` remains
+available to you under Apache 2.0.
+
+**No model weights are included.** Every checkpoint is governed by its own
+license (the **License** column below is each model's *weights* license — the
+upstream *source-code* licenses that govern `vidax`'s re-implementations are in
+[`NOTICE`](NOTICE)). You are responsible for complying with the license of any
+weights you download.
+
 ## 📚 References
 
 | Model | Developer | Code | Report | Weights | License |
@@ -153,7 +173,7 @@ inference script per family/task under `examples/`. See
 | Wan2.1 | Alibaba (Wan team) | [code](https://github.com/Wan-Video/Wan2.1) | [report](https://arxiv.org/abs/2503.20314) | [weights](https://huggingface.co/Wan-AI) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) |
 | Cosmos 3 | NVIDIA | [code](https://github.com/NVIDIA/cosmos) | [report](https://research.nvidia.com/labs/cosmos-lab/cosmos3/technical-report.pdf) | [weights](https://huggingface.co/nvidia/Cosmos3-Nano) | [OpenMDW-1.1](https://openmdw.ai/license/1-1/) |
 | Cosmos-Predict2.5 | NVIDIA | [code](https://github.com/nvidia-cosmos/cosmos-predict2.5) | [report](https://arxiv.org/abs/2511.00062) | [weights](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B) | [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license) |
-| LTX-2.5 | Lightricks | [code](https://github.com/Lightricks/LTX-2) | [report](https://arxiv.org/abs/2601.03233) | [weights](https://huggingface.co/Lightricks/LTX-2.5) | [LTX-2 Community License](https://github.com/Lightricks/LTX-2/blob/main/LICENSE.md) |
+| LTX-2.5 | Lightricks | [code](https://github.com/Lightricks/LTX-2) | [report](https://arxiv.org/abs/2601.03233) | [weights](https://huggingface.co/Lightricks/LTX-2.5) | [LTX-2.x Community License](https://github.com/Lightricks/LTX-2/blob/main/LICENSE) |
 | LTX-Video (0.9.8) | Lightricks | [code](https://github.com/Lightricks/LTX-Video) | [report](https://arxiv.org/abs/2501.00103) | [weights](https://huggingface.co/Lightricks/LTX-Video) | [LTX-Video Open Weights License](https://huggingface.co/Lightricks/LTX-Video/blob/main/LTX-Video-Open-Weights-License-0.X.txt) |
 | HunyuanVideo-1.5 | Tencent | [code](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) | [report](https://arxiv.org/abs/2511.18870) | [weights](https://huggingface.co/tencent/HunyuanVideo-1.5) | [Tencent Hunyuan Community License](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5/blob/main/LICENSE) |
 | HunyuanVideo | Tencent | [code](https://github.com/Tencent-Hunyuan/HunyuanVideo) | [report](https://arxiv.org/abs/2412.03603) | [weights](https://huggingface.co/tencent/HunyuanVideo) | [Tencent Hunyuan Community License](https://github.com/Tencent-Hunyuan/HunyuanVideo/blob/main/LICENSE.txt) |

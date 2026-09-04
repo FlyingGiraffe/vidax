@@ -1,0 +1,91 @@
+vidax
+Copyright 2026 vidax authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE),
+EXCEPT for the third-party-derived portions identified in section 2 below.
+
+================================================================================
+1. Third-party model implementations
+================================================================================
+
+vidax re-implements, in JAX/Flax, the architectures of several third-party
+PyTorch video diffusion models. This repository contains NO third-party source
+code verbatim and NO model weights. Each implementation was written with
+reference to the corresponding upstream project's technical report and its
+released source code.
+
+Upstream projects and the license of their SOURCE CODE (which is distinct from
+the license of their released model weights):
+
+  Wan2.1, Wan2.2 -- Alibaba (Wan team)
+      https://github.com/Wan-Video/Wan2.1
+      https://github.com/Wan-Video/Wan2.2
+      Source code: Apache License 2.0
+
+  CogVideoX / CogVideoX 1.5 -- THUDM / ZhipuAI
+      https://github.com/THUDM/CogVideo
+      Source code: Apache License 2.0
+
+  LTX-Video (0.9.8) -- Lightricks
+      https://github.com/Lightricks/LTX-Video
+      Source code: Apache License 2.0
+
+  Cosmos-Predict2.5 -- NVIDIA
+      https://github.com/nvidia-cosmos/cosmos-predict2.5
+      Source code: Apache License 2.0
+
+  Cosmos 3 (Nano / Edge) -- NVIDIA
+      https://github.com/NVIDIA/cosmos
+      Source code: OpenMDW-1.1 (https://openmdw.ai/license/1-1/)
+
+  HunyuanVideo, HunyuanVideo-1.5 -- Tencent
+      https://github.com/Tencent-Hunyuan/HunyuanVideo
+      https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5
+      Source code: Tencent Hunyuan Community License Agreement
+
+  LTX-2.5 -- Lightricks
+      https://github.com/Lightricks/LTX-2
+      Source code: LTX-2.x Community License Agreement
+
+The vidax implementations of Wan, CogVideoX, LTX-Video and Cosmos are provided
+under the Apache License 2.0 (this project's license). Please retain this NOTICE
+when redistributing.
+
+================================================================================
+2. Portions under additional (non-Apache) terms
+================================================================================
+
+The Tencent Hunyuan Community License Agreement and the LTX-2.x Community
+License Agreement are NOT permissive open-source licenses. Among other terms
+they include territorial restrictions (the Tencent Hunyuan Community License
+does not apply in the European Union, the United Kingdom, or South Korea) and
+acceptable-use and commercial-scale conditions.
+
+To the extent the following parts of vidax are derivative works of the
+corresponding upstream source code, your use, modification and redistribution
+of THOSE PARTS is additionally subject to the applicable upstream license:
+
+  Tencent Hunyuan Community License Agreement
+    (https://github.com/Tencent-Hunyuan/HunyuanVideo/blob/main/LICENSE.txt):
+      src/vidax/models/hunyuan_video/**
+      src/vidax/translator/mappings/hunyuan_video.py
+      src/vidax/translator/mappings/hunyuan_video1_5.py
+
+  LTX-2.x Community License Agreement
+    (https://github.com/Lightricks/LTX-2/blob/main/LICENSE):
+      src/vidax/models/ltx2_5/**
+      src/vidax/translator/mappings/ltx2_5.py
+
+Each of those directories also contains a LICENSE file restating this. Refer to
+the upstream repositories for the full, current license text. If you cannot
+accept those terms, do not use the parts listed above; the rest of vidax
+remains available to you under the Apache License 2.0.
+
+================================================================================
+3. Model weights
+================================================================================
+
+vidax distributes no model weights. Every checkpoint you obtain from a third
+party is governed by that party's own license -- see the References table in
+README.md. You are responsible for complying with the license of any weights
+you download or use.

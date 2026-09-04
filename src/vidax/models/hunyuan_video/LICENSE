@@ -1,0 +1,23 @@
+The code in this directory (src/vidax/models/hunyuan_video/, all files and
+subdirectories) is a JAX/Flax re-implementation of Tencent's HunyuanVideo and
+HunyuanVideo-1.5 architectures, developed with reference to the upstream source
+code at:
+
+    https://github.com/Tencent-Hunyuan/HunyuanVideo
+    https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5
+
+That upstream source code is released under the Tencent Hunyuan Community
+License Agreement, which is NOT a permissive open-source license (it includes,
+among other terms, territorial restrictions -- it does not apply in the
+European Union, the United Kingdom, or South Korea -- and acceptable-use and
+commercial-scale conditions).
+
+To the extent this directory is a derivative work of that upstream code, your
+use, modification and redistribution of it is additionally subject to the
+Tencent Hunyuan Community License Agreement, in addition to the Apache License
+2.0 that covers the rest of vidax. See the repository-root NOTICE file, and the
+upstream LICENSE.txt for the full, current text.
+
+The same applies to the corresponding translator key mappings:
+    src/vidax/translator/mappings/hunyuan_video.py
+    src/vidax/translator/mappings/hunyuan_video1_5.py

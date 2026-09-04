@@ -55,5 +55,13 @@ First public release.
   [`docs/library_usage.md`](docs/library_usage.md) for the guide and
   [`docs/api/`](docs/api/index.md) for the per-function reference.
 
+### Licensing
+
+- Apache-2.0 overall, with a `NOTICE` file attributing every upstream project
+  and its source-code license. The HunyuanVideo / HunyuanVideo-1.5 / LTX-2.5
+  re-implementations are additionally subject to their upstream community
+  licenses (Tencent Hunyuan Community License, LTX-2.x Community License) — see
+  `NOTICE` and the `LICENSE` file in each affected directory.
+
 [Unreleased]: https://github.com/FlyingGiraffe/vidax/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/FlyingGiraffe/vidax/releases/tag/v0.1.0

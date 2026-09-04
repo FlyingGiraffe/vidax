@@ -5,7 +5,7 @@ common.py`'s module docstring).
 
 Usage:
     python benchmarks/run_hunyuan_video1_5.py --resolution 480p --task t2v
-    VIDAX_CHECKPOINT_DIR=/mnt/disks/tpu_ssd/checkpoints python benchmarks/run_hunyuan_video1_5.py --resolution 720p --task i2v
+    VIDAX_CHECKPOINT_DIR=/path/to/checkpoints python benchmarks/run_hunyuan_video1_5.py --resolution 720p --task i2v
 """
 import argparse
 import os

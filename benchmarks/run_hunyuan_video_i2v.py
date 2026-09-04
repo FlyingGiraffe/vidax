@@ -6,7 +6,7 @@ Imports and calls the real `examples/generate_hunyuan_video_i2v.py`'s
 
 Usage:
     python benchmarks/run_hunyuan_video_i2v.py
-    VIDAX_CHECKPOINT_DIR=/mnt/disks/tpu_ssd/checkpoints python benchmarks/run_hunyuan_video_i2v.py --num_runs 5
+    VIDAX_CHECKPOINT_DIR=/path/to/checkpoints python benchmarks/run_hunyuan_video_i2v.py --num_runs 5
 """
 import argparse
 import os

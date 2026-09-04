@@ -18,17 +18,15 @@ the reference pipeline does (``hidden_states`` always has the
 ``concat_condition``-doubled+1 channel count; ``vision_states`` is always
 passed, zeroed for T2V).
 """
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Tuple
 
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from vidax.core.rope3d import sinusoidal_embedding_1d
 from vidax.models.hunyuan_video.common.dit_layers import (
     FinalLayer,
-    MLP,
     MMDoubleStreamBlock,
     MMSingleStreamBlock,
     SingleTokenRefiner,

@@ -357,10 +357,10 @@ def extract_video_features(
         `vidax.models.ltx2_5.connector.Embeddings1DConnector`.
     """
     stacked = jnp.stack(hidden_states, axis=-1)  # (B, S, D, L)
-    b, s, d, l = stacked.shape
+    b, s, d, num_layers = stacked.shape
     variance = jnp.mean(jnp.square(stacked.astype(jnp.float32)), axis=2, keepdims=True)  # (B, S, 1, L)
     normed = stacked.astype(jnp.float32) * jax.lax.rsqrt(variance + eps)
-    normed = normed.reshape(b, s, d * l).astype(stacked.dtype)
+    normed = normed.reshape(b, s, d * num_layers).astype(stacked.dtype)
     mask3d = attention_mask.astype(bool)[..., None]
     normed = jnp.where(mask3d, normed, jnp.zeros_like(normed))
 

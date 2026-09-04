@@ -8,8 +8,7 @@ architecture and ``llama_text.py``'s ``LlamaTextModel.__call__``'s
 ``image_embeds``/``image_start``/``image_end`` params for the splice
 mechanism this module drives.
 
-**Real `transformers` version mismatch** (see the plan file's "HunyuanVideo
-1.0 I2V" progress log): this checkpoint's own config.json was built
+**Real `transformers` version mismatch:** this checkpoint's own config.json was built
 against `transformers==4.40.1`; the installed verify env has a much newer
 version whose `LlavaModel.forward` requires the image placeholder to
 already be pre-expanded (raises otherwise) -- the *old* 4.40.1-era
@@ -40,9 +39,8 @@ Do not conflate these -- they use different target sizes and different
 normalization conventions.
 """
 import math
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 from PIL import Image
@@ -218,8 +216,7 @@ def extract_hunyuan_llava_embeddings(
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Full I2V embedding extraction, mirroring `TextEncoder.encode`'s
     `i2v_mode` branch for `data_type="video"` exactly (see this module's
-    docstring and the plan file's architecture notes for the index math's
-    provenance):
+    docstring for the index math's provenance):
 
     1. Project the reference image through the CLIP tower + multimodal
        projector (`get_llava_image_features`, `vision_feature_layer=-2`).
@@ -238,8 +235,8 @@ def extract_hunyuan_llava_embeddings(
        block moving right by that much), while the attention-mask slice
        bounds are the *raw pre-expansion* positions applied directly to
        `raw_attention_mask` (never expanded) -- both conventions yield the
-       same real span length by construction (see the plan file), so this
-       is not a bug to "simplify" away.
+       same real span length by construction, so this is not a bug to
+       "simplify" away.
 
     Returns (text_states, text_mask), each batch-first, ready for
     `HunyuanVideoDiT`'s `text_states`/`encoder_attention_mask` inputs.

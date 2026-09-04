@@ -326,7 +326,6 @@ def main(args):
     latent_w = args.width // spatial_scale
 
     latent_shape = (batch_size, latent_f, latent_h, latent_w, dit_model.in_channels)
-    num_tokens = latent_f * latent_h * latent_w
 
     scheduler = AncestralEulerScheduler(
         sampler=args.sampler, sigmas=(jnp.asarray(args.sigmas, dtype=jnp.float32) if args.sigmas else None),

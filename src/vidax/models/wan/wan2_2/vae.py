@@ -27,7 +27,7 @@ in `jax.jit` -- same reasoning as `vidax.models.wan.wan2_1.vae`'s module
 docstring (the chunked encode/decode loop must run eagerly to avoid OOM from
 `jax.jit` unrolling every chunk into one HLO program).
 """
-from typing import Optional, Sequence
+from typing import Sequence
 
 import flax.linen as nn
 import jax.numpy as jnp

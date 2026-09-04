@@ -1,0 +1,40 @@
+name: Bug report
+description: Something in vidax is broken or produces wrong output
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a report. Please include enough detail to reproduce.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what actually happened.
+      placeholder: |
+        Running `examples/generate_wan2_1_t2v.py` with ... produces ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Exact command(s), model/variant, checkpoint source, and resolution/frames/steps.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: >
+        `vidax` version (or commit), `jax.__version__`, `jax.devices()` output,
+        TPU/GPU/CPU and chip count, Python version, OS.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / traceback
+      render: shell

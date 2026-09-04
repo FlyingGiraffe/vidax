@@ -1,4 +1,5 @@
-"""Named hyperparameter presets for HunyuanVideo 1.0 (T2V only).
+"""Named hyperparameter presets for HunyuanVideo 1.0 (shared by T2V and I2V --
+the two checkpoints differ in weights and text encoder, not DiT hyperparameters).
 
 Unlike HunyuanVideo-1.5, this repo's own `refs/HunyuanVideo-main/` ships no
 downloaded-checkpoint `config.json` to read from -- its hyperparameters live
@@ -15,7 +16,7 @@ this pass, see docs/lessons/hunyuan_video_debugging.md).
 """
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -58,8 +59,10 @@ DIT_CONFIGS = {
     "HYVideo-T/2-cfgdistill": HYVIDEO_T2_CFGDISTILL_CONFIG,
 }
 
-# `config.py`'s `--flow-shift` default -- one value (unlike HunyuanVideo-1.5's
-# per-resolution/task table), since this batch covers one T2V resolution class.
+# `config.py`'s `--flow-shift` default for T2V -- HunyuanVideo 1.0 uses one
+# value here (unlike HunyuanVideo-1.5's per-resolution/task table). I2V's
+# reference launch script uses a different shift (17.0); see
+# `examples/generate_hunyuan_video_i2v.py`'s `--shift` default.
 DEFAULT_SHIFT = 7.0
 
 

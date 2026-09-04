@@ -20,13 +20,13 @@ section below for what's specific to Cosmos.
 | `generate_cosmos2_5.py` | Cosmos-Predict2.5 | 2B | Text2World, Image2World, Video2World | `Cosmos-Predict2.5-2B/base/pre-trained` |
 | `generate_cosmos2_5.py` | Cosmos-Predict2.5 | 14B | Text2World, Image2World, Video2World | `Cosmos-Predict2.5-14B/base/pre-trained` |
 
-Requires the `torch` extra (to deserialize the `.pt` DiT/VAE checkpoints),
-the `text` extra (`transformers`, for the Reason1/Qwen2.5-VL-7B tokenizer),
-and the `i2v` extra (`pillow`, for image2world/video2world's conditioning
-frame(s)):
+Uses `torch` (to deserialize the `.pt` DiT/VAE checkpoints), `transformers`
+(the Reason1/Qwen2.5-VL-7B tokenizer), and `pillow` (image2world/video2world
+conditioning frame(s)) — all installed by default. On a Cloud TPU VM also
+add the `tpu` extra:
 
 ```bash
-pip install -e ".[tpu,torch,text,i2v]"
+pip install -e ".[tpu]"    # or just: pip install -e .
 ```
 
 ---

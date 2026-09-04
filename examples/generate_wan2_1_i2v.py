@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 from PIL import Image
 from jax.experimental.shard_map import shard_map
-from jax.sharding import PartitionSpec as P, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from vidax.core.sharding import (
     build_tpu_mesh, shard_wan_params, get_replicated_sharding, get_batch_sharding,

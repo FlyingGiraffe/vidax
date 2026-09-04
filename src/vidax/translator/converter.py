@@ -1,6 +1,10 @@
-from typing import Union
+from typing import TYPE_CHECKING, Union
+
 import ml_dtypes
 import numpy as np
+
+if TYPE_CHECKING:
+    import torch
 
 
 def pt_tensor_to_numpy(pt_array: Union[np.ndarray, "torch.Tensor"]) -> np.ndarray:

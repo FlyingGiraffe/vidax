@@ -4,10 +4,17 @@
 
 <p align="center">
   <a href="https://flyinggiraffe.github.io/vidax-site/docs/intro">Documentation</a> |
-  <a href="https://arxiv.org/abs/TODO">arXiv</a> |
+  arXiv (coming soon) |
   <a href="https://flyinggiraffe.github.io/vidax-site/blog">Blog</a> |
   <a href="https://flyinggiraffe.github.io/vidax-site/benchmarks">Benchmark</a> |
   <a href="https://flyinggiraffe.github.io/vidax-site/gallery">Gallery</a>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
+  <!-- Uncomment once the package is published to PyPI:
+  <a href="https://pypi.org/project/vidax/"><img alt="PyPI" src="https://img.shields.io/pypi/v/vidax.svg"></a>
+  -->
 </p>
 
 **`vidax`** is a lightweight JAX/Flax inference engine and
@@ -95,10 +102,11 @@ above live in [`docs/benchmarking.md`](docs/benchmarking.md).
 ## 🚀 Quickstart
 
 ```bash
-# Clone and install (editable, with TPU / torch-checkpoint-loading / tokenizer extras)
+# Clone and install (editable). On a Cloud TPU VM add the "tpu" extra for the
+# right jaxlib wheel: pip install -e ".[tpu]"
 git clone https://github.com/FlyingGiraffe/vidax.git
 cd vidax
-pip install -e ".[tpu,torch,text]"
+pip install -e .
 
 # Generate a video (Wan2.1 T2V, 1.3B)
 python examples/generate_wan2_1_t2v.py \
@@ -110,12 +118,32 @@ python examples/generate_wan2_1_t2v.py \
   --output_path "out/output.mp4"
 ```
 
+## 🐍 Library / Python API
+
+Beyond the `examples/` scripts, `vidax` is usable as a library — reuse the
+Pallas flash-attention kernel, the diffusion schedulers, the PyTorch→JAX
+translator, or a model's DiT/VAE modules directly:
+
+```python
+from vidax.core import dot_product_attention, build_tpu_mesh
+from vidax.schedulers import RectifiedFlowScheduler
+from vidax.translator import load_torch_checkpoint_to_jax
+
+params = load_torch_checkpoint_to_jax("model.safetensors", model_type="wan_dit")
+out = dot_product_attention(q, k, v)          # real O(seq)-memory flash attn on TPU
+```
+
+See [`docs/library_usage.md`](docs/library_usage.md) for worked examples
+(standalone attention, schedulers, checkpoint translation, and a full model),
+and [`docs/api/`](docs/api/index.md) for the full per-function API reference.
+
 ## 🛠 Directory Layout
 
 Standard Python `src`-layout: one subpackage per model family under
 `models/`, one usage guide per family under `docs/models/`, one standalone
 inference script per family/task under `examples/`. See
-[`docs/directory_layout.md`](docs/directory_layout.md) for the full tree.
+[`docs/directory_layout.md`](docs/directory_layout.md) for the full tree, and
+[`docs/index.md`](docs/index.md) for the documentation map.
 
 ## 📚 References
 

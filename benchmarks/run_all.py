@@ -13,7 +13,7 @@ same goal, one level up).
 
 Usage:
     python benchmarks/run_all.py
-    VIDAX_CHECKPOINT_DIR=/mnt/disks/tpu_ssd/checkpoints python benchmarks/run_all.py
+    VIDAX_CHECKPOINT_DIR=/path/to/checkpoints python benchmarks/run_all.py
 """
 import argparse
 import os

@@ -1,31 +1,30 @@
 # HunyuanVideo (1.0) — Usage Guide
 
-T2V only (I2V lives in a separate, un-cloned upstream repo and is out of
-scope). One standalone TPU inference script lives in `examples/`:
-`generate_hunyuan_video.py`, covering the single released checkpoint
-variant (`tencent/HunyuanVideo`'s `hunyuan-video-t2v-720p`, the
-`"HYVideo-T/2-cfgdistill"` preset). `--model-resolution`/544p in the
-reference is dead code for the default CLI path (only ever consulted when
-`--dit-weight` is *not* given, which it always is in practice) — there is
-no separate 544p checkpoint, just a different runtime `--height`/`--width`
-on this one 720p-native checkpoint.
+HunyuanVideo 1.0 ships T2V and I2V as **genuinely separate** checkpoints
+(`hunyuan-video-t2v-720p` vs `hunyuan-video-i2v-720p`) with different text
+encoders, so `examples/` has one standalone TPU script per task:
 
-| Script | Model | Params | Task | Checkpoint |
-| --- | --- | --- | --- | --- |
-| `generate_hunyuan_video.py` | HunyuanVideo (1.0) | 13B DiT | T2V | `hunyuan-video-t2v-720p/` |
+| Script | Model | Params | Task | Checkpoint | Text encoder |
+| --- | --- | --- | --- | --- | --- |
+| `generate_hunyuan_video.py` | HunyuanVideo (1.0) | 13B DiT | T2V | `hunyuan-video-t2v-720p/` | Llama3-8B (`.language_model` only) + CLIP-L |
+| `generate_hunyuan_video_i2v.py` | HunyuanVideo-I2V (1.0) | 13B DiT | I2V | `hunyuan-video-i2v-720p/` | full multimodal LLaVA-Llama3-8B + CLIP-L |
 
-Conditioning requires two separate text towers on top of the DiT itself: a
-Llama3-8B decoder-only text encoder (extracted from
-`xtuner/llava-llama-3-8b-v1_1-transformers`'s `.language_model`, per the
-reference's own recommendation — HunyuanMLLM was never publicly released)
-and a CLIP-L pooled text vector (`openai/clip-vit-large-patch14`).
+Both are the `"HYVideo-T/2-cfgdistill"` preset. `--model-resolution`/544p in
+the reference is dead code for the default CLI path (only consulted when
+`--dit-weight` is *not* given, which it always is) — there is no separate
+544p checkpoint, just a different runtime `--height`/`--width` on the
+720p-native checkpoint.
 
-Requires the `torch` extra (to deserialize `.pt`/`.safetensors`
-checkpoints) and the `text` extra (`transformers`, for the Llama/CLIP
-tokenizers):
+I2V is implemented here in the reference's `token_replace` mode (the shipped
+checkpoint's default); `latent_concat`, its other I2V mode, is not ported.
+
+All dependencies (`torch` to deserialize the `.pt`/`.safetensors`
+checkpoints, `transformers` for the Llama/CLIP/LLaVA tokenizers, `pillow`
+for the I2V reference image) are installed by default. On a Cloud TPU VM
+also add the `tpu` extra:
 
 ```bash
-pip install -e ".[tpu,torch,text]"
+pip install -e ".[tpu]"    # or just: pip install -e .
 ```
 
 ---
@@ -99,6 +98,63 @@ at inference time.
 | `--fps` | `24` | Output video frame rate. |
 | `--tensor_parallel_size` | every local device | Megatron-shards the DiT's double/single-stream blocks' Q/K/V/output/FFN Dense layers across this many chips. Must divide `heads_num` (24). Required in practice — the 13B DiT doesn't fit replicated on one TPU v4 chip. |
 | `--vae_tile_latent_size` | reference default | Latent-space spatial tile size for the tiled VAE decode. Shrink (e.g. `8`) if VAE decode OOMs. |
+| `--output_path` | `output.mp4` | Output video path. |
+
+---
+
+## HunyuanVideo-I2V (1.0, 720p) — `generate_hunyuan_video_i2v.py`
+
+A **separate script** from the T2V one (separate checkpoint, separate text
+encoder), following the same precedent as `generate_wan2_1_t2v.py` vs
+`generate_wan2_1_i2v.py`. Conditioning works by `token_replace`: the
+reference image's own clean VAE latent literally replaces the first latent
+frame before every sampling step, and the DiT's AdaLN modulation uses a
+second "as-if-t=0" vector for that first frame's tokens
+(`i2v_condition_type="token_replace"`). Text conditioning is the **full
+multimodal LLaVA model** — the reference image goes through a CLIP
+ViT-L/14-336 vision tower + a 2-layer projector and is spliced into the
+Llama decoder's input embeddings at the `<image>` placeholder positions.
+
+`--checkpoint_dir` points at `tencent/HunyuanVideo-I2V`'s downloaded root
+(containing `hunyuan-video-i2v-720p/{transformers,vae}/`);
+`--llava_checkpoint_dir` at the **full** (not `.language_model`-only)
+`xtuner/llava-llama-3-8b-v1_1-transformers` download — vision tower +
+projector + language model; `--clip_checkpoint_dir` at
+`openai/clip-vit-large-patch14`.
+
+```bash
+python examples/generate_hunyuan_video_i2v.py \
+  --checkpoint_dir "./checkpoints/HunyuanVideo-I2V" \
+  --llava_checkpoint_dir "./checkpoints/llava-llama-3-8b-v1_1-transformers" \
+  --clip_checkpoint_dir "./checkpoints/clip-vit-large-patch14" \
+  --image_path "./examples/assets/cat.jpg" \
+  --prompt "The cat stretches and walks across the windowsill, cinematic" \
+  --i2v_resolution 720p --num_frames 129 --num_steps 50 \
+  --output_path "out/output_hunyuan_1_i2v.mp4"
+```
+
+### CLI reference (I2V-specific)
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--checkpoint_dir` | *required* | `tencent/HunyuanVideo-I2V`'s downloaded root (`hunyuan-video-i2v-720p/{transformers,vae}/`). |
+| `--vae_checkpoint_dir` | `--checkpoint_dir` | The I2V VAE checkpoint is byte-identical to T2V's; override to point elsewhere. |
+| `--llava_checkpoint_dir` | *required* | The **full** `xtuner/llava-llama-3-8b-v1_1-transformers` root (vision tower + projector + language model). |
+| `--clip_checkpoint_dir` | *required* | `openai/clip-vit-large-patch14`'s downloaded root — pooled CLIP-L, used unconditionally (not disabled for I2V). |
+| `--image_path` | *required* | Reference/conditioning image. |
+| `--i2v_resolution` | `720p` | Resolution bucket (`720p`/`540p`/`360p`); output H/W are the reference image's aspect ratio snapped to the bucket's candidate sizes, not passed directly. |
+| `--prompt` | *required* | Text prompt. |
+| `--negative_prompt` | `None` | Defaults to `--negative_prompt_default` when `--guidance_scale != 1.0`, else empty. |
+| `--negative_prompt_default` | `constants.py`'s `NEGATIVE_PROMPT_I2V` | The upstream I2V negative prompt. |
+| `--num_frames` | `129` | Must be `1 + 4k`. |
+| `--num_steps` | `50` | Flow-matching Euler sampling steps. |
+| `--shift` | `17.0` | Flow-match schedule shift — I2V's real value (`scripts/run_sample_image2video_dynamic.sh`), **not** T2V's 7.0. |
+| `--guidance_scale` | `1.0` | Real CFG. Default `1.0` (off) — embedded/distilled guidance is the primary mechanism. |
+| `--embedded_guidance_scale` | `6.0` | Fed to `guidance_in`. |
+| `--image_embed_interleave` | `4` | `token_replace`'s real value — subsamples every Nth projected image-patch row before splicing into the text-state sequence. |
+| `--tensor_parallel_size` | every local device | Megatron-shards the DiT's attention heads/FFN channels. Must divide `heads_num` (24). |
+| `--offload_dit_weights` / `--offload_chunk_size_{double,single}` | off / `20` / `40` | Same per-layer offloading as the T2V script — see [`docs/weight_offloading.md`](../weight_offloading.md). |
+| `--vae_tile_latent_size` | reference default | Shrink (e.g. `8`) if VAE decode OOMs. |
 | `--output_path` | `output.mp4` | Output video path. |
 
 ---

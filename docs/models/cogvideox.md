@@ -23,10 +23,11 @@ verbatim from `vidax.models.ltx_video.t5`), and the
 shift + `trailing` spacing) — see this doc's [Architecture
 notes](#architecture-notes) for what's specific to CogVideoX.
 
-Requires the `torch`, `text`, and `i2v` extras:
+Uses `torch`, `transformers`/`sentencepiece`, and `pillow` — all installed by
+default. On a Cloud TPU VM also add the `tpu` extra:
 
 ```bash
-pip install -e ".[tpu,torch,text,i2v]"
+pip install -e ".[tpu]"    # or just: pip install -e .
 ```
 
 ---

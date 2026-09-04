@@ -1,17 +1,18 @@
-"""HunyuanVideo 1.0 DiT (T2V only) -- port of
-``hyvideo/modules/models.py``'s ``HYVideoDiffusionTransformer.forward``.
+"""HunyuanVideo 1.0 DiT -- port of ``hyvideo/modules/models.py``'s
+``HYVideoDiffusionTransformer.forward``.
 
-See ``/home/congyued/.claude/plans/cryptic-weaving-bentley.md``'s
-"Architecture diff: HunyuanVideo 1.0 vs 1.5" section for the full
-component-by-component comparison against the already-ported
-``hunyuan_video1_5`` DiT this reuses ``common/dit_layers.py``/
-``common/rope.py`` from.
+Handles both the T2V checkpoint (``hunyuan-video-t2v-720p``) and the I2V
+checkpoint (``hunyuan-video-i2v-720p``) via ``i2v_condition_type``: ``None``
+for T2V, ``"token_replace"`` for I2V. I2V's other reference mode,
+``"latent_concat"`` (channel-doubled ``img_in``, like 1.5's I2V), is not
+implemented -- the released I2V checkpoint never uses it. See
+``common/dit_layers.py``/``common/rope.py`` for the dual/single-stream
+blocks and RoPE this reuses from the ``hunyuan_video1_5`` port, and
+``docs/models/hunyuan_video.md`` for the T2V-vs-I2V conditioning
+differences.
 
 Only ``text_projection="single_refiner"`` (the only mode the reference ever
-exercises for its released checkpoints) is implemented. I2V is explicitly
-out of scope for this batch (separate, un-cloned upstream repo) -- there is
-no ``concat_condition``/channel-doubling path here at all, unlike
-``hunyuan_video1_5``'s unified T2V+I2V ``forward``.
+exercises for its released checkpoints) is implemented.
 """
 from typing import Optional, Tuple
 
@@ -32,11 +33,10 @@ from vidax.models.hunyuan_video.common.rope import create_hunyuan_rope3d_freqs
 def _patchify(x: jnp.ndarray, patch_size: Tuple[int, int, int]) -> Tuple[jnp.ndarray, Tuple[int, int, int]]:
     """(B, C, T, H, W) -> (B, t*h*w, C*pt*ph*pw).
 
-    Duplicated from ``hunyuan_video1_5/dit.py`` rather than imported --
-    see the plan's architecture-diff section for why this reshape-based
-    form is exact for any ``patch_size`` (a stride==kernel ``Conv3d`` has no
-    patch overlap), not just 1.5's degenerate ``(1,1,1)`` case, and why it's
-    duplicated rather than shared to avoid any cross-package coupling.
+    Duplicated from ``hunyuan_video1_5/dit.py`` rather than imported (to
+    avoid cross-package coupling). This reshape-based form is exact for any
+    ``patch_size`` -- a stride==kernel ``Conv3d`` has no patch overlap --
+    not just 1.5's degenerate ``(1,1,1)`` case.
     """
     pt, ph, pw = patch_size
     b, c, T, H, W = x.shape
@@ -75,14 +75,13 @@ def _mlp_embedder(hidden_dim: int, name: str):
 
 
 class HunyuanVideoDiT(nn.Module):
-    """``HYVideoDiffusionTransformer``, T2V only.
+    """``HYVideoDiffusionTransformer`` (T2V, or I2V via ``i2v_condition_type``).
 
     Text conditioning: a single LLM text encoder's refined hidden states
     (``txt_in``, ``SingleTokenRefiner``) feed the joint double/single-stream
     attention as ``txt``; a separate pooled CLIP-L vector (``vector_in``)
     feeds the AdaLN modulation vector ``vec`` alongside the timestep. No
-    byT5/SigLIP/token-concatenation/``cond_type_embedding`` (1.5-only, see
-    the plan's architecture diff).
+    byT5/SigLIP/token-concatenation/``cond_type_embedding`` (1.5-only).
     """
     patch_size: Tuple[int, int, int] = (1, 2, 2)
     in_channels: int = 16
@@ -172,7 +171,7 @@ class HunyuanVideoDiT(nn.Module):
         (`None` otherwise), not by `mid_process`/`post_process`.
 
         Under `i2v_condition_type="token_replace"`, the caller (see
-        `examples/generate_hunyuan_video.py`'s I2V path) is responsible for
+        `examples/generate_hunyuan_video_i2v.py`) is responsible for
         substituting the first *latent* frame of `hidden_states` with the
         reference image's own clean, un-noised VAE-encoded latent before
         every call here -- this method only computes the extra as-if-t=0

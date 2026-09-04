@@ -19,11 +19,12 @@ per-token AdaLN modulation) from a named preset in
 `vidax.models.wan.wan2_2.configs` (`TI2V_5B_CONFIG`/`T2V_A14B_CONFIG`/
 `I2V_A14B_CONFIG`) — the architecture is identical across all three; only
 the size and, for I2V, `in_dim` (extra mask+latent conditioning channels)
-differ. All three require the `torch` extra (to deserialize `.pth`/
-`.safetensors` checkpoints) and the `text` extra (tokenization):
+differ. All three use `torch` (to deserialize the `.pth`/`.safetensors`
+checkpoints) and `transformers`/`sentencepiece` (tokenization) — all
+installed by default. On a Cloud TPU VM also add the `tpu` extra:
 
 ```bash
-pip install -e ".[tpu,torch,text]"
+pip install -e ".[tpu]"    # or just: pip install -e .
 ```
 
 `--tokenizer_path` defaults to `<t5_checkpoint_dir>/google/umt5-xxl` for

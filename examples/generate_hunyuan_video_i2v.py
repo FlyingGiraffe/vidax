@@ -1,7 +1,7 @@
 # End-to-end image-to-video inference script for HunyuanVideo-I2V's
 # `token_replace` mode (the released `hunyuan-video-i2v-720p` checkpoint's
 # default/only shipped config -- `latent_concat`, the reference's other
-# I2V mode, is not ported, see docs/models/hunyuan_video_i2v.md).
+# I2V mode, is not ported, see docs/models/hunyuan_video.md).
 #
 # A **separate script** from `generate_hunyuan_video.py`, not a shared
 # `--image_path` branch (unlike `generate_hunyuan_video1_5.py`'s T2V/I2V
@@ -14,8 +14,7 @@
 # separate scripts when the checkpoints/encoders genuinely differ.
 #
 # Architecture (see `hunyuan_video.llava_text`/`llava_vision`'s module
-# docstrings and the plan file's "HunyuanVideo 1.0 I2V" progress log for
-# the full derivation):
+# docstrings for the full derivation):
 # - No channel-concat: the reference image's own clean VAE-encoded latent
 #   literally replaces the first *latent* frame before every sampling
 #   step; the DiT's AdaLN modulation uses a second "as-if-t=0" vector for

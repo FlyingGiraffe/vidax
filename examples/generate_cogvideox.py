@@ -18,7 +18,6 @@
 # always replicated (same as every other model's script).
 
 import argparse
-from functools import partial
 import logging
 import os
 
@@ -164,7 +163,6 @@ def main(args):
         data_parallel_size=dp_size, tensor_parallel_size=tp_size, sequence_parallel_size=sp_size)
     rng = jax.random.PRNGKey(args.seed)
 
-    dtype = DTYPES[args.dtype]
     dit_dtype = DTYPES[args.dit_dtype]
     is_i2v = args.image_path is not None
     patch_size_t = preset["patch_size_t"]

@@ -135,7 +135,7 @@ def map_ltx_video_vae_keys(pt_state_dict: Dict) -> Dict:
                 jax_params, tower_path + [f"last_time_embedder_timestep_embedder_{lin.group(1)}", _leaf_name(sub_key)],
                 jax_tensor)
         else:
-            match = re.match(rf"(?:down|up)_blocks\.(\d+)\.(.*)", sub_key)
+            match = re.match(r"(?:down|up)_blocks\.(\d+)\.(.*)", sub_key)
             if not match:
                 continue
             block_idx, block_sub = match.groups()

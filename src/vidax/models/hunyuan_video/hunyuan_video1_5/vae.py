@@ -25,7 +25,7 @@ here), transcribed at the time of writing as: ``block_out_channels=
 3``, ``scaling_factor=1.03682``, ``shift_factor=None``.
 """
 import math
-from typing import Optional, Sequence, Tuple
+from typing import Tuple
 
 import flax.linen as nn
 import jax

@@ -34,10 +34,8 @@ Two things make this its own file rather than a reuse of Wan's causal VAE:
 Run `encode` / `decode` eagerly (no `jax.jit` wrapping the chunk loop), same
 rationale as `vidax.models.wan.wan2_2.vae`'s docstring.
 """
-from typing import Optional
 
 import flax.linen as nn
-import jax
 import jax.numpy as jnp
 
 NUM_GROUPS = 32

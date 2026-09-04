@@ -5,7 +5,7 @@ t2v + i2v. Imports and calls the real `examples/generate_cogvideox.py`'s
 
 Usage:
     python benchmarks/run_cogvideox.py --model_size 5b --task t2v
-    VIDAX_CHECKPOINT_DIR=/mnt/disks/tpu_ssd/checkpoints python benchmarks/run_cogvideox.py --model_size 1.5-5b-i2v --task i2v
+    VIDAX_CHECKPOINT_DIR=/path/to/checkpoints python benchmarks/run_cogvideox.py --model_size 1.5-5b-i2v --task i2v
 """
 import argparse
 import os

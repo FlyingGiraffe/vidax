@@ -1,5 +1,6 @@
-# End-to-end text-to-video inference script for HunyuanVideo 1.0 (T2V only
-# -- I2V lives in a separate, un-cloned upstream repo, out of scope) on TPU.
+# End-to-end text-to-video inference script for HunyuanVideo 1.0 on TPU
+# (the `hunyuan-video-t2v-720p` checkpoint). I2V is a separate checkpoint
+# and text encoder -- see `generate_hunyuan_video_i2v.py`.
 #
 # The reference ships one released checkpoint variant
 # (`tencent/HunyuanVideo`'s `hunyuan-video-t2v-720p/`, the
@@ -12,8 +13,7 @@
 # separate 544p checkpoint, just a different runtime `--height`/`--width`
 # on this one 720p-native checkpoint, so no `--resolution` flag here.
 #
-# Scope for this landing (see docs/models/hunyuan_video.md):
-# - T2V only.
+# Scope (see docs/models/hunyuan_video.md):
 # - Real classifier-free guidance is optional (`--guidance_scale`, default
 #   1.0 == off, matching the reference's own `sample_video.py` default) on
 #   top of this checkpoint's embedded/distilled guidance

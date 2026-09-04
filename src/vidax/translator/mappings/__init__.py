@@ -198,9 +198,9 @@ def load_torch_checkpoint_to_jax(checkpoint_path: str, model_type: str = "wan2.1
     elif model_type == "hunyuan_video1_5_siglip":
         return map_hunyuan_video1_5_siglip_keys(pt_state_dict)
     elif model_type == "hunyuan_video_dit":
-        # HunyuanVideo 1.0's DiT (T2V only) -- cross-checked against the
-        # real downloaded checkpoint. See
-        # `hunyuan_video.map_hunyuan_video_dit_keys`'s module docstring.
+        # HunyuanVideo 1.0's DiT (same mapping for the T2V and I2V
+        # checkpoints) -- cross-checked against the real downloaded
+        # checkpoints. See `hunyuan_video.map_hunyuan_video_dit_keys`.
         return map_hunyuan_video_dit_keys(pt_state_dict)
     elif model_type == "hunyuan_video_vae":
         return map_hunyuan_video_vae_keys(pt_state_dict)

@@ -20,7 +20,6 @@ Everything here is static per (resolution, frame-count) and cheap, so it's
 computed once on host in numpy and passed into the model as constants
 (mirrors how `examples/generate_ltx_video.py` precomputes its RoPE inputs).
 """
-import math
 from typing import Optional, Tuple
 
 import numpy as np

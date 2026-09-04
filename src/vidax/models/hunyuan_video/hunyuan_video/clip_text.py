@@ -25,7 +25,6 @@ wins the argmax) -- HF's ``CLIPTextModel``'s exact pooling rule, confirmed
 by reading ``transformers.models.clip.modeling_clip.CLIPTextTransformer.
 forward`` directly.
 """
-from typing import Tuple
 
 import flax.linen as nn
 import jax

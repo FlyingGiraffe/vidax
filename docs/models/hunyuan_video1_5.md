@@ -28,13 +28,13 @@ download`/`modelscope download` commands — SigLIP's source repo,
 `black-forest-labs/FLUX.1-Redux-dev`, is gated and needs a Hugging Face
 access request approved first).
 
-Requires the `torch` extra (to deserialize `.safetensors`/`.pt`
-checkpoints), the `text` extra (`transformers`, for the Qwen2.5-VL and
-byT5 tokenizers), and the `i2v` extra (`pillow`, for I2V's conditioning
-image):
+Uses `torch` (to deserialize `.safetensors`/`.pt` checkpoints),
+`transformers` (the Qwen2.5-VL and byT5 tokenizers), and `pillow` (I2V's
+conditioning image) — all installed by default. On a Cloud TPU VM also add
+the `tpu` extra:
 
 ```bash
-pip install -e ".[tpu,torch,text,i2v]"
+pip install -e ".[tpu]"    # or just: pip install -e .
 ```
 
 ---

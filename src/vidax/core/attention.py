@@ -273,7 +273,6 @@ def sequence_parallel_joint_self_attention(
         the inputs (text prefix replicated, visual tokens local chunk).
     """
     head_dim = q.shape[-1]
-    num_heads = q.shape[2]
     sm_scale = head_dim ** -0.5 if scale is None else scale
 
     q_txt, q_vis = q[:, :text_len], q[:, text_len:]

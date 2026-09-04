@@ -7,7 +7,7 @@ module docstring).
 Usage:
     python benchmarks/run_ltx_video.py --model_size 2B-distilled --task t2v
     python benchmarks/run_ltx_video.py --model_size 13B-dev --task t2v
-    VIDAX_CHECKPOINT_DIR=/mnt/disks/tpu_ssd/checkpoints python benchmarks/run_ltx_video.py --model_size 13B-distilled --task i2v
+    VIDAX_CHECKPOINT_DIR=/path/to/checkpoints python benchmarks/run_ltx_video.py --model_size 13B-distilled --task i2v
 """
 import argparse
 import os

@@ -21,13 +21,14 @@ for the shared TPU/JAX engineering background this still builds on
 | `generate_cosmos3.py --model_size nano` | Cosmos3-Nano | 16B | Text2Video, Image2Video | `Cosmos3-Nano/` |
 | `generate_cosmos3.py --model_size edge` | Cosmos3-Edge | 4B | Text2Video, Image2Video | `Cosmos3-Edge/` |
 
-The `torch` extra is **not** needed here (the checkpoint ships as
-`.safetensors`, loaded directly) — but the `text` extra is
-(`transformers`, for the `Qwen2TokenizerFast` tokenizer + chat template),
-and the `i2v` extra (`pillow`, for image2video's conditioning frame):
+This model doesn't actually touch `torch` (its checkpoint ships as
+`.safetensors`, loaded directly); it does use `transformers` (the
+`Qwen2TokenizerFast` tokenizer + chat template) and `pillow` (image2video's
+conditioning frame). All dependencies are installed by default — on a Cloud
+TPU VM add the `tpu` extra:
 
 ```bash
-pip install -e ".[tpu,text,i2v]"
+pip install -e ".[tpu]"    # or just: pip install -e .
 ```
 
 Both sizes share the exact same weight layout and DiT code

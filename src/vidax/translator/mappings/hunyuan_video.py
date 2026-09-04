@@ -1,13 +1,15 @@
-"""PyTorch -> Flax key mapping for HunyuanVideo 1.0's DiT, VAE, Llama text
-tower, and CLIP-L pooled text encoder.
+"""PyTorch -> Flax key mapping for HunyuanVideo 1.0: the DiT (shared by the
+T2V and I2V checkpoints), the VAE, the T2V Llama text tower and CLIP-L
+pooled text encoder, and the I2V multimodal-LLaVA vision tower / projector /
+Llama path.
 
 **DiT mapper cross-checked against the real downloaded checkpoint**
 (`tencent/HunyuanVideo/hunyuan-video-t2v-720p/transformers/
 mp_rank_00_model_states.pt`, `ckpt["module"]`, 856 leaves, 20 double blocks
 / 40 single blocks / 2 token-refiner blocks, `guidance_in.*` present i.e.
 the `"HYVideo-T/2-cfgdistill"` variant) -- every regex below (fused-QKV
-splitting included) matches the real key names byte-for-byte; the earlier
-`TODO(real-checkpoint)` markers are resolved. Target Flax module tree:
+splitting included) matches the real key names byte-for-byte. Target Flax
+module tree:
 `vidax.models.hunyuan_video.hunyuan_video.dit.HunyuanVideoDiT` (+ shared
 `common/dit_layers.py`).
 
@@ -15,23 +17,28 @@ splitting included) matches the real key names byte-for-byte; the earlier
 1.0's real checkpoint stores **fused** QKV/QKV+MLP-in Linears
 (`img_attn_qkv`/`txt_attn_qkv`: `Linear(hidden, 3*hidden)`;
 `single_blocks.N.linear1`: `Linear(hidden, 3*hidden+mlp_hidden)`), not
-1.5's already-split `img_attn_q`/`img_attn_k`/`img_attn_v` naming -- see the
-plan's architecture-diff section. This mapper therefore **splits** the
+1.5's already-split `img_attn_q`/`img_attn_k`/`img_attn_v` naming. This
+mapper therefore **splits** the
 fused weight into contiguous chunks before writing to the Flax param tree
 (`_split_fused_linear`), unlike 1.5's mapper which copies each Q/K/V weight
 straight across.
 
-**VAE/text-encoder mappers**, added this session, all cross-checked against
-real downloaded checkpoints:
+**VAE / text-encoder mappers**, all cross-checked against real downloaded
+checkpoints:
 - `map_hunyuan_video_vae_keys`: `AutoencoderKLCausal3D`'s real
   `pytorch_model.pt` (248 leaves) -- see `hunyuan_video.vae`'s module
   docstring for the exact key/name correspondence.
-- `map_hunyuan_video_llama_text_keys`: the extracted
+- `map_hunyuan_video_llama_text_keys` (T2V): the extracted
   `xtuner/llava-llama-3-8b-v1_1-transformers`'s `.language_model`
   (`LlamaModel`, 290 leaves, no `model.` prefix since only the bare
   sub-module was saved).
-- `map_hunyuan_video_clip_text_keys`: `openai/clip-vit-large-patch14`'s
+- `map_hunyuan_video_clip_text_keys` (T2V): `openai/clip-vit-large-patch14`'s
   `text_model.*` (197 leaves), pooled-output-only (no vision tower).
+- `map_hunyuan_video_llava_llama_text_keys` /
+  `map_hunyuan_video_clip_vision_keys` /
+  `map_hunyuan_video_llava_projector_keys` (I2V): the *full*
+  `xtuner/llava-llama-3-8b-v1_1-transformers` -- language model, CLIP
+  ViT-L/14-336 vision tower, and the 2-layer multimodal projector.
 """
 import re
 from typing import Dict
@@ -375,7 +382,7 @@ def map_hunyuan_video_vae_keys(pt_state_dict: Dict) -> Dict:
         m = _VAE_ATTN_RE.match(pt_key)
         if m:
             enc_dec, sub, kind = m.groups()
-            attn_name = f"mid_block_attentions_0"
+            attn_name = "mid_block_attentions_0"
             if sub == "group_norm":
                 _gn(jax_params, [enc_dec, attn_name, "group_norm"], pt_key, arr)
             else:

@@ -4,15 +4,13 @@ timing, peak-HBM-per-chip measurement, and output-video filenames.
 
 Every `docs/models/*.md` usage example assumes checkpoints live under
 `./checkpoints/<repo-name>/...` (the layout a fresh `huggingface-cli
-download` produces) -- that convention is what ships in the library release,
-and stays the default here too. On this particular development machine the
-checkpoints instead live on a mounted SSD
-(`/mnt/disks/tpu_ssd/checkpoints/`), so `resolve_checkpoint_dir` also honors
-a `--checkpoint_dir` CLI flag / `VIDAX_CHECKPOINT_DIR` environment variable
-override -- e.g. `export VIDAX_CHECKPOINT_DIR=/mnt/disks/tpu_ssd/checkpoints`
-before running any `benchmarks/run_*.py` script on this machine, with no
-change to the scripts themselves and no change to what a released-library
-user sees by default.
+download` produces), and that stays the default here too. If your
+checkpoints live elsewhere (e.g. a mounted SSD), `resolve_checkpoint_dir`
+also honors a `--checkpoint_dir` CLI flag / `VIDAX_CHECKPOINT_DIR`
+environment variable override -- e.g. `export
+VIDAX_CHECKPOINT_DIR=/path/to/checkpoints` before running any
+`benchmarks/run_*.py` script, with no change to the scripts themselves and
+no change to the `./checkpoints` default.
 
 Timing methodology (matches `docs/benchmarking.md`'s Metrics section):
 every `benchmarks/run_*.py` script imports the *real* `examples/generate_*.py`

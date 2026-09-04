@@ -12,9 +12,8 @@ pieces:
     identical** to ``vidax.models.ltx_video.t5.T5Encoder`` (bidirectional
     relative-position bucketing, gated-GELU FFN, no projection biases, one
     shared relative-position-bias table across layers): confirmed against
-    the downloaded checkpoint's own ``config.json``
-    (``/mnt/disks/tpu_ssd/checkpoints/HunyuanVideo-1.5/text_encoder/
-    byt5-small/config.json``): ``d_model=1472``, ``num_heads=6``,
+    the downloaded checkpoint's own
+    ``text_encoder/byt5-small/config.json``: ``d_model=1472``, ``num_heads=6``,
     ``d_kv=64``, ``d_ff=3584``, ``num_layers=12``,
     ``feed_forward_proj="gated-gelu"``, ``relative_attention_num_buckets=
     32`` -- reused directly via ``byt5_encoder()`` below rather than
@@ -32,13 +31,14 @@ pieces:
   shape (``shared.weight`` / ``embed_tokens.weight``, see the translator),
   never hardcoded to 384.
 
-TODO(batch 1, next step): wire a translator for ``byt5_model.pt`` (a raw
-``torch.load``'d state_dict with a ``module.text_tower.encoder.`` prefix
-stripped per the reference's ``create_byt5``, not a diffusers-style
-safetensors+config.json layout like the DiT/VAE) and a
-``Glyph-SDXL-v2``-aware tokenizer wrapper (mirrors
-``vidax.models.ltx_video.t5.PixArtT5Tokenizer``'s pattern, plus the added
-special tokens).
+The translator for ``byt5_model.pt`` (a raw ``torch.load``'d state_dict
+with a ``module.text_tower.encoder.`` prefix stripped per the reference's
+``create_byt5``, not a diffusers-style safetensors+config.json layout like
+the DiT/VAE) is ``vidax.translator.mappings.hunyuan_video1_5.
+map_hunyuan_video1_5_byt5_keys``. The ``Glyph-SDXL-v2``-aware tokenizer
+wrapper (``ByT5PromptTokenizer``, mirroring
+``vidax.models.ltx_video.t5.PixArtT5Tokenizer``'s pattern plus the added
+special tokens) lives in ``examples/generate_hunyuan_video1_5.py``.
 """
 import flax.linen as nn
 import jax.numpy as jnp

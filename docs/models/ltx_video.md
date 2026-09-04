@@ -22,12 +22,12 @@ LTX-Video.
 | `generate_ltx_video.py` | LTX-Video 0.9.8 | 13B (dev) | T2V, I2V | `ltxv-13b-0.9.8-dev.safetensors` |
 | `generate_ltx_video.py` | LTX-Video 0.9.8 | 13B (distilled) | T2V, I2V | `ltxv-13b-0.9.8-distilled.safetensors` |
 
-Requires the `torch` extra (to deserialize the `.safetensors` checkpoints),
-the `text` extra (`transformers`, for the T5 tokenizer), and the `i2v`
-extra (`pillow`, for I2V's conditioning image):
+Uses `torch` (to deserialize the `.safetensors` checkpoints),
+`transformers` (the T5 tokenizer), and `pillow` (I2V's conditioning image)
+— all installed by default. On a Cloud TPU VM also add the `tpu` extra:
 
 ```bash
-pip install -e ".[tpu,torch,text,i2v]"
+pip install -e ".[tpu]"    # or just: pip install -e .
 ```
 
 ---

@@ -29,7 +29,7 @@ Architectural notes not obvious from the reference:
   (a persistent `pos_embedding` buffer in the checkpoint). 1.5 uses
   `patch_size_t=2` temporal patchifying and a linear (not conv) patch proj.
 """
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import flax.linen as nn
 import jax

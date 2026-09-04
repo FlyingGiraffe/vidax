@@ -1,0 +1,23 @@
+name: Feature request
+description: A new model family, kernel, sharding strategy, or API
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What you'd like vidax to support, and the use case behind it.
+    validations:
+      required: true
+  - type: input
+    id: references
+    attributes:
+      label: Upstream references
+      description: >
+        For a new model: links to the reference code, technical report, and
+        checkpoints.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes
+      description: Sharding/memory considerations, known-tricky parts, willingness to contribute a PR.

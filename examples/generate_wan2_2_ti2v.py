@@ -38,7 +38,6 @@
 import argparse
 from functools import partial
 import logging
-import math
 import os
 
 import imageio

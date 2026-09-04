@@ -69,7 +69,6 @@ import math
 from typing import Tuple
 
 import flax.linen as nn
-import jax
 import jax.numpy as jnp
 import jax.nn as jnn
 

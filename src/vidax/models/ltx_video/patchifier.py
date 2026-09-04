@@ -14,7 +14,6 @@ order they produce is identical to `get_latent_coords`'s row-major
 `(f, h, w)` meshgrid flatten -- both implemented as one plain `reshape`
 below rather than as two independently-must-agree implementations.
 """
-from typing import Tuple
 
 import jax.numpy as jnp
 

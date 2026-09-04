@@ -6,7 +6,7 @@ of the generation loop -- see `benchmarks/common.py`'s module docstring).
 Usage:
     python benchmarks/run_cosmos2_5.py --model_size 2B --task t2v
     python benchmarks/run_cosmos2_5.py --model_size 14B --task i2v
-    VIDAX_CHECKPOINT_DIR=/mnt/disks/tpu_ssd/checkpoints python benchmarks/run_cosmos2_5.py --model_size 14B --task v2v
+    VIDAX_CHECKPOINT_DIR=/path/to/checkpoints python benchmarks/run_cosmos2_5.py --model_size 14B --task v2v
 """
 import argparse
 import os

@@ -14,7 +14,6 @@ Two further truncations match the reference's own `visual()` call
     returns right after the 31st transformer block. Their checkpoint
     weights are simply left unmapped by the converter.
 """
-from typing import Tuple
 
 import flax.linen as nn
 import jax

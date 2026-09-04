@@ -19,13 +19,13 @@ notes](#architecture-notes).
 | `generate_ltx2_5.py` | LTX-2.5 | 22B (dev) | T2V, I2V | `ltx-2.5-22b-dev-transformer-bf16.safetensors` |
 | `generate_ltx2_5.py` | LTX-2.5 | 22B (distilled) | T2V, I2V | `ltx-2.5-22b-distilled-transformer-bf16.safetensors` |
 
-Requires the `torch` extra (to deserialize the `.safetensors` checkpoints),
-the `text` extra (`transformers`/`tokenizers`, for the Gemma-4 tokenizer
-embedded in its checkpoint), and the `i2v` extra (`pillow`, for I2V's
-conditioning image):
+Uses `torch` (to deserialize the `.safetensors` checkpoints),
+`transformers`/`tokenizers` (the Gemma-4 tokenizer embedded in its
+checkpoint), and `pillow` (I2V's conditioning image) — all installed by
+default. On a Cloud TPU VM also add the `tpu` extra:
 
 ```bash
-pip install -e ".[tpu,torch,text,i2v]"
+pip install -e ".[tpu]"    # or just: pip install -e .
 ```
 
 ---

@@ -20,11 +20,12 @@ build it with. I2V only ships as 14B (no 1.3B I2V checkpoint exists), so its
 script has no `--model_size` flag — it always builds
 `vidax.models.wan.wan2_1.configs.I2V_14B_CONFIG`.
 
-Both require the `torch` extra (to deserialize `.pth`/`.safetensors`
-checkpoints) and the `text` extra (tokenization):
+Both use `torch` (to deserialize the `.pth`/`.safetensors` checkpoints) and
+`transformers`/`sentencepiece` (tokenization) — all installed by default. On
+a Cloud TPU VM also add the `tpu` extra for the right jaxlib wheel:
 
 ```bash
-pip install -e ".[tpu,torch,text]"
+pip install -e ".[tpu]"    # or just: pip install -e .
 ```
 
 `--tokenizer_path` defaults to `<t5_checkpoint_dir>/google/umt5-xxl` for both

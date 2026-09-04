@@ -1,0 +1,22 @@
+The code in this directory (src/vidax/models/ltx2_5/, all files) is a JAX/Flax
+re-implementation of Lightricks' LTX-2.5 architecture, developed with reference
+to the upstream source code at:
+
+    https://github.com/Lightricks/LTX-2
+
+That upstream source code is released under the LTX-2.x Community License
+Agreement, which is NOT a permissive open-source license (its scope expressly
+includes machine-learning model code and inference code, and it imposes
+acceptable-use and commercial-scale conditions).
+
+To the extent this directory is a derivative work of that upstream code, your
+use, modification and redistribution of it is additionally subject to the
+LTX-2.x Community License Agreement, in addition to the Apache License 2.0 that
+covers the rest of vidax. See the repository-root NOTICE file, and the upstream
+LICENSE for the full, current text.
+
+The same applies to the corresponding translator key mappings:
+    src/vidax/translator/mappings/ltx2_5.py
+
+Note: the separate LTX-Video 0.9.8 implementation (src/vidax/models/ltx_video/)
+is derived from Apache-2.0 upstream code and is NOT affected by this notice.

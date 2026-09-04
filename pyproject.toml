@@ -9,7 +9,7 @@ description = "Lightweight, hardware-agnostic JAX/Flax inference engine and PyTo
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 authors = [
     { name = "FlyingGiraffe" }
 ]
@@ -78,7 +78,7 @@ path = "src/vidax/__init__.py"
 packages = ["src/vidax"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/vidax", "README.md", "LICENSE", "pyproject.toml"]
+include = ["src/vidax", "README.md", "LICENSE", "NOTICE", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 100

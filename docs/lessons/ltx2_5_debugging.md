@@ -35,7 +35,7 @@ sized separately-compiled `jax.jit` programs bounds peak activation memory
 to one chunk's worth, independent of `num_layers`, by construction —
 closing exactly the gap the fused-trace measurement above exposed. With
 this plus the flash-attention fix, the reference's own single-stage default
-resolution (704×1216×121) went from OOM at tp=4 to fitting with room to
+resolution (1216×704×121) went from OOM at tp=4 to fitting with room to
 spare (`--offload_chunk_size 8`, confirmed as the largest divisor of 48
 that still fits — 12 OOMs at 22.28GB required vs. 16.97GB free with Gemma-4
 still resident).

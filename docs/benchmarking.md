@@ -50,21 +50,21 @@ when configs are genuinely identical (documented per-row).
 
 | Model | Variant | Task | Hardware | TP/SP | Resolution | Frames | Steps | I/O dtype | Weight dtype | Offloading | Compile (s) | Generation (s) | Per-step (s) | Peak HBM/chip (GB) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| Cosmos3 | Nano (16B) | T2V | v4-8 | 4/- | 704x1280 | 93 | 35 | bf16 | bf16 | - | 64.2 | 249.9 | 7.1 | 29.5 |
-| Cosmos3 | Edge (4B) | T2V | v4-8 | 4/- | 480x832 | 121 | 35 | bf16 | bf16 | - | 64.5 | 82.9 | 2.4 | 17.0 |
-| Cosmos-Predict2.5 | 14B | T2V | v4-8 | 4/1 | 704x1280 | 93 | 35 | bf16 | bf16 | chunk 1 | 48.5 | 4479.6 | 128.0 | 14.7 |
-| Cosmos-Predict2.5 | 2B | T2V | v4-8 | 4/1 | 704x1280 | 93 | 35 | bf16 | bf16 | - | 112.9 | 1357.3 | 38.8 | 16.0 |
-| Wan2.2 | A14B | T2V | v4-8 | 2/2 | 480x832 | 81 | 50 | bf16 | fp32 | chunk 10 | 65.8 | 2159.1 | 43.2 | 28.4 |
-| Wan2.2 | A14B | T2V | v4-8 | 2/2 | 720x1280 | 33 | 50 | bf16 | fp32 | chunk 1 | 33.7 | 2321.9 | 46.4 | 18.1 |
+| Cosmos3 | Nano (16B) | T2V | v4-8 | 4/- | 1280x704 | 93 | 35 | bf16 | bf16 | - | 64.2 | 249.9 | 7.1 | 29.5 |
+| Cosmos3 | Edge (4B) | T2V | v4-8 | 4/- | 832x480 | 121 | 35 | bf16 | bf16 | - | 64.5 | 82.9 | 2.4 | 17.0 |
+| Cosmos-Predict2.5 | 14B | T2V | v4-8 | 4/1 | 1280x704 | 93 | 35 | bf16 | bf16 | chunk 1 | 48.5 | 4479.6 | 128.0 | 14.7 |
+| Cosmos-Predict2.5 | 2B | T2V | v4-8 | 4/1 | 1280x704 | 93 | 35 | bf16 | bf16 | - | 112.9 | 1357.3 | 38.8 | 16.0 |
+| Wan2.2 | A14B | T2V | v4-8 | 2/2 | 832x480 | 81 | 50 | bf16 | fp32 | chunk 10 | 65.8 | 2159.1 | 43.2 | 28.4 |
+| Wan2.2 | A14B | T2V | v4-8 | 2/2 | 1280x720 | 33 | 50 | bf16 | fp32 | chunk 1 | 33.7 | 2321.9 | 46.4 | 18.1 |
 | Wan2.2 | A14B | I2V | v4-8 | 2/2 | 544x720\* | 81 | 40 | bf16 | fp32 | chunk 10 | 146.1 | 1780.0 | 44.5 | 28.3 |
 | Wan2.2 | A14B | I2V | v4-8 | 2/2 | 832x1104\* | 33 | 40 | bf16 | fp32 | chunk 1 | 102.9 | 1962.5 | 49.1 | 20.5 |
-| Wan2.2 | 5B | T2V | v4-8 | 4/1 | 704x1280 | 121 | 50 | bf16 | fp32 | - | 87.3 | 525.9 | 10.5 | 18.3 |
-| Wan2.2 | 5B | I2V | v4-8 | 4/1 | 704x1280 | 121 | 40 | bf16 | fp32 | - | 145.8 | 482.7 | 12.1 | 18.3 |
-| Wan2.1 | 14B | T2V | v4-8 | 4/1 | 720x1280 | 81 | 50 | bf16 | fp32 | chunk 20 | 108.2 | 6150.5 | 123.0 | 23.0 |
-| Wan2.1 | 14B | T2V | v4-8 | 4/1 | 480x832 | 81 | 50 | bf16 | bf16 | - | 142.5 | 1306.8 | 26.1 | 17.2 |
+| Wan2.2 | 5B | T2V | v4-8 | 4/1 | 1280x704 | 121 | 50 | bf16 | fp32 | - | 87.3 | 525.9 | 10.5 | 18.3 |
+| Wan2.2 | 5B | I2V | v4-8 | 4/1 | 704x1280\* | 121 | 40 | bf16 | fp32 | - | 145.8 | 482.7 | 12.1 | 18.3 |
+| Wan2.1 | 14B | T2V | v4-8 | 4/1 | 1280x720 | 81 | 50 | bf16 | fp32 | chunk 20 | 108.2 | 6150.5 | 123.0 | 23.0 |
+| Wan2.1 | 14B | T2V | v4-8 | 4/1 | 832x480 | 81 | 50 | bf16 | bf16 | - | 142.5 | 1306.8 | 26.1 | 17.2 |
 | Wan2.1 | 14B (720P) | I2V | v4-8 | 4/1 | 832x1104\* | 81 | 40 | bf16 | fp32 | chunk 20 | 131.3 | 5090.0 | 127.2 | 32.7 |
 | Wan2.1 | 14B (480P) | I2V | v4-8 | 4/1 | 544x720\* | 81 | 40 | bf16 | bf16 | - | 150.3 | 1125.3 | 28.1 | 22.1 |
-| Wan2.1 | 1.3B | T2V | v4-8 | 4/1 | 480x832 | 81 | 50 | bf16 | bf16 | - | 85.4 | 348.3 | 7.0 | 10.2 |
+| Wan2.1 | 1.3B | T2V | v4-8 | 4/1 | 832x480 | 81 | 50 | bf16 | bf16 | - | 85.4 | 348.3 | 7.0 | 10.2 |
 | LTX-2.5 | 22B (dev), conv VAE | T2V | v4-8 | 4/- | 1216x704 | 121 | 30 | bf16 | bf16\*\* | chunk 8 | 87.7 | 217.9 | 7.3 | 16.7 |
 | LTX-2.5 | 22B (distilled), conv VAE | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16\*\* | chunk 8 | 87.9 | 37.3 | 4.7 | 15.3 |
 | LTX-2.5 | 22B (dev), diffusion VAE | T2V | v4-8 | 4/- | 1216x704 | 121 | 30 | bf16 | bf16\*\* | chunk 8 | 479.5 | 2859.6 | 95.3\*\*\* | 16.1 |
@@ -79,9 +79,9 @@ when configs are genuinely identical (documented per-row).
 | HunyuanVideo | 13B | T2V | v4-8 | 4/- | 1280x720 | 129 | 50 | bf16 | bf16 | chunk 20/40\*\*\*\* | 506.7 | 14980.7 | 299.6 | 18.4 |
 | HunyuanVideo | 13B | I2V | v4-8 | 4/- | 832x1088\* | 129 | 50 | bf16 | bf16 | chunk 20/40\*\*\*\* | 557.3 | 15318.5 | 306.4 | 18.4 |
 | CogVideoX1.5 | 5B | T2V | v4-8 | 1/4 | 1360x768 | 81 | 50 | bf16 | bf16 | - | 306.6 | 2639.8 | 52.8 | 31.5 |
-| CogVideoX1.5 | 5B | I2V | v4-8 | 1/4 | 1360x768 | 81 | 50 | bf16 | bf16 | - | 304.2 | 2639.8 | 52.8 | 31.5 |
+| CogVideoX1.5 | 5B | I2V | v4-8 | 1/4 | 1360x768‡ | 81 | 50 | bf16 | bf16 | - | 304.2 | 2639.8 | 52.8 | 31.5 |
 | CogVideoX | 5B | T2V | v4-8 | 4/1 | 720x480 | 49 | 50 | bf16 | bf16 | - | 105.8 | 470.6 | 9.4 | 23.2 |
-| CogVideoX | 5B | I2V | v4-8 | 4/1 | 720x480 | 49 | 50 | bf16 | bf16 | - | 106.1 | 470.6 | 9.4 | 23.3 |
+| CogVideoX | 5B | I2V | v4-8 | 4/1 | 720x480‡ | 49 | 50 | bf16 | bf16 | - | 106.1 | 470.6 | 9.4 | 23.3 |
 | CogVideoX | 2B | T2V | v4-8 | 2/1 | 720x480 | 49 | 50 | bf16 | bf16† | - | 48.4 | 211.5 | 4.2 | 17.2 |
 
 
@@ -115,6 +115,15 @@ all-to-all/all-gather traffic 42 blocks × 5 collectives adds. See
 cast to bf16 here to keep the Weight-dtype column comparable, at a small
 precision cost (fp16 has 2 more mantissa bits).
 
+‡ Both CogVideoX-5b-I2V and CogVideoX1.5-5B-I2V are locked by a learned
+positional-embedding buffer to one fixed generation resolution — the same
+one their T2V sibling uses (720×480 / 1360×768) — so unlike every other
+I2V row here, their output isn't derived from the conditioning image's
+aspect ratio. The conditioning image is resized into that fixed box, the
+video is generated there, and by default (`--match_image_aspect`, on) the
+*output* is then rescaled back to the conditioning image's own aspect
+ratio afterward. See [`docs/models/cogvideox.md`](models/cogvideox.md).
+
 ## Why some rows need offloading and/or sequence parallelism
 
 The full reasoning, investigation, and every config's numbers live in
@@ -127,8 +136,8 @@ The full reasoning, investigation, and every config's numbers live in
 | A14B (all 4 rows) | offloading **+** SP | A14B's AdaLN modulation is per-*token*, not per-sample, so activation memory (not just weight residency) is the constraint at native resolutions — offloading alone can't shrink that, sequence parallelism does. |
 | Cosmos-Predict2.5 14B | offloading only | Same class of problem as Wan2.1's rows — the reference's full 93-frame default doesn't fit fully resident at any TP/SP split. |
 | Wan2.2 5B | neither | Weight-sharding alone (`tp=4`) is enough — the opposite tradeoff from A14B: DiT weight residency dominates here, not per-token activation memory. |
-| LTX-Video (all 3 T2V rows) | TP only | Even the 2B checkpoint's own weights fit replicated on a single chip, but the reference's full `704x1216`/121-frame token count's self-attention activations don't (confirmed OOM at `tp=1`) — `tp=4` shards both and fits every variant at the same reference resolution, no offloading or sequence parallelism needed. |
-| LTX-2.5 (both T2V rows) | TP **+** offloading (for a different reason than every other offloaded row) | `tp=4` is required just for the 22B DiT's/12B Gemma-4's own bf16 weights to fit at all (unlike LTX-Video, where `tp=1`'s weights fit and only activations forced `tp=4`). Offloading (`--offload_chunk_size 8`, the largest divisor of 48 that still fits) is needed too, but *not* because DiT weight residency is the bottleneck (it isn't — ~6.6GB/chip at tp=4, comfortable) — the fused 48-block forward pass's own per-block activations were measured not to be freed across blocks (temp memory scaled ~linearly with block count), and offloading's side effect of splitting the trace into per-chunk `jax.jit` calls fixes that regardless of whether weight streaming itself is needed. See `docs/lessons/ltx2_5_debugging.md` for the full investigation — this combination is what got the reference's own `704x1216`/121-frame default working after it previously OOM'd even at `tp=4` alone. |
+| LTX-Video (all 3 T2V rows) | TP only | Even the 2B checkpoint's own weights fit replicated on a single chip, but the reference's full `1216x704`/121-frame token count's self-attention activations don't (confirmed OOM at `tp=1`) — `tp=4` shards both and fits every variant at the same reference resolution, no offloading or sequence parallelism needed. |
+| LTX-2.5 (both T2V rows) | TP **+** offloading (for a different reason than every other offloaded row) | `tp=4` is required just for the 22B DiT's/12B Gemma-4's own bf16 weights to fit at all (unlike LTX-Video, where `tp=1`'s weights fit and only activations forced `tp=4`). Offloading (`--offload_chunk_size 8`, the largest divisor of 48 that still fits) is needed too, but *not* because DiT weight residency is the bottleneck (it isn't — ~6.6GB/chip at tp=4, comfortable) — the fused 48-block forward pass's own per-block activations were measured not to be freed across blocks (temp memory scaled ~linearly with block count), and offloading's side effect of splitting the trace into per-chunk `jax.jit` calls fixes that regardless of whether weight streaming itself is needed. See `docs/lessons/ltx2_5_debugging.md` for the full investigation — this combination is what got the reference's own `1216x704`/121-frame default working after it previously OOM'd even at `tp=4` alone. |
 | HunyuanVideo-1.5 (all rows) | TP only (no offloading yet) | The 8.3B DiT's own bf16 weights (~16.6GB) don't fit replicated alongside the other components (Qwen2.5-VL ~14GB, VAE ~2.5GB, byT5 ~0.5GB, all simply replicated across the same mesh) on one TPU v4 chip — `tp=4` shards the DiT's Q/K/V/output/FFN Dense layers, leaving ~29GB/chip peak (see the table above), comfortable at 480p. VAE decode also needed spatial tiling (`--vae_tile_latent_size`, independent of TP) to fit the reference's real 121-frame default — see `docs/lessons/hunyuan_video1_5_debugging.md`. |
 | CogVideoX-1.5 (T2V, I2V) | SP only | The 5B DiT's bf16 weights fit replicated per chip, but at native 1360×768 the ~45k-visual-token joint attention's per-block activations don't — and the non-SP graph over that sequence never finished compiling. `--sequence_parallel_size 4` (DeepSpeed-Ulysses over the visual tokens; mutually exclusive with `--tensor_parallel_size` here) shrinks each device's block-loop sequence to ~11k tokens. Fits at 31.5GB/chip — at the ceiling, so a larger frame count would also need offloading. The 1.0 rows (2b / 5b / 5b-i2v) need neither: they fit natively at 720×480 with plain `tp`. |
 
@@ -158,7 +167,8 @@ Wan2.2/HunyuanVideo-1.5 derive it via aspect ratio + `--max_area`;
 HunyuanVideo (1.0) derives it via `--i2v_resolution`'s bucketed candidate
 sizes (`get_closest_ratio`, matching the reference's own bucketing) —
 different mechanisms, same idea, see each model's own doc for the exact
-formula.
+formula. This does *not* apply to the CogVideoX I2V rows below (see
+‡).
 
 \*\* LTX-2.5's DiT weights are almost entirely bf16 (4059 of 4349 tensors
 in the real checkpoint), **except** every `scale_shift_table`/

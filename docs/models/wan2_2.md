@@ -100,7 +100,7 @@ python examples/generate_wan2_2_ti2v.py \
 | `--output_path` | `output_video.mp4` | With multiple prompts, each saved as `<output_path>_<i>.mp4`. |
 
 **`--tensor_parallel_size`/`--sequence_parallel_size` note:** at TI2V-5B's
-only supported resolution (704x1280, 121 frames), the patch-token sequence
+only supported resolution (1280x704, 121 frames), the patch-token sequence
 is ~27k long, and Wan2.2's per-token AdaLN modulation tensors scale with
 that directly. `--tensor_parallel_size` (Megatron-style weight-sharding)
 and `--sequence_parallel_size` (DeepSpeed-Ulysses token-sharding) are
@@ -118,7 +118,7 @@ encoding but still OOMs inside the DiT sampling step itself). See
 [`docs/benchmarking.md`](../benchmarking.md)'s Wan2.2 5B row and
 full comparison. The product of both flags must divide `num_heads` (24 for
 the DiT, 64 for T5) and the DiT's patch token count — true by construction
-at the default 704x1280x121 resolution for 1/2/4/5/8-way splits; for i2v's
+at the default 1280x704x121 resolution for 1/2/4/5/8-way splits; for i2v's
 image-derived resolution it isn't guaranteed, so the script grows the
 derived width in 32px steps (up to `tensor_parallel_size - 1` times —
 guaranteed to find a divisible value) and logs when it does, rather than
@@ -165,7 +165,7 @@ the CLI reference below for the actual reachable resolution).
 Unlike TI2V-5B, A14B reuses **Wan2.1's causal VAE** (`Wan2.1_VAE.pth`,
 `vae_stride=(4,8,8)`) — the checkpoint repo ships that file, not
 `Wan2.2_VAE.pth`. Default resolution/frame count also match Wan2.1
-(1280x720, 81 frames), not TI2V-5B's 704x1280x121.
+(1280x720, 81 frames), not TI2V-5B's 1280x704x121.
 
 ```bash
 python examples/generate_wan2_2_t2v_a14b.py \
@@ -198,10 +198,10 @@ python examples/generate_wan2_2_t2v_a14b.py \
 | `--shift` | `12.0` | Flow-matching noise-schedule shift. Reference default for A14B T2V. |
 | `--height` | `720` | Output video height. |
 | `--width` | `1280` | Output video width. |
-| `--num_frames` | `81` | Output frame count. At native 720x1280, the full reference count doesn't fit this 4-chip machine even with offloading + sequence parallelism — reduce to `33` (the largest that does; see the `--offload_dit_weights` row below and [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22)). |
+| `--num_frames` | `81` | Output frame count. At native 1280x720, the full reference count doesn't fit this 4-chip machine even with offloading + sequence parallelism — reduce to `33` (the largest that does; see the `--offload_dit_weights` row below and [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22)). |
 | `--output_path` | `output_video.mp4` | With multiple prompts, each saved as `<output_path>_<i>.mp4`. |
 | `--offload_dit_weights` | off | Per-layer weight offloading, composed with the two-expert MoE switch above **and** with `--sequence_parallel_size > 1` — ported directly from `generate_wan2_2_i2v_a14b.py`'s identical flag (T2V has no image conditioning to thread through, so the offloading mechanics are unchanged). See [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22). |
-| `--offload_chunk_size` | `1` | Number of consecutive blocks grouped per offloaded HBM buffer when `--offload_dit_weights` is set. Must divide 40. At native 720x1280, only `1` fits (per-token activation memory dominates at this token count, same finding as I2V's native-720P row). At 480x832, `10` fits (same tradeoff as I2V's own 480P row) — see [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22) for both. |
+| `--offload_chunk_size` | `1` | Number of consecutive blocks grouped per offloaded HBM buffer when `--offload_dit_weights` is set. Must divide 40. At native 1280x720, only `1` fits (per-token activation memory dominates at this token count, same finding as I2V's native-720P row). At 832x480, `10` fits (same tradeoff as I2V's own 480P row) — see [`docs/weight_offloading.md`](../weight_offloading.md#a14b-wan22) for both. |
 
 ---
 

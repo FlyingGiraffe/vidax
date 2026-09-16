@@ -183,7 +183,7 @@ python examples/generate_cosmos3.py \
 ```
 
 Same rationale as Cosmos-Predict2.5's quick-testing section: full-resolution
-(704x1280), full-step (35) runs are slow to iterate with. This config still
+(1280x704), full-step (35) runs are slow to iterate with. This config still
 exercises the full pipeline (tokenization, packed-sequence assembly, mRoPE,
 the dual-pathway DiT, Karras-sigma UniPC sampling, VAE decode) end to end —
 **for Nano.** This exact quick-test config is *not* valid for Edge: swapping

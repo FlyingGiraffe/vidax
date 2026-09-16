@@ -251,8 +251,8 @@ driven weight residency dominates instead):
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | I2V | 480P (544x720) | 10 | 81 (full reference) | 146.1 | 44.5 | 28.3 |
 | I2V | Native 720P (832x1104) | 1 | 33 (reduced from 81) | 102.9 | 49.1 | 20.5 |
-| T2V | 480P (480x832) | 10 | 81 (full reference) | 65.8 | 43.2 | 28.4 |
-| T2V | Native 720P (720x1280) | 1 | 33 (reduced from 81) | 33.7 | 46.4 | 18.1 |
+| T2V | 480P (832x480) | 10 | 81 (full reference) | 65.8 | 43.2 | 28.4 |
+| T2V | Native 720P (1280x720) | 1 | 33 (reduced from 81) | 33.7 | 46.4 | 18.1 |
 
 Full 81-frame native 720P remains out of reach on this 4-chip machine for
 both tasks, even with offloading and sequence parallelism combined — it would
@@ -272,7 +272,7 @@ Wan2.1's original: host-resident weight tree, per-chunk `device_put` inside
 the sampling loop, no separate "did the expert change" bookkeeping.
 
 Used to fix the same class of problem as Wan2.1's native-720P rows: the 14B
-checkpoint's reference default (704x1280, 93 frames) previously didn't fit
+checkpoint's reference default (1280x704, 93 frames) previously didn't fit
 fully device-resident on this 4-chip machine at any
 `--tensor_parallel_size`/`--sequence_parallel_size` split, and was reduced to
 45 frames as a result. With `--offload_dit_weights --offload_chunk_size 1`

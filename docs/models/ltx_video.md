@@ -123,7 +123,7 @@ attention happens to use — plus two LTX-specific additions, `ff_proj`/
 for the 13B checkpoints regardless of resolution (their bf16 weights alone,
 ~26GB, don't fit replicated on a single TPU v4 chip's HBM) — and, less
 obviously, needed for **2B too** at the reference's full
-704x1216/121-frame resolution: 2B's own weights fit replicated fine, but
+1216x704/121-frame resolution: 2B's own weights fit replicated fine, but
 the self-attention activations at that token count don't (confirmed OOM at
 `tp=1`; see [`docs/benchmarking.md`](../benchmarking.md)'s "why TP" row).
 There is no `--sequence_parallel_size` yet — see [Scope](#scope).

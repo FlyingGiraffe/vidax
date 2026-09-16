@@ -66,7 +66,7 @@ relative to weight memory. It stops being fine when:
 - The model is wide enough (Wan2.2's 5B DiT) that per-token modulation
   tensors are themselves large, **and**
 - The sequence is long enough (TI2V-5B's one supported resolution,
-  704×1280×121 frames, patchifies to ~27k tokens) that "full sequence on
+  1280×704×121 frames, patchifies to ~27k tokens) that "full sequence on
   every device" dominates.
 
 At that point, quartering weight memory via 4-way Megatron TP genuinely
@@ -225,7 +225,7 @@ tolerance specific to the new combined path). Second, end-to-end against
 real A14B checkpoints: `--tensor_parallel_size 2 --sequence_parallel_size 2`
 ran correctly (including the two-expert boundary switch) at a noticeably
 larger resolution than either trick alone reached on this 4-chip machine,
-though still short of the reference's full 720x1280x81 — see
+though still short of the reference's full 1280x720x81 — see
 [`docs/models/wan2_2.md`](models/wan2_2.md)'s A14B sections for the actual
 numbers.
 
@@ -361,7 +361,7 @@ already-small target-dtype array is ever placed on a device at all.
 
 `--tensor_parallel_size`'s exact-divisibility requirement (the DiT's patch
 token count must divide evenly for sequence-parallel chunking) is
-guaranteed by construction at Wan2.2 TI2V-5B's fixed 704×1280 t2v
+guaranteed by construction at Wan2.2 TI2V-5B's fixed 1280×704 t2v
 resolution, but **not** for i2v: an arbitrary input image's aspect ratio
 gives no guarantee its derived patch token count divides evenly by
 `tensor_parallel_size`. `generate_wan2_2_ti2v.py` grows the derived width

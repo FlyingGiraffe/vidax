@@ -91,7 +91,7 @@ python examples/generate_hunyuan_video1_5.py \
 | `--prompt` | *required* | Text prompt. |
 | `--negative_prompt` | `""` | Negative prompt for classifier-free guidance. |
 | `--image_path` | `None` | Conditioning image, for I2V. Omit for T2V. |
-| `--height`/`--width` | `None` | Output resolution in pixels (must be divisible by the VAE's `ffactor_spatial`, 16). T2V: defaults to `--resolution`'s own default (480p: 480×832, 720p: 720×1280). I2V: if *both* are omitted, derived from the conditioning image's own aspect ratio instead (see `--max_area`) — giving both explicitly overrides that. |
+| `--height`/`--width` | `None` | Output resolution in pixels (must be divisible by the VAE's `ffactor_spatial`, 16). T2V: defaults to `--resolution`'s own default (480p: 832×480, 720p: 1280×720). I2V: if *both* are omitted, derived from the conditioning image's own aspect ratio instead (see `--max_area`) — giving both explicitly overrides that. |
 | `--max_area` | `None` | I2V only, when `--height`/`--width` aren't both given: target pixel area combined with the conditioning image's aspect ratio to pick (height, width), matching `generate_wan2_1_i2v.py`'s convention. Defaults to `--resolution`'s own default area. |
 | `--num_frames` | `121` | Output frame count; the VAE's causal temporal compression (`ffactor_temporal=4`) works out to `1 + 4k` latent-frame-aligned counts. |
 | `--num_steps` | `50` | Flow-matching Euler sampling steps. |

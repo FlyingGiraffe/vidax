@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://flyinggiraffe.github.io/vidax-site/docs/intro">Documentation</a> |
-  arXiv (coming soon) |
+  <a href="https://arxiv.org/abs/2609.18077">arXiv</a> |
   <a href="https://flyinggiraffe.github.io/vidax-site/blog">Blog</a> |
   <a href="https://flyinggiraffe.github.io/vidax-site/benchmarks">Benchmark</a> |
   <a href="https://flyinggiraffe.github.io/vidax-site/gallery">Gallery</a>
@@ -12,9 +12,8 @@
 
 <p align="center">
   <a href="NOTICE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
-  <!-- Uncomment once the package is published to PyPI:
-  <a href="https://pypi.org/project/vidax/"><img alt="PyPI" src="https://img.shields.io/pypi/v/vidax.svg"></a>
-  -->
+  <!-- <a href="https://pypi.org/project/vidax/"><img alt="PyPI" src="https://img.shields.io/pypi/v/vidax.svg"></a> -->
+ 
 </p>
 
 **`vidax`** is a lightweight JAX/Flax inference engine and

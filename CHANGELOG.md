@@ -12,7 +12,7 @@ release process.
 _Small, non-code changes (benchmark-number refreshes, README link fixes, etc.)
 land here between releases and ship with the next tagged version._
 
-## [0.1.0] - UNRELEASED
+## [0.1.0] - 2026-09-23
 
 First public release.
 

@@ -1,0 +1,95 @@
+name: Benchmark submission
+description: Share latency/memory numbers you measured on your own hardware for the community benchmark table
+labels: ["benchmark"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing your numbers! These get folded into the
+        community benchmark table at
+        https://flyinggiraffe.github.io/vidax-site/benchmarks (not the
+        repo's own docs, so this never blocks a release).
+
+        You don't need to match vidax's own 5-run-averaged standard — a
+        single run is fine, just say so in "Number of runs" below. Every
+        submitted row is shown with its contributor (linked to your GitHub
+        profile) and run count, so readers can judge it on its own terms.
+
+        **Two ways to submit, pick whichever's easier:**
+        - One result: fill in the fields below.
+        - Several results, or you already have them as JSON: paste a JSON
+          array in "Bulk JSON" and skip the individual fields (leave them
+          as `n/a`). Each object should have the same shape as one entry in
+          [`community_benchmarks.json`](https://github.com/FlyingGiraffe/vidax-site/blob/main/scripts/community_benchmarks.json)
+          — `family`, `sizeLabel`, `task`, `resolution`, `numFrames`,
+          `numSteps`, `jaxVersion`, `deviceKind`, `deviceCount`,
+          `tensorParallelSize`, `sequenceParallelSize`, `ioDtype`,
+          `weightDtype`, `numRuns`, `compileS`, `perStepS`, `wallS`,
+          `peakHbmGb`. Omit `slug`, `fps`, `contributor`, `contributorUrl`
+          — those are filled in when your submission is merged.
+  - type: input
+    id: model
+    attributes:
+      label: Model family / variant / task
+      description: e.g. "Wan2.1 1.3B, T2V" or "CogVideoX1.5 5B, I2V"
+      placeholder: n/a (see Bulk JSON below)
+  - type: dropdown
+    id: tpu-gen
+    attributes:
+      label: TPU / accelerator generation
+      options:
+        - "TPU v4"
+        - "TPU v5e"
+        - "TPU v6e"
+        - "TPU v7 (Ironwood)"
+        - "Other (say which, in Notes)"
+    validations:
+      required: true
+  - type: input
+    id: hw-config
+    attributes:
+      label: Device count / tensor-parallel size / sequence-parallel size
+      placeholder: "e.g. 4 devices, tensor_parallel_size=4, sequence_parallel_size=1"
+  - type: input
+    id: software
+    attributes:
+      label: jax version / libtpu version / vidax version or commit
+      placeholder: "e.g. jax 0.11.0, libtpu 0.0.44, vidax @ 3ca4816"
+  - type: input
+    id: precision
+    attributes:
+      label: I/O dtype / weight dtype
+      placeholder: "e.g. bf16 / bf16"
+  - type: input
+    id: workload
+    attributes:
+      label: Resolution / frame count / sampling steps
+      placeholder: "e.g. 832x480, 81 frames, 50 steps"
+  - type: input
+    id: metrics
+    attributes:
+      label: Compile time (s) / per-step latency (s) / wall time (s) / peak HBM (GB)
+      placeholder: "e.g. 85.4 / 6.97 / 456.4 / 10.19"
+  - type: input
+    id: num-runs
+    attributes:
+      label: Number of runs these numbers are averaged over
+      placeholder: "e.g. 1, or 3"
+  - type: textarea
+    id: bulk-json
+    attributes:
+      label: Bulk JSON (for multiple results)
+      description: A JSON array of row objects, schema described above.
+      render: json
+  - type: input
+    id: display-name
+    attributes:
+      label: Preferred display name (optional)
+      description: >
+        Defaults to your GitHub username if left blank. Your GitHub profile
+        gets linked from the table either way.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / caveats (optional)
+      description: Anything that affects how the numbers should be read — thermal throttling, a non-default flag, a preview/beta jax build, etc.

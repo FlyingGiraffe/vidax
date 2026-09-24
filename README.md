@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="NOTICE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
-  <!-- <a href="https://pypi.org/project/vidax/"><img alt="PyPI" src="https://img.shields.io/pypi/v/vidax.svg"></a> -->
+  <a href="https://pypi.org/project/vidax/"><img alt="PyPI" src="https://img.shields.io/pypi/v/vidax.svg"></a>
  
 </p>
 

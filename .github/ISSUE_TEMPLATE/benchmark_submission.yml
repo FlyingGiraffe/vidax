@@ -7,13 +7,9 @@ body:
       value: |
         Thanks for sharing your numbers! These get folded into the
         community benchmark table at
-        https://flyinggiraffe.github.io/vidax-site/benchmarks (not the
-        repo's own docs, so this never blocks a release).
-
-        You don't need to match vidax's own 5-run-averaged standard — a
-        single run is fine, just say so in "Number of runs" below. Every
-        submitted row is shown with its contributor (linked to your GitHub
-        profile) and run count, so readers can judge it on its own terms.
+        https://flyinggiraffe.github.io/vidax-site/benchmarks.
+        Every submitted row is shown with its contributor (linked to your GitHub
+        profile).
 
         **Two ways to submit, pick whichever's easier:**
         - One result: fill in the fields below.
@@ -31,7 +27,15 @@ body:
     id: model
     attributes:
       label: Model family / variant / task
-      description: e.g. "Wan2.1 1.3B, T2V" or "CogVideoX1.5 5B, I2V"
+      description: >
+        Format: `<family> <size> (<variant>), <task>` — fold the version
+        into the family name the way vidax's own table does (e.g.
+        `CogVideoX1.5`, `HunyuanVideo-1.5`, `LTX-2.5`), and put any
+        checkpoint variant in parentheses after the size. Examples:
+        "Wan2.1 1.3B, T2V", "CogVideoX1.5 5B, I2V",
+        "HunyuanVideo-1.5 8.3B (480p), I2V",
+        "LTX-2.5 22B (distilled, diffusion VAE), T2V",
+        "Cosmos3 Nano (16B), T2V".
       placeholder: n/a (see Bulk JSON below)
   - type: dropdown
     id: tpu-gen

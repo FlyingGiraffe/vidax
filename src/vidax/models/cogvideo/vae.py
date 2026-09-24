@@ -406,7 +406,8 @@ class CogVideoXVAE(nn.Module):
         blended = a[:, :, :, -extent:] * (1 - w) + b[:, :, :, :extent] * w
         return jnp.concatenate([blended, b[:, :, :, extent:]], axis=3)
 
-    def _tiled_decode(self, z):
+    def _tiled_decode(self, z, tile_fn=None):
+        decode_tile = tile_fn if tile_fn is not None else self._decode_chunks
         _, _, lh, lw, _ = z.shape  # channels-last (B, T, H, W, C)
         th, tw = self.tile_latent_min_height, self.tile_latent_min_width
         overlap_h = int(th * (1 - self.tile_overlap_factor_height))
@@ -421,7 +422,7 @@ class CogVideoXVAE(nn.Module):
             row = []
             for j in range(0, lw, overlap_w):
                 tile = z[:, :, i:i + th, j:j + tw]
-                row.append(self._decode_chunks(tile))
+                row.append(decode_tile(tile))
             rows.append(row)
 
         # diffusers mutates `rows[i][j]` in place during blending, so later
@@ -466,3 +467,23 @@ class CogVideoXVAE(nn.Module):
         if self.enable_tiling and (lw > self.tile_latent_min_width or lh > self.tile_latent_min_height):
             return self._tiled_decode(z)
         return self._decode_chunks(z)
+
+    def decode_tile(self, tile):
+        """Decode one spatial tile (temporal-chunked internally). The unit
+        callers should `jax.jit` when driving the tiled decode with a jitted
+        per-tile function (see `decode_tiled`)."""
+        return self._decode_chunks(tile)
+
+    def decode_tiled(self, z, tile_fn=None):
+        """Tiled decode with an injectable per-tile callable.
+
+        `tile_fn(tile) -> decoded` defaults to the plain (eager)
+        `_decode_chunks`. Passing a `jax.jit`-wrapped per-tile decode
+        (`vae.apply(params, tile, method=vae.decode_tile)`) avoids the
+        thousands of tiny per-op eager dispatches the fully-eager path
+        otherwise pays -- measured ~11 min -> ~1 min for 49x720x480 on TPU
+        v7. Jit-ing the *whole* tiled decode instead is not an option: its
+        unrolled temporaries exceed HBM (105.6G > 94.7G/core on v7 at
+        720x480, worse on v4) -- see examples/generate_cogvideox.py.
+        """
+        return self._tiled_decode(z, tile_fn=tile_fn)

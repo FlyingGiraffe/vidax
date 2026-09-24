@@ -25,7 +25,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from PIL import Image
-from jax.experimental.shard_map import shard_map
+from jax import shard_map
 from jax.sharding import PartitionSpec as P
 
 from vidax.core.sharding import (

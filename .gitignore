@@ -36,3 +36,5 @@ benchmarks/results/
 
 # reference codebases
 refs/
+# Slurm scratch (cluster-local scripts and logs)
+slurm/

@@ -25,7 +25,7 @@ import imageio
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.experimental.shard_map import shard_map
+from jax import shard_map
 from jax.sharding import PartitionSpec as P
 
 from vidax.core.sharding import (
@@ -364,12 +364,25 @@ def main(args):
         latents = latents[:, additional_frames:]
     sf = preset["scaling_factor"]
     # latents: (B, Tlat, C, Hlat, Wlat) -> channels-last (B, Tlat, Hlat, Wlat, C) for CogVideoXVAE.
-    # The VAE decode runs *eagerly* (not jax.jit-wrapped): the tiled/chunked
-    # decode loop, unrolled by jit, holds every tile's 512-channel 3D-conv
-    # activations live at once and OOMs a v4 chip -- same rationale as
-    # vidax.models.wan.wan2_2.vae's docstring.
+    # The VAE decode runs *eagerly* by default (not jax.jit-wrapped): the
+    # tiled/chunked decode loop, unrolled by jit, holds every tile's
+    # 512-channel 3D-conv activations live at once and OOMs a v4 chip -- same
+    # rationale as vidax.models.wan.wan2_2.vae's docstring. On TPU v7
+    # (Ironwood, ~95 GiB HBM per core) the jit-unrolled decode fits
+    # comfortably at this model's resolutions, and eager mode is instead
+    # catastrophically slow there (thousands of tiny per-op dispatches --
+    # measured ~11 min for 49x720x480 vs ~1 min jitted), so jit it on v7.
     z = jnp.transpose(latents, (0, 1, 3, 4, 2)) / sf
-    frames = vae_model.apply(vae_params, z.astype(jnp.float32), method=vae_model.decode)  # (B, Tpix, H, W, 3)
+    z = z.astype(jnp.float32)
+    if jax.devices()[0].device_kind == "TPU7x":
+        # v7: jit each spatial tile's decode (bounded HBM; the fully-unrolled
+        # tiled decode's temporaries alone exceed 95 GiB/core at 720x480).
+        from functools import partial as _partial
+        tile_fn = jax.jit(lambda tile: vae_model.apply(vae_params, tile, method=vae_model.decode_tile))
+        frames = vae_model.apply(
+            vae_params, z, method=_partial(CogVideoXVAE.decode_tiled, tile_fn=tile_fn))
+    else:
+        frames = vae_model.apply(vae_params, z, method=vae_model.decode)  # (B, Tpix, H, W, 3)
 
     # I2V: give the output the conditioning image's aspect ratio. 5b-I2V is
     # locked to 720x480, so its conditioning frame was squished -- rescaling

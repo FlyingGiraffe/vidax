@@ -18,7 +18,7 @@
 
 **`vidax`** is a lightweight JAX/Flax inference engine and
 PyTorch-to-JAX weight translator for modern Video Diffusion Transformers
-(DiTs) and beyond. Built for **Google Cloud TPUs (v4, v5e, v6e)**, it
+(DiTs) and beyond. Built for **Google Cloud TPUs (v4, v5e, v6e, v7/Ironwood)**, it
 eliminates framework overhead with clean, explicit PyTree architectures and
 native multi-chip parallelism (Megatron tensor parallelism and
 DeepSpeed-Ulysses sequence parallelism) across architecturally distinct

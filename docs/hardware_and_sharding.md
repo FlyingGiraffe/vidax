@@ -37,11 +37,44 @@ that doesn't know the history.
   `jax.device_count()` reports and what `tensor_parallel_size` must divide
   into), so "full width on a v4-8" means 4, not 8. v5e and v6e chips have 1
   TensorCore each, so `vN-M` there *does* equal chip count — don't assume
-  the /2 rule carries over once those are benchmarked.
+  the /2 rule carries over once those are benchmarked. **v7 (Ironwood /
+  `TPU7x`) is again 2 TensorCores per chip** (like v4): one chip shows up as
+  2 JAX devices, each with its own ~95 GiB HBM partition, so e.g. a 4-chip
+  host reports `jax.device_count() == 8`. v7 needs a recent runtime —
+  validated with jax 0.11.0 / libtpu 0.0.44; the Pallas flash-attention
+  kernel (with per-generation tile-size tuning — see §4, this matters a lot
+  on v7), the `shard_map` mesh path, and the full Wan2.1-1.3B pipeline
+  (T5 encode → 50-step sampling → chunked VAE decode) all run correctly.
 - `vidax.core.sharding.build_tpu_mesh` builds a 2D `(dp, tp)` device mesh:
   `dp` (data-parallel) shards the batch, `tp` (tensor-parallel) shards
   attention heads and FFN channels within each DiT/T5 layer, Megatron-1D
   style.
+
+### Single-process on a multi-host slice (sub-slice usage)
+
+All of this repo's scripts are single-process JAX (no
+`jax.distributed.initialize`). On a TPU slice that spans **multiple hosts**
+(e.g. an ICI 2x2x4 v7 slice over 4 hosts), a bare process's libtpu init
+tries to assemble the *whole* slice and waits forever for peer hosts — and
+naively masking chips with `TPU_VISIBLE_DEVICES` fails a topology bounds
+check ("number of devices found in the host does not match the topology").
+To run single-process on a subset of such a slice, tell libtpu the process's
+own sub-topology explicitly (the working incantation, e.g. for pinning a run
+to one chip of a multi-host v7 slice):
+
+```bash
+# One chip (2 JAX devices on v7):
+env TPU_VISIBLE_CHIPS=0 \
+    TPU_CHIPS_PER_PROCESS_BOUNDS=1,1,1 \
+    TPU_PROCESS_BOUNDS=1,1,1 \
+    TPU_PROCESS_ADDRESSES=localhost:18471 \
+    TPU_PROCESS_PORT=18471 \
+    CLOUD_TPU_TASK_ID=0 \
+    python examples/generate_wan2_1_t2v.py ...
+
+# One whole 4-chip host (8 JAX devices on v7): TPU_VISIBLE_CHIPS=0,1,2,3 and
+# TPU_CHIPS_PER_PROCESS_BOUNDS=2,2,1 instead.
+```
 - `shard_wan_params` assigns the actual `NamedSharding`s: attention Q/K/V
   and the FFN up-projection are column-parallel (shard their output),
   attention-output and the FFN down-projection are row-parallel (shard
@@ -253,6 +286,32 @@ conditioning, or `--tensor_parallel_size 1` alongside
   size). T5's self-attention keeps its relative-position `bias` and stays
   on the materializing path, since its sequence length is small and fixed
   (512) and doesn't need flash attention's O(S) memory anyway.
+- **The kernel's tile sizes must be tuned per TPU generation.** The upstream
+  default (`BlockSizes` 128×128 tiles) is fine on v4 but severely
+  under-utilizes v7 (Ironwood): a (B=2, S=32768, H=12, D=128) bf16
+  self-attention — one Wan2.1-1.3B DiT block's worth at 832×480×81 — takes
+  **1026 ms** with the default vs **69 ms** with 2048/1024/1024 tiles (12.8
+  → 191 TFLOP/s), which works out to ~10x end-to-end (33 → 3.2 s/step).
+  `_flash_attention_tpu` therefore picks per-device-kind tile sizes
+  (`_FLASH_BLOCK_SIZES_BY_DEVICE_KIND`, currently only TPU7x overrides),
+  falling back to the kernel default for short sequences where the big tiles
+  don't fit (512-token text cross-attention, single-token refiners) and
+  padding the sequence to a tile-compatible multiple. Larger tiles than
+  2048/1024 (e.g. 4096) blow past VMEM (`CompileTimeScopedVmemOom`) — the
+  limit is ~64 MB of scoped VMEM per core. `VIDAX_FLASH_BLOCK_SIZES` env var
+  overrides the tuned values for experimentation.
+- **On v7, vidax prefers the splash-attention kernel over the legacy one.**
+  `splash_attention` (`jax.experimental.pallas.ops.tpu.splash_attention`)
+  measures a further ~1.6x at the same shape (43 ms, 307 TFLOP/s, blocks
+  2048/2048/1024) and is numerically clean (3.3e-4 max abs diff vs a chunked
+  fp32 einsum reference — better than the legacy kernel's own bf16 error).
+  Two integration differences to know: splash applies **no softmax scale
+  internally** (vidax pre-scales Q), and it takes per-batch-item
+  (H, S, D) tensors (vidax vmaps over the batch). It is used when the call
+  is bias-free bf16 with `head_dim % 128 == 0` and sequences ≥ the tile
+  sizes; anything else (fp32-DiT pipelines, text cross-attention, bias
+  carriers like Cosmos3's padded-text attention) keeps the tuned legacy
+  kernel. `VIDAX_V7_KERNEL=legacy` opts out.
 - Mosaic (Pallas TPU) kernels are opaque custom calls that **GSPMD cannot
   auto-partition** — running one on a sharded array of any kind
   (tensor-parallel *or* plain data-parallel-batched) raises `"Mosaic
@@ -445,3 +504,5 @@ bound as more models are ported. See:
 | DiT weight cast OOMs on-device | float32 + bfloat16 copies coexist during an on-device cast | Cast on the host (numpy) before `device_put` |
 | i2v sequence-parallel chunking fails for some images | Image-derived resolution doesn't guarantee divisible token count | Grow width in 32px steps until divisible |
 | Final decode OOMs only when i2v conditioning is also present | On-device concatenate of all chunks competes with other device-resident state | Move each chunk to host immediately, concatenate on host |
+| VAE decode "takes ~18 min" after a 50-step sampling loop (any hardware) | Not decode at all: the unsynchronized sampling loop dispatches steps on the host (~12 s/step) faster than the device executes them (~33 s/step, Wan2.1-1.3B fp32 @ 832x480 on one v7 chip), so by the time the *host* reaches the "Decoding" log line the device still has ~18 min of queued sampling to drain | Measure with per-step `jax.block_until_ready` before blaming a phase; synced timings: sampling ~33 s/step device-side, decode ~0.13 s/chunk — decode was never the bottleneck |
+| CogVideoX VAE decode ~11+ min on TPU v7 (fine on v4) | The VAE decode runs *eagerly* (jit-unrolling the tiled loop OOMs v4), i.e. thousands of tiny per-op dispatches — much costlier per op on the v7 stack than on v4 | On v7, jit each spatial *tile*'s decode (`CogVideoXVAE.decode_tile`/`decode_tiled`; the whole-tiled-decode jit OOMs even v7's 95 GiB/core: 105.6 GiB of HLO temporaries at 720x480) |

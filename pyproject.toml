@@ -37,7 +37,7 @@ classifiers = [
 # `vidax.models`) never imports them. `pillow` loads the conditioning image
 # for I2V.
 dependencies = [
-    "jax>=0.4.30",
+    "jax>=0.6.2",  # 0.6.2: first release with public `jax.shard_map`
     "flax>=0.8.0",
     "numpy>=1.24.0",
     "safetensors>=0.4.0",
@@ -50,9 +50,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Required on TPU VMs to get the correct TPU jaxlib wheel.
+# Required on TPU VMs to get the correct TPU jaxlib wheel. For TPU v7
+# (Ironwood / tpu7x) specifically, use a recent stack -- validated with
+# jax 0.11.0 / libtpu 0.0.44 (v7 support did not exist in the earliest
+# releases satisfying the floor above).
 tpu = [
-    "jax[tpu]>=0.4.30",
+    "jax[tpu]>=0.6.2",
 ]
 
 # Required to develop / test / build the package.

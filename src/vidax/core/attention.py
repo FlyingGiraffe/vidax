@@ -1,4 +1,5 @@
 """Dot-product attention and QK-normalization primitives shared by DiT/T5 blocks."""
+import os
 from typing import Optional
 
 import jax
@@ -7,6 +8,125 @@ import flax.linen as nn
 from jax.sharding import Mesh, PartitionSpec as P
 
 _FLASH_BLOCK = 128  # Fixed tile size of jax's TPU Pallas flash-attention kernel.
+
+# Tuned Pallas flash-attention tile sizes per TPU generation. The kernel's
+# upstream default (128x128 tiles) is severely under-utilized on TPU v7
+# (Ironwood) at video-DiT sequence lengths: a (B=2, S=32768, H=12, D=128)
+# bf16 self-attention measured 1026ms with the default vs 69ms with
+# 2048/1024/1024 tiles (~15x; 12.8 -> 191 TFLOP/s). Older generations (v4)
+# were validated at the default and keep it. Override via the
+# VIDAX_FLASH_BLOCK_SIZES env var ("block_q,block_k_major,block_k", e.g.
+# "2048,1024,1024") -- mostly useful for tuning on future hardware.
+_FLASH_BLOCK_SIZES_BY_DEVICE_KIND = {
+    "TPU7x": (2048, 1024, 1024),  # (block_q, block_k_major, block_k)
+}
+
+
+def _flash_block_sizes():
+    """Returns the configured (block_q, block_k_major, block_k) for the
+    current device kind, or None to use the kernel's own default."""
+    env = os.environ.get("VIDAX_FLASH_BLOCK_SIZES")
+    if env:
+        if env.strip().lower() == "default":
+            return None  # force the kernel's built-in 128-tile default
+        parts = tuple(int(p) for p in env.split(","))
+        assert len(parts) == 3, "VIDAX_FLASH_BLOCK_SIZES must be 'block_q,block_k_major,block_k'"
+        return parts
+    return _FLASH_BLOCK_SIZES_BY_DEVICE_KIND.get(jax.devices()[0].device_kind)
+
+
+# --- Splash attention (jax.experimental.pallas.ops.tpu.splash_attention) ---
+#
+# On TPU v7 the splash kernel beats the (tile-tuned) legacy flash kernel by a
+# further ~1.6x at video-DiT shapes: (B=2, S=32768, H=12, D=128) bf16 measures
+# 43ms (307 TFLOP/s) vs 69ms for the best legacy BlockSizes, and matches a
+# chunked fp32 einsum reference to 3.3e-4 max abs diff (better than the legacy
+# kernel's own bf16 error). Two integration differences vs the legacy kernel:
+# splash applies NO softmax scale internally (the caller must pre-scale Q),
+# and it takes per-batch-item (H, S, D) tensors (we vmap over the batch).
+# Used on v7 whenever the shape allows it (see the guard in
+# `_flash_attention_tpu`); the legacy tuned kernel remains the fallback.
+# Set VIDAX_V7_KERNEL=legacy to opt out.
+_SPLASH_BLOCK_SIZES_BY_DEVICE_KIND = {
+    "TPU7x": (2048, 2048, 1024),  # (block_q, block_kv, block_kv_compute)
+}
+
+_splash_available: Optional[bool] = None
+
+
+def _splash_importable() -> bool:
+    """Whether the splash_attention package is importable in this jax build
+    (it moved between `jax.experimental.pallas.ops.tpu` layouts across
+    releases; absence must degrade to the legacy kernel, not crash)."""
+    global _splash_available
+    if _splash_available is None:
+        try:
+            from jax.experimental.pallas.ops.tpu.splash_attention import (  # noqa: F401
+                splash_attention_kernel, splash_attention_mask)
+            _splash_available = True
+        except ImportError:
+            _splash_available = False
+    return _splash_available
+
+
+def _splash_attention_tpu(
+    q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray, scale: float,
+    block_q: int, block_kv: int, block_kv_compute: int,
+) -> jnp.ndarray:
+    """Splash flash-attention (see module notes above). No bias/mask support
+    here -- callers with an additive bias stay on the legacy kernel."""
+    from jax.experimental.pallas.ops.tpu.splash_attention import (
+        splash_attention_kernel as splash, splash_attention_mask as mask_lib)
+    import math
+
+    b, sq, h, d = q.shape
+
+    pad_to = math.lcm(block_q, block_kv)
+    qt = jnp.transpose(q, (0, 2, 1, 3))
+    kt = jnp.transpose(k, (0, 2, 1, 3))
+    vt = jnp.transpose(v, (0, 2, 1, 3))
+    qt, sq0 = _pad_seq(qt, axis=2, multiple=pad_to)
+    kt, sk0 = _pad_seq(kt, axis=2, multiple=pad_to)
+    vt, _ = _pad_seq(vt, axis=2, multiple=pad_to)
+
+    segment_ids = None
+    if qt.shape[2] != sq0 or kt.shape[2] != sk0:
+        q_ids = jnp.where(jnp.arange(qt.shape[2]) < sq0, 1, 0)[None, :]
+        kv_ids = jnp.where(jnp.arange(kt.shape[2]) < sk0, 1, 0)[None, :]
+        segment_ids = splash.SegmentIds(
+            q=jnp.broadcast_to(q_ids, (b, qt.shape[2])),
+            kv=jnp.broadcast_to(kv_ids, (b, kt.shape[2])))
+
+    # NB: no kernel-object caching here. The kernel closes over MaskInfo
+    # arrays that `make_splash_mha_single_device` builds with jnp ops; if this
+    # runs under a jit/shard_map trace (it always does in practice), those
+    # arrays are tracers of that trace. Caching the kernel leaks them into
+    # later traces (UnexpectedTracerError), and host-converting them at build
+    # time is itself an np.asarray(tracer) (TracerArrayConversionError).
+    # Rebuilding per call costs a few ms of host time *at trace time only*
+    # (the compiled program is then reused for every layer/step) and the
+    # MaskInfo is baked into the program as constants -- correct by
+    # construction.
+    mask = mask_lib.MultiHeadMask(
+        tuple(mask_lib.FullMask((qt.shape[2], kt.shape[2])) for _ in range(h)))
+    kernel = splash.make_splash_mha_single_device(
+        mask,
+        block_sizes=splash.BlockSizes(
+            block_q=block_q, block_kv=block_kv, block_kv_compute=block_kv_compute))
+
+    # Splash applies no softmax scale internally -- fold ours into Q.
+    qt = qt * jnp.asarray(scale, dtype=qt.dtype)
+    out = jax.vmap(
+        lambda qq, kk, vv, seg: kernel(qq, kk, vv, segment_ids=seg)
+    )(qt, kt, vt, segment_ids)
+    out = out[:, :, :sq0, :]
+    return jnp.transpose(out, (0, 2, 1, 3))
+
+
+def _v7_kernel_pref():
+    """Which flash-attention kernel to prefer on v7: 'splash' (default) or
+    'legacy'. Honors VIDAX_V7_KERNEL."""
+    return os.environ.get("VIDAX_V7_KERNEL", "splash")
 
 
 def chunk_by_rank(x: jnp.ndarray, axis: int, sp_size: int, rank: jnp.ndarray) -> jnp.ndarray:
@@ -103,17 +223,51 @@ def _flash_attention_tpu(
     zero-padded and the padding is excluded from attention via segment ids
     (not just an additive bias) so the kernel can skip whole padded blocks.
     """
-    from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention, SegmentIds
+    from jax.experimental.pallas.ops.tpu.flash_attention import (
+        BlockSizes, flash_attention, SegmentIds)
 
     b, sq, h, d = q.shape
     sk = k.shape[1]
+
+    # Splash kernel on v7 where it fits (see `_splash_attention_tpu`'s notes):
+    # needs no bias, head_dim on 128 lanes, and sequences worth the big tiles
+    # (short-KV cross-attention stays on the legacy path). bf16 only: fp32
+    # inputs stay on the tuned legacy kernel rather than paying splash's
+    # emulated-fp32 matmuls.
+    splash_cfg = _SPLASH_BLOCK_SIZES_BY_DEVICE_KIND.get(jax.devices()[0].device_kind)
+    if (splash_cfg is not None and bias is None and _v7_kernel_pref() == "splash"
+            and _splash_importable()
+            and q.dtype == jnp.bfloat16 and d % 128 == 0
+            and sq >= splash_cfg[0] and sk >= splash_cfg[1]):
+        return _splash_attention_tpu(q, k, v, scale, *splash_cfg)
+
+    # Pick tile sizes for this device kind (see `_flash_block_sizes`). The
+    # kernel requires block_k_major/block_k to divide the (padded) KV length
+    # and every block to fit its dim, so pad to a block-compatible multiple
+    # and fall back to the kernel default when the sequence is too short
+    # (e.g. 512-token text cross-attention KV, single-token refiners).
+    bs_cfg = _flash_block_sizes()
+    block_sizes = None
+    pad_multiple = _FLASH_BLOCK
+    if bs_cfg is not None and sq >= bs_cfg[0] and sk >= bs_cfg[1]:
+        import math
+        block_q, block_k_major, block_k = bs_cfg
+        pad_multiple = math.lcm(_FLASH_BLOCK, block_k_major)
+        block_sizes = BlockSizes(
+            block_q=block_q, block_k_major=block_k_major, block_k=block_k,
+            block_b=1)
+
     qt = jnp.transpose(q, (0, 2, 1, 3))
     kt = jnp.transpose(k, (0, 2, 1, 3))
     vt = jnp.transpose(v, (0, 2, 1, 3))
 
-    qt, sq0 = _pad_seq(qt, axis=2)
-    kt, sk0 = _pad_seq(kt, axis=2)
-    vt, _ = _pad_seq(vt, axis=2)
+    qt, sq0 = _pad_seq(qt, axis=2, multiple=pad_multiple)
+    kt, sk0 = _pad_seq(kt, axis=2, multiple=pad_multiple)
+    vt, _ = _pad_seq(vt, axis=2, multiple=pad_multiple)
+    # If padding wasn't enough to make the KV length block-divisible, fall
+    # back to the kernel default tiles rather than erroring.
+    if block_sizes is not None and kt.shape[2] % block_sizes.block_k_major != 0:
+        block_sizes = None
 
     segment_ids = None
     if qt.shape[2] != sq0 or kt.shape[2] != sk0:
@@ -128,7 +282,8 @@ def _flash_attention_tpu(
         ab = jnp.broadcast_to(bias, (b, h, sq, sk)).astype(jnp.float32)
         ab = jnp.pad(ab, ((0, 0), (0, 0), (0, qt.shape[2] - sq), (0, kt.shape[2] - sk)))
 
-    out = flash_attention(qt, kt, vt, ab=ab, segment_ids=segment_ids, sm_scale=scale)
+    out = flash_attention(qt, kt, vt, ab=ab, segment_ids=segment_ids, sm_scale=scale,
+                          block_sizes=block_sizes)
     out = out[:, :, :sq0, :]
     return jnp.transpose(out, (0, 2, 1, 3))
 
@@ -153,7 +308,7 @@ def _flash_attention_tpu_sharded(
     matching the column/row-parallel attention scheme: each device already
     owns a disjoint, complete subset of attention heads).
     """
-    from jax.experimental.shard_map import shard_map
+    from jax import shard_map
 
     def _local(q, k, v):
         return _flash_attention_tpu(q, k, v, None, scale)

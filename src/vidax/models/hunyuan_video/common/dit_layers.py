@@ -214,7 +214,7 @@ def _flash_attention_tpu_segment_masked_sharded(
     masked`'s `SegmentIds` mechanism costs nothing extra to carry through
     `shard_map` (still O(S), not O(S^2)).
     """
-    from jax.experimental.shard_map import shard_map
+    from jax import shard_map
     from jax.sharding import PartitionSpec as P
 
     def _local(q, k, v, key_valid):
@@ -250,7 +250,7 @@ def _flash_attention_tpu_segment_masked_replicated(
     data-parallel-style replica of the same computation, matching how the
     surrounding (already-replicated) activations are actually laid out.
     """
-    from jax.experimental.shard_map import shard_map
+    from jax import shard_map
     from jax.sharding import PartitionSpec as P
 
     def _local(q, k, v, key_valid):

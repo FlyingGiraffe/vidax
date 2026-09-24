@@ -18,7 +18,7 @@ body:
           as `n/a`). Each object should have the same shape as one entry in
           [`community_benchmarks.json`](https://github.com/FlyingGiraffe/vidax-site/blob/main/scripts/community_benchmarks.json)
           — `family`, `sizeLabel`, `task`, `resolution`, `numFrames`,
-          `numSteps`, `jaxVersion`, `deviceKind`, `deviceCount`,
+          `numSteps`, `jaxVersion`, `deviceKind`, `deviceTopology`,
           `tensorParallelSize`, `sequenceParallelSize`, `ioDtype`,
           `weightDtype`, `numRuns`, `compileS`, `perStepS`, `wallS`,
           `peakHbmGb`. Omit `slug`, `fps`, `contributor`, `contributorUrl`
@@ -52,8 +52,11 @@ body:
   - type: input
     id: hw-config
     attributes:
-      label: Device count / tensor-parallel size / sequence-parallel size
-      placeholder: "e.g. 4 devices, tensor_parallel_size=4, sequence_parallel_size=1"
+      label: Device topology / tensor-parallel size / sequence-parallel size
+      description: >
+        Device topology as a plain count (e.g. "4 devices") or, for a
+        multi-chip pod slice, its ICI shape (e.g. "2x2x4").
+      placeholder: "e.g. 2x2x4, tensor_parallel_size=4, sequence_parallel_size=1"
   - type: input
     id: software
     attributes:

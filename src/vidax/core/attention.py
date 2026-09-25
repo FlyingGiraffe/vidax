@@ -290,6 +290,34 @@ def _pad_seq(x: jnp.ndarray, axis: int, multiple: int = _FLASH_BLOCK):
     return jnp.pad(x, pad_width), size
 
 
+def _legacy_block_sizes_for(sq: int, sk: int):
+    """Per-device-kind tile selection for the legacy Pallas flash kernel.
+    Returns (BlockSizes | None, pad_multiple) -- None means "use the kernel's
+    built-in 128-tile default". Shared by `_flash_attention_tpu` and
+    HunyuanVideo's segment-masked path."""
+    from jax.experimental.pallas.ops.tpu.flash_attention import BlockSizes
+    import math
+
+    bs_cfg = _flash_block_sizes()
+    if bs_cfg is not None and sq >= bs_cfg[0] and sk >= bs_cfg[1]:
+        block_q, block_k_major, block_k = bs_cfg
+        return (BlockSizes(block_q=block_q, block_k_major=block_k_major,
+                           block_k=block_k, block_b=1),
+                math.lcm(_FLASH_BLOCK, block_k_major))
+    if (jax.devices()[0].device_kind == "TPU7x" and sq >= 2048
+            and _FLASH_BLOCK <= sk < 1024):
+        # Short-KV cross-attention on v7: the legacy kernel requires
+        # block_k_major == block_k == padded KV length (it loads all of KV per
+        # q-block), so give it a big Q tile + a whole-KV K block -- the
+        # 128-tile default is latency-bound on the long Q side (measured
+        # 14.7ms -> ~3ms at Sq=32760/Skv=512).
+        skv_pad = ((sk + _FLASH_BLOCK - 1) // _FLASH_BLOCK) * _FLASH_BLOCK
+        return (BlockSizes(block_q=2048, block_k_major=skv_pad, block_k=skv_pad,
+                           block_b=1),
+                _FLASH_BLOCK)
+    return None, _FLASH_BLOCK
+
+
 def _flash_attention_tpu(
     q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray,
     bias: Optional[jnp.ndarray], scale: float,
@@ -305,7 +333,7 @@ def _flash_attention_tpu(
     (not just an additive bias) so the kernel can skip whole padded blocks.
     """
     from jax.experimental.pallas.ops.tpu.flash_attention import (
-        BlockSizes, flash_attention, SegmentIds)
+        flash_attention, SegmentIds)
 
     b, sq, h, d = q.shape
     sk = k.shape[1]
@@ -347,26 +375,7 @@ def _flash_attention_tpu(
     # and every block to fit its dim, so pad to a block-compatible multiple
     # and fall back to the kernel default when the sequence is too short
     # (e.g. single-token refiners).
-    bs_cfg = _flash_block_sizes()
-    block_sizes = None
-    pad_multiple = _FLASH_BLOCK
-    if bs_cfg is not None and sq >= bs_cfg[0] and sk >= bs_cfg[1]:
-        import math
-        block_q, block_k_major, block_k = bs_cfg
-        pad_multiple = math.lcm(_FLASH_BLOCK, block_k_major)
-        block_sizes = BlockSizes(
-            block_q=block_q, block_k_major=block_k_major, block_k=block_k,
-            block_b=1)
-    elif (jax.devices()[0].device_kind == "TPU7x" and sq >= 2048
-          and _FLASH_BLOCK <= sk < 1024):
-        # Short-KV cross-attention on v7: the legacy kernel requires
-        # block_k_major == block_k == padded KV length (it loads all of KV per
-        # q-block), so give it a big Q tile + a whole-KV K block -- the
-        # 128-tile default is latency-bound on the long Q side (measured
-        # 14.7ms -> ~3ms at Sq=32760/Skv=512).
-        skv_pad = ((sk + _FLASH_BLOCK - 1) // _FLASH_BLOCK) * _FLASH_BLOCK
-        block_sizes = BlockSizes(
-            block_q=2048, block_k_major=skv_pad, block_k=skv_pad, block_b=1)
+    block_sizes, pad_multiple = _legacy_block_sizes_for(sq, sk)
 
     qt = jnp.transpose(q, (0, 2, 1, 3))
     kt = jnp.transpose(k, (0, 2, 1, 3))

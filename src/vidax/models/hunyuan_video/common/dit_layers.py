@@ -38,7 +38,8 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from vidax.core.attention import RMSNorm, _flash_attention_tpu, _pad_seq, _QKV_SPEC
+from vidax.core.attention import (
+    RMSNorm, _flash_attention_tpu, _legacy_block_sizes_for, _pad_seq, _QKV_SPEC)
 from vidax.models.hunyuan_video.common.rope import apply_rope3d
 
 _NEG_INF = -1e9
@@ -172,20 +173,25 @@ def _flash_attention_tpu_segment_masked(
     from jax.experimental.pallas.ops.tpu.flash_attention import SegmentIds, flash_attention
 
     b, sq, h, d = q.shape
+    sk = k.shape[1]
     qt = jnp.transpose(q, (0, 2, 1, 3))
     kt = jnp.transpose(k, (0, 2, 1, 3))
     vt = jnp.transpose(v, (0, 2, 1, 3))
 
-    qt, sq0 = _pad_seq(qt, axis=2)
-    kt, sk0 = _pad_seq(kt, axis=2)
-    vt, _ = _pad_seq(vt, axis=2)
+    # Same per-device-kind tile tuning as `_flash_attention_tpu` (matters a
+    # lot on v7: the 128-tile default is latency-bound at long S_q).
+    block_sizes, pad_multiple = _legacy_block_sizes_for(sq, sk)
+    qt, sq0 = _pad_seq(qt, axis=2, multiple=pad_multiple)
+    kt, sk0 = _pad_seq(kt, axis=2, multiple=pad_multiple)
+    vt, _ = _pad_seq(vt, axis=2, multiple=pad_multiple)
 
     q_ids = jnp.ones((b, qt.shape[2]), dtype=jnp.int32)
     kv_valid = key_valid.astype(jnp.int32)
     kv_ids = jnp.pad(kv_valid, ((0, 0), (0, kt.shape[2] - kv_valid.shape[1])))
     segment_ids = SegmentIds(q=q_ids, kv=kv_ids)
 
-    out = flash_attention(qt, kt, vt, segment_ids=segment_ids, sm_scale=scale)
+    out = flash_attention(qt, kt, vt, segment_ids=segment_ids, sm_scale=scale,
+                          block_sizes=block_sizes)
     out = out[:, :, :sq0, :]
     return jnp.transpose(out, (0, 2, 1, 3))
 

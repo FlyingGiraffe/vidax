@@ -134,6 +134,14 @@ counts as `compile_s`). Steady-state warm-cache measurement: sampling
 ~1.0 s/step, end-to-end 2m11s for 49x720x480. See
 `docs/hardware_and_sharding.md`'s lessons table.
 
+‡‡ LTX-Video on v7 is **VAE-decode-bound**, not DiT-bound: at 1216x704x121
+the 8 DiT steps run ~0.43 s each (steady state) while the single monolithic
+noise-conditioned VAE decode takes ~77s of the ~89s generation time. The
+DiT's attention was additionally switched to the real flash path in this
+release (it previously materialized the full (B, 32, 26k, 26k) fp32 logits
+per layer), which is what lets bigger batches/resolutions fit at all; it
+does not move this row's number.
+
 ‡ Both CogVideoX-5b-I2V and CogVideoX1.5-5B-I2V are locked by a learned
 positional-embedding buffer to one fixed generation resolution — the same
 one their T2V sibling uses (720×480 / 1360×768) — so unlike every other

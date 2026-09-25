@@ -315,7 +315,7 @@ def _flash_attention_tpu_sharded(
 
     return shard_map(
         _local, mesh=mesh, in_specs=(_QKV_SPEC, _QKV_SPEC, _QKV_SPEC),
-        out_specs=_QKV_SPEC, check_rep=False)(q, k, v)
+        out_specs=_QKV_SPEC, check_vma=False)(q, k, v)
 
 
 def local_attention(

@@ -223,7 +223,7 @@ def _flash_attention_tpu_segment_masked_sharded(
     key_valid_spec = P('dp', None)
     return shard_map(
         _local, mesh=mesh, in_specs=(_QKV_SPEC, _QKV_SPEC, _QKV_SPEC, key_valid_spec),
-        out_specs=_QKV_SPEC, check_rep=False)(q, k, v, key_valid)
+        out_specs=_QKV_SPEC, check_vma=False)(q, k, v, key_valid)
 
 
 def _flash_attention_tpu_segment_masked_replicated(
@@ -258,7 +258,7 @@ def _flash_attention_tpu_segment_masked_replicated(
 
     return shard_map(
         _local, mesh=mesh, in_specs=(P(), P(), P(), P()),
-        out_specs=P(), check_rep=False)(q, k, v, key_valid)
+        out_specs=P(), check_vma=False)(q, k, v, key_valid)
 
 
 def masked_self_attention(

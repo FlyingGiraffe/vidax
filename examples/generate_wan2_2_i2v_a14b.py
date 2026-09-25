@@ -321,7 +321,7 @@ def main(args):
             in_specs=(to_partition_specs(dit_sharding_spec), P('dp', None, None, None, None),
                       P('dp'), (P(), P()), P('dp', None, None)),
             out_specs=P('dp', None, None, None, None),
-            check_rep=False,
+            check_vma=False,
         )
     else:
         dit_apply = _dit_apply
@@ -375,20 +375,20 @@ def main(args):
                           P('dp'), (P(), P()), P('dp', None, None)),
                 out_specs=(P('dp', 'sp', None), P('dp', None, None), P('dp', 'sp', None, None),
                            (sp_freqs_spec, sp_freqs_spec), P('dp', 'sp', None)),
-                check_rep=False,
+                check_vma=False,
             ))
             chunk_forward = jax.jit(shard_map(
                 _chunk_forward_body, mesh=mesh,
                 in_specs=(chunk_partition_specs, P('dp', 'sp', None), P('dp', None, None),
                           P('dp', 'sp', None, None), (sp_freqs_spec, sp_freqs_spec)),
                 out_specs=P('dp', 'sp', None),
-                check_rep=False,
+                check_vma=False,
             ), donate_argnums=(0,))
             post_apply = jax.jit(shard_map(
                 _post_process_body, mesh=mesh,
                 in_specs=(nonblock_partition_specs, P('dp', 'sp', None), P('dp', 'sp', None)),
                 out_specs=P('dp', None, None, None, None),
-                check_rep=False,
+                check_vma=False,
             ))
         else:
             pre_apply = jax.jit(_pre_process_body)

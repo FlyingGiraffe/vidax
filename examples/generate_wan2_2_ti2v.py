@@ -461,7 +461,7 @@ def main(args):
             in_specs=(to_partition_specs(dit_shardings), P('dp', None, None, None, None),
                       t_spec, (P(), P()), P('dp', None, None)),
             out_specs=P('dp', None, None, None, None),
-            check_rep=False,
+            check_vma=False,
         )
     else:
         dit_apply = _dit_apply

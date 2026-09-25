@@ -305,11 +305,15 @@ conditioning, or `--tensor_parallel_size 1` alongside
   measures a further ~1.6x at the same shape (43 ms, 307 TFLOP/s, blocks
   2048/2048/1024) and is numerically clean (3.3e-4 max abs diff vs a chunked
   fp32 einsum reference — better than the legacy kernel's own bf16 error).
+  Short-KV cross-attention (e.g. Wan's 512-token text context) uses a
+  separate (2048, 512, 512) tile config: 1.0 ms vs 14.7 ms there (~15x —
+  the legacy kernel's 128-tile default is latency-bound on the long Q side),
+  which is another ~20% off a Wan2.1-1.3B step (2.24 → 1.85 s/step e2e).
   Two integration differences to know: splash applies **no softmax scale
   internally** (vidax pre-scales Q), and it takes per-batch-item
   (H, S, D) tensors (vidax vmaps over the batch). It is used when the call
-  is bias-free bf16 with `head_dim % 128 == 0` and sequences ≥ the tile
-  sizes; anything else (fp32-DiT pipelines, text cross-attention, bias
+  is bias-free bf16 with `head_dim % 128 == 0` and tile-sized sequences;
+  anything else (fp32-DiT pipelines, sub-512-token contexts, bias
   carriers like Cosmos3's padded-text attention) keeps the tuned legacy
   kernel. `VIDAX_V7_KERNEL=legacy` opts out.
 - Mosaic (Pallas TPU) kernels are opaque custom calls that **GSPMD cannot

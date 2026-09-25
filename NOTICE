@@ -9,10 +9,19 @@ EXCEPT for the third-party-derived portions identified in section 2 below.
 ================================================================================
 
 vidax re-implements, in JAX/Flax, the architectures of several third-party
-PyTorch video diffusion models. This repository contains NO third-party source
-code verbatim and NO model weights. Each implementation was written with
-reference to the corresponding upstream project's technical report and its
-released source code.
+PyTorch video diffusion models. With one exception noted below, this repository
+contains NO third-party source code verbatim and NO model weights. Each
+implementation was written with reference to the corresponding upstream
+project's technical report and its released source code.
+
+Exception (third-party source included verbatim, with its Apache-2.0 license
+header retained in the file):
+
+  MaxDiffusion -- Google (AI-Hypercomputer)
+      https://github.com/AI-Hypercomputer/maxdiffusion
+      File: src/vidax/core/_maxdiffusion_splash.py
+      (the `custom_splash_attention.py` TPU Pallas splash-attention kernel)
+      Source code: Apache License 2.0
 
 Upstream projects and the license of their SOURCE CODE (which is distinct from
 the license of their released model weights):

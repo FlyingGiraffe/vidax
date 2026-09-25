@@ -333,7 +333,7 @@ def _flash_attention_tpu(
     # kernel requires block_k_major/block_k to divide the (padded) KV length
     # and every block to fit its dim, so pad to a block-compatible multiple
     # and fall back to the kernel default when the sequence is too short
-    # (e.g. 512-token text cross-attention KV, single-token refiners).
+    # (e.g. single-token refiners).
     bs_cfg = _flash_block_sizes()
     block_sizes = None
     pad_multiple = _FLASH_BLOCK
@@ -344,6 +344,16 @@ def _flash_attention_tpu(
         block_sizes = BlockSizes(
             block_q=block_q, block_k_major=block_k_major, block_k=block_k,
             block_b=1)
+    elif (jax.devices()[0].device_kind == "TPU7x" and sq >= 2048
+          and _FLASH_BLOCK <= sk < 1024):
+        # Short-KV cross-attention on v7: the legacy kernel requires
+        # block_k_major == block_k == padded KV length (it loads all of KV per
+        # q-block), so give it a big Q tile + a whole-KV K block -- the
+        # 128-tile default is latency-bound on the long Q side (measured
+        # 14.7ms -> ~3ms at Sq=32760/Skv=512).
+        skv_pad = ((sk + _FLASH_BLOCK - 1) // _FLASH_BLOCK) * _FLASH_BLOCK
+        block_sizes = BlockSizes(
+            block_q=2048, block_k_major=skv_pad, block_k=skv_pad, block_b=1)
 
     qt = jnp.transpose(q, (0, 2, 1, 3))
     kt = jnp.transpose(k, (0, 2, 1, 3))

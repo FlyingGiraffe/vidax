@@ -310,24 +310,37 @@ def _flash_attention_tpu(
     b, sq, h, d = q.shape
     sk = k.shape[1]
 
-    # Kernel dispatch on v7 (bf16, no-bias, 128-lane head_dim only): the
-    # vendored MaxDiffusion splash kernel is fastest (see module notes);
-    # jax-splash next; tuned legacy flash otherwise / as fallback.
-    if bias is None and q.dtype == jnp.bfloat16 and d % 128 == 0:
+    # Kernel dispatch on v7 (bf16, no-bias): the vendored MaxDiffusion splash
+    # kernel is fastest (see module notes); jax-splash next; tuned legacy
+    # flash otherwise / as fallback. head_dim must be a 128-multiple for the
+    # splash kernels -- head_dim 64 models (CogVideoX, LTX-Video) are *padded*
+    # to 128 with zeros (exact: zero K dims add 0 to every logit, zero V dims
+    # are sliced off the output): even paying 2x padding FLOPs this is ~2x
+    # faster than the best hd64-native tile config (60ms vs 121ms at
+    # S=25916/H=32), because no hd64-native tile shape fills the MXU well.
+    if bias is None and q.dtype == jnp.bfloat16:
         pref = _v7_kernel_pref()
-        if pref in ("auto", "maxdiff") and _md_importable():
-            md_blocks = None
+        is_v7 = jax.devices()[0].device_kind == "TPU7x"
+        md_blocks = None
+        if is_v7 and pref in ("auto", "maxdiff") and _md_importable():
             if sq >= 2048 and sk >= 2048:
                 md_blocks = _MD_SELF_ATTN_BLOCKS
             elif sq >= 2048 and sk >= 512:
                 md_blocks = _MD_CROSS_ATTN_BLOCKS
-            if md_blocks is not None:
-                return _md_splash_attention_tpu(q, k, v, scale, *md_blocks)
         splash_cfg = None
-        if pref in ("auto", "splash") and _splash_importable():
+        if md_blocks is None and pref in ("auto", "splash") and _splash_importable():
             splash_cfg = _splash_block_sizes_for(sq, sk)
-        if splash_cfg is not None:
-            return _splash_attention_tpu(q, k, v, scale, *splash_cfg)
+        if md_blocks is not None or splash_cfg is not None:
+            pad_hd = 0
+            if is_v7 and d % 128 != 0 and d < 128:
+                pad_hd = 128 - d
+                pad = ((0, 0), (0, 0), (0, 0), (0, pad_hd))
+                q, k, v = jnp.pad(q, pad), jnp.pad(k, pad), jnp.pad(v, pad)
+            if md_blocks is not None:
+                out = _md_splash_attention_tpu(q, k, v, scale, *md_blocks)
+            else:
+                out = _splash_attention_tpu(q, k, v, scale, *splash_cfg)
+            return out[..., :out.shape[-1] - pad_hd] if pad_hd else out
 
     # Pick tile sizes for this device kind (see `_flash_block_sizes`). The
     # kernel requires block_k_major/block_k to divide the (padded) KV length

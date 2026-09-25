@@ -45,6 +45,13 @@ that doesn't know the history.
   kernel (with per-generation tile-size tuning — see §4, this matters a lot
   on v7), the `shard_map` mesh path, and the full Wan2.1-1.3B pipeline
   (T5 encode → 50-step sampling → chunked VAE decode) all run correctly.
+- **v7 XLA flags**: the official Ironwood recipe's `LIBTPU_INIT_ARGS` set
+  (DVFS p-state + async-collective/scheduler flags, e.g.
+  `--xla_tpu_dvfs_p_state=7 --xla_tpu_enable_latency_hiding_scheduler=true
+  --xla_tpu_enable_all_experimental_scheduler_features=true ...`) measured a
+  further ~10% on a single-chip Wan2.1-1.3B step (1.58 → 1.43 s/step). See
+  `tpu-recipes/inference/ironwood/.../run_recipe.sh` for the full flag set;
+  they're perf-only and safe to omit (defaults are used otherwise).
 - `vidax.core.sharding.build_tpu_mesh` builds a 2D `(dp, tp)` device mesh:
   `dp` (data-parallel) shards the batch, `tp` (tensor-parallel) shards
   attention heads and FFN channels within each DiT/T5 layer, Megatron-1D

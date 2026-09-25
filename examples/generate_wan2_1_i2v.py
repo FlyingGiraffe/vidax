@@ -323,7 +323,7 @@ def main(args):
                       P('dp'), (P(), P()), P('dp', None, None),
                       P('dp', None, None, None, None), P('dp', None, None)),
             out_specs=P('dp', None, None, None, None),
-            check_rep=False,
+            check_vma=False,
         )
     else:
         dit_apply = _dit_apply

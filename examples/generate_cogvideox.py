@@ -321,7 +321,7 @@ def main(args):
                       P('dp'),                           # timestep (B,)
                       rope_spec, rope_spec, ofs_spec),
             out_specs=P('dp', None, None, None, None),
-            check_rep=False))
+            check_vma=False))
         context_2b = jax.device_put(context_2b, get_batch_sharding(mesh, context_2b.ndim))
         if rope_cos is not None:
             rope_cos = jax.device_put(rope_cos, replicated)

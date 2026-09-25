@@ -123,6 +123,7 @@ def main(args):
         positional_embedding_max_pos=tuple(transformer_cfg["positional_embedding_max_pos"]),
         timestep_scale_multiplier=transformer_cfg.get("timestep_scale_multiplier", 1000),
         compute_dtype=dit_dtype,
+        mesh=mesh,
     )
     encoder_blocks = tuple((name, dict(params)) for name, params in vae_cfg["encoder_blocks"])
     decoder_blocks = tuple((name, dict(params)) for name, params in vae_cfg["decoder_blocks"])

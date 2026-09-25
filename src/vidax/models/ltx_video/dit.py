@@ -46,7 +46,9 @@ from typing import Optional, Tuple
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 
+from vidax.core.attention import dot_product_attention
 from vidax.models.ltx_video.rope import apply_rope, create_ltx_rope_freqs
 
 
@@ -111,6 +113,7 @@ class LTXAttention(nn.Module):
     is_cross_attn: bool = False
     eps: float = 1e-5  # q_norm/k_norm eps -- always 1e-5, see `_rms_norm_affine`.
     compute_dtype: jnp.dtype = jnp.bfloat16
+    mesh: Optional[Mesh] = None  # for the TPU flash-attention path (see below)
 
     @nn.compact
     def __call__(
@@ -139,17 +142,27 @@ class LTXAttention(nn.Module):
         v = nn.Dense(self.inner_dim, name="to_v")(kv_input)
 
         seq_k = k.shape[1]
-        q = q.reshape(b, seq_q, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        k = k.reshape(b, seq_k, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        v = v.reshape(b, seq_k, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        q = q.reshape(b, seq_q, self.num_heads, self.head_dim)
+        k = k.reshape(b, seq_k, self.num_heads, self.head_dim)
+        v = v.reshape(b, seq_k, self.num_heads, self.head_dim)
 
         scale = self.head_dim ** -0.5
-        logits = jnp.einsum("bhqd,bhkd->bhqk", q, k).astype(jnp.float32) * scale
-        if encoder_attention_bias is not None:
-            logits = logits + encoder_attention_bias
-        weights = jax.nn.softmax(logits, axis=-1).astype(v.dtype)
-        out = jnp.einsum("bhqk,bhkd->bhqd", weights, v)
-        out = out.transpose(0, 2, 1, 3).reshape(b, seq_q, self.inner_dim)
+        # Route through vidax's flash-attention dispatch (O(S) memory) instead
+        # of materializing the full (B, H, S_q, S_k) logits -- at LTX's real
+        # sequence length (26k tokens x 32 heads) that materialization alone
+        # was ~170 GiB of fp32 temporaries per layer and dominated the step
+        # time. Cross-attention keeps its additive text-padding bias (the
+        # dispatch handles bias via the tuned legacy flash path or, where
+        # sharding makes that impossible, a small materialized fallback --
+        # S_kv is only 256 there, so either is cheap). q/k/v must share one
+        # dtype for the dispatch (attn2's q comes off the fp32 residual
+        # stream while k/v are already bf16) -- cast to the block's compute
+        # dtype, matching attn1's inputs.
+        out = dot_product_attention(
+            q.astype(self.compute_dtype), k.astype(self.compute_dtype),
+            v.astype(self.compute_dtype),
+            bias=encoder_attention_bias, scale=scale, mesh=self.mesh)
+        out = out.reshape(b, seq_q, self.inner_dim)
 
         out = nn.Dense(self.inner_dim, name="to_out_0")(out)
         return out
@@ -184,6 +197,7 @@ class LTXDiTBlock(nn.Module):
     cross_attention_dim: int
     eps: float = 1e-6
     compute_dtype: jnp.dtype = jnp.bfloat16
+    mesh: Optional[Mesh] = None
 
     @nn.compact
     def __call__(
@@ -206,12 +220,12 @@ class LTXDiTBlock(nn.Module):
         norm_x = (norm_x.astype(jnp.float32) * (1 + scale_msa) + shift_msa).astype(self.compute_dtype)
         attn_out = LTXAttention(
             self.dim, self.num_heads, self.head_dim, is_cross_attn=False,
-            compute_dtype=self.compute_dtype, name="attn1")(norm_x, freqs=freqs)
+            compute_dtype=self.compute_dtype, mesh=self.mesh, name="attn1")(norm_x, freqs=freqs)
         x = x + (gate_msa * attn_out.astype(jnp.float32)).astype(x.dtype)
 
         attn2_out = LTXAttention(
             self.dim, self.num_heads, self.head_dim, is_cross_attn=True,
-            compute_dtype=self.compute_dtype, name="attn2")(
+            compute_dtype=self.compute_dtype, mesh=self.mesh, name="attn2")(
                 x, encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_bias=encoder_attention_bias)
         x = x + attn2_out
@@ -255,6 +269,7 @@ class LTXDiT(nn.Module):
     timestep_scale_multiplier: int = 1000
     eps: float = 1e-6
     compute_dtype: jnp.dtype = jnp.bfloat16
+    mesh: Optional[Mesh] = None  # TPU flash-attention dispatch (see LTXAttention)
 
     def setup(self):
         self.inner_dim = self.num_attention_heads * self.attention_head_dim
@@ -274,7 +289,7 @@ class LTXDiT(nn.Module):
                 dim=self.inner_dim, num_heads=self.num_attention_heads,
                 head_dim=self.attention_head_dim, ff_inner_dim=ff_inner_dim,
                 cross_attention_dim=self.cross_attention_dim, eps=self.eps,
-                compute_dtype=self.compute_dtype, name=f"blocks_{i}")
+                compute_dtype=self.compute_dtype, mesh=self.mesh, name=f"blocks_{i}")
             for i in range(self.num_layers)
         ]
 

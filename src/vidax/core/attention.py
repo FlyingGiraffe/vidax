@@ -41,15 +41,33 @@ def _flash_block_sizes():
 # further ~1.6x at video-DiT shapes: (B=2, S=32768, H=12, D=128) bf16 measures
 # 43ms (307 TFLOP/s) vs 69ms for the best legacy BlockSizes, and matches a
 # chunked fp32 einsum reference to 3.3e-4 max abs diff (better than the legacy
-# kernel's own bf16 error). Two integration differences vs the legacy kernel:
-# splash applies NO softmax scale internally (the caller must pre-scale Q),
-# and it takes per-batch-item (H, S, D) tensors (we vmap over the batch).
+# kernel's own bf16 error). On short-KV cross-attention (S_q=32760, S_kv=512)
+# the gap is much bigger: 1.0ms vs 14.7ms (~15x) with (2048,512,512) tiles --
+# the legacy kernel's 128-tile default is latency-bound on the long Q side.
+# Two integration differences vs the legacy kernel: splash applies NO softmax
+# scale internally (the caller must pre-scale Q), and it takes per-batch-item
+# (H, S, D) tensors (we vmap over the batch). Its kernel object must not be
+# cached across jit traces (its MaskInfo closes over traced arrays), so we
+# rebuild it per trace -- a few ms of host time at compile time only.
 # Used on v7 whenever the shape allows it (see the guard in
 # `_flash_attention_tpu`); the legacy tuned kernel remains the fallback.
 # Set VIDAX_V7_KERNEL=legacy to opt out.
-_SPLASH_BLOCK_SIZES_BY_DEVICE_KIND = {
-    "TPU7x": (2048, 2048, 1024),  # (block_q, block_kv, block_kv_compute)
-}
+_SPLASH_SELF_ATTN_BLOCKS = (2048, 2048, 1024)   # (block_q, block_kv, block_kv_compute)
+_SPLASH_CROSS_ATTN_BLOCKS = (2048, 512, 512)    # short-KV cross-attention
+
+
+def _splash_block_sizes_for(sq: int, sk: int):
+    """Returns splash (block_q, block_kv, block_kv_compute) for a q x kv shape
+    on this device, or None if splash shouldn't handle it."""
+    if jax.devices()[0].device_kind != "TPU7x" or _v7_kernel_pref() != "splash":
+        return None
+    if sq < 2048:
+        return None
+    if sk >= 2048:
+        return _SPLASH_SELF_ATTN_BLOCKS
+    if sk >= 512:
+        return _SPLASH_CROSS_ATTN_BLOCKS
+    return None
 
 _splash_available: Optional[bool] = None
 
@@ -81,13 +99,14 @@ def _splash_attention_tpu(
 
     b, sq, h, d = q.shape
 
-    pad_to = math.lcm(block_q, block_kv)
+    pad_q = math.lcm(block_q, _FLASH_BLOCK)
+    pad_kv = math.lcm(block_kv, _FLASH_BLOCK)
     qt = jnp.transpose(q, (0, 2, 1, 3))
     kt = jnp.transpose(k, (0, 2, 1, 3))
     vt = jnp.transpose(v, (0, 2, 1, 3))
-    qt, sq0 = _pad_seq(qt, axis=2, multiple=pad_to)
-    kt, sk0 = _pad_seq(kt, axis=2, multiple=pad_to)
-    vt, _ = _pad_seq(vt, axis=2, multiple=pad_to)
+    qt, sq0 = _pad_seq(qt, axis=2, multiple=pad_q)
+    kt, sk0 = _pad_seq(kt, axis=2, multiple=pad_kv)
+    vt, _ = _pad_seq(vt, axis=2, multiple=pad_kv)
 
     segment_ids = None
     if qt.shape[2] != sq0 or kt.shape[2] != sk0:
@@ -230,15 +249,13 @@ def _flash_attention_tpu(
     sk = k.shape[1]
 
     # Splash kernel on v7 where it fits (see `_splash_attention_tpu`'s notes):
-    # needs no bias, head_dim on 128 lanes, and sequences worth the big tiles
-    # (short-KV cross-attention stays on the legacy path). bf16 only: fp32
-    # inputs stay on the tuned legacy kernel rather than paying splash's
-    # emulated-fp32 matmuls.
-    splash_cfg = _SPLASH_BLOCK_SIZES_BY_DEVICE_KIND.get(jax.devices()[0].device_kind)
-    if (splash_cfg is not None and bias is None and _v7_kernel_pref() == "splash"
-            and _splash_importable()
-            and q.dtype == jnp.bfloat16 and d % 128 == 0
-            and sq >= splash_cfg[0] and sk >= splash_cfg[1]):
+    # needs no bias, head_dim on 128 lanes, and sequences worth the big tiles.
+    # bf16 only: fp32 inputs stay on the tuned legacy kernel rather than
+    # paying splash's smem downcast to bf16 anyway.
+    splash_cfg = None
+    if bias is None and q.dtype == jnp.bfloat16 and d % 128 == 0 and _splash_importable():
+        splash_cfg = _splash_block_sizes_for(sq, sk)
+    if splash_cfg is not None:
         return _splash_attention_tpu(q, k, v, scale, *splash_cfg)
 
     # Pick tile sizes for this device kind (see `_flash_block_sizes`). The

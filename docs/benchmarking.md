@@ -10,9 +10,11 @@ Reproduce any row with `benchmarks/run_*.py` (see
 [`benchmarks/run_all.py`](../benchmarks/run_all.py) to run every
 checkpoint-available combination in one pass). Checkpoints default to
 `./checkpoints/`; point elsewhere with `--checkpoint_dir` or
-`VIDAX_CHECKPOINT_DIR`. Measured with `jax==0.11.0` on `TPU v4` (4 chips) —
-a different JAX/libtpu version or chip generation can shift these numbers;
-each `benchmarks/results/*.json` records the exact `jax_version`/
+`VIDAX_CHECKPOINT_DIR`. v4 rows were measured with `jax==0.11.0` on `TPU v4`
+(4 chips); **v7 rows** (marked `v7-2` = one chip / `v7-8` = 4 chips — v7 packs
+2 TensorCores per chip again, like v4) with `jax==0.11.0`, `libtpu==0.0.44` on
+`TPU7x` — a different JAX/libtpu version or chip generation can shift these
+numbers; each `benchmarks/results/*.json` records the exact `jax_version`/
 `device_kind`/`device_count`.
 
 Every row is the average of `--num_runs` independent end-to-end runs
@@ -65,6 +67,9 @@ when configs are genuinely identical (documented per-row).
 | Wan2.1 | 14B (720P) | I2V | v4-8 | 4/1 | 832x1104\* | 81 | 40 | bf16 | fp32 | chunk 20 | 131.3 | 5090.0 | 127.2 | 32.7 |
 | Wan2.1 | 14B (480P) | I2V | v4-8 | 4/1 | 544x720\* | 81 | 40 | bf16 | bf16 | - | 150.3 | 1125.3 | 28.1 | 22.1 |
 | Wan2.1 | 1.3B | T2V | v4-8 | 4/1 | 832x480 | 81 | 50 | bf16 | bf16 | - | 85.4 | 348.3 | 7.0 | 10.2 |
+| Wan2.1 | 1.3B | T2V | v7-2 (1 chip) | 2/1 | 832x480 | 81 | 50 | bf16 | bf16 | - | 74.2 | 188.9 | 3.8 | 13.3 |
+| Wan2.1 | 1.3B | T2V | v7-2 (1 chip) | 2/1 | 832x480 | 81 | 50 | bf16 | fp32 | - | 67.1 | 213.3 | 4.3 | 14.7 |
+| Wan2.1 | 1.3B | T2V | v7-8 (2x2x1) | 4/1§ | 832x480 | 81 | 50 | bf16 | fp32 | - | 67.7 | 203.8 | 4.1§ | 11.0 |
 | LTX-2.5 | 22B (dev), conv VAE | T2V | v4-8 | 4/- | 1216x704 | 121 | 30 | bf16 | bf16\*\* | chunk 8 | 87.7 | 217.9 | 7.3 | 16.7 |
 | LTX-2.5 | 22B (distilled), conv VAE | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16\*\* | chunk 8 | 87.9 | 37.3 | 4.7 | 15.3 |
 | LTX-2.5 | 22B (dev), diffusion VAE | T2V | v4-8 | 4/- | 1216x704 | 121 | 30 | bf16 | bf16\*\* | chunk 8 | 479.5 | 2859.6 | 95.3\*\*\* | 16.1 |
@@ -72,6 +77,7 @@ when configs are genuinely identical (documented per-row).
 | LTX-Video (0.9.8) | 13B (dev) | T2V | v4-8 | 4/- | 1216x704 | 121 | 30 | bf16 | bf16 | - | 134.7 | 156.0 | 5.2 | 15.3 |
 | LTX-Video (0.9.8) | 13B (distilled) | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16 | - | 136.4 | 104.2 | 13.0 | 15.3 |
 | LTX-Video (0.9.8) | 2B (distilled) | T2V | v4-8 | 4/- | 1216x704 | 121 | 8 | bf16 | bf16 | - | 83.5 | 47.3 | 5.9 | 8.8 |
+| LTX-Video (0.9.8) | 2B (distilled) | T2V | v7-2 (1 chip) | 2/- | 1216x704 | 121 | 8 | bf16 | bf16 | - | 164.3 | 89.5 | 11.2 | 12.1 |
 | HunyuanVideo-1.5 | 8.3B (720p) | T2V | v4-8 | 4/- | 1280x720 | 121 | 30 | bf16 | bf16 | - | 410.8 | 6629.8 | 221.0 | 30.3 |
 | HunyuanVideo-1.5 | 8.3B (720p) | I2V | v4-8 | 4/- | 832x1104\* | 121 | 30 | bf16 | bf16 | - | 416.7 | 6575.6 | 219.2 | 32.0 |
 | HunyuanVideo-1.5 | 8.3B (480p) | T2V | v4-8 | 4/- | 832x480 | 121 | 30 | bf16 | bf16 | - | 362.3 | 3583.8 | 119.5 | 29.1 |
@@ -83,6 +89,7 @@ when configs are genuinely identical (documented per-row).
 | CogVideoX | 5B | T2V | v4-8 | 4/1 | 720x480 | 49 | 50 | bf16 | bf16 | - | 105.8 | 470.6 | 9.4 | 23.2 |
 | CogVideoX | 5B | I2V | v4-8 | 4/1 | 720x480‡ | 49 | 50 | bf16 | bf16 | - | 106.1 | 470.6 | 9.4 | 23.3 |
 | CogVideoX | 2B | T2V | v4-8 | 2/1 | 720x480 | 49 | 50 | bf16 | bf16† | - | 48.4 | 211.5 | 4.2 | 17.2 |
+| CogVideoX | 2B | T2V | v7-2 (1 chip) | 2/1 | 720x480 | 49 | 50 | bf16 | bf16†† | - | 269.8 | 617.6†† | 12.4†† | 13.8 |
 
 
 Resolution/frame/step columns are each model's reference default — not
@@ -114,6 +121,18 @@ all-to-all/all-gather traffic 42 blocks × 5 collectives adds. See
 † CogVideoX-2b's checkpoint ships as **float16** (all others bf16); it's
 cast to bf16 here to keep the Weight-dtype column comparable, at a small
 precision cost (fp16 has 2 more mantissa bits).
+
+§ The v7-8 (2x2x1 whole-node) Wan2.1-1.3B row runs `tp=4`/`dp=2`, i.e. **two
+samples per step** (batch 2) — the only batch>1 row in the table; per-sample
+throughput is 2.04 s/step-equivalent.
+
+†† The CogVideoX v7-2 row's `generation_s`/`per_step_s` are inflated by a
+harness artifact: on v7 the VAE decode is jit-wrapped per spatial tile (the
+eager path costs ~11 min alone there), and each edge tile shape's first
+compile lands in `generation_s` (only the *first* call of a jitted function
+counts as `compile_s`). Steady-state warm-cache measurement: sampling
+~1.0 s/step, end-to-end 2m11s for 49x720x480. See
+`docs/hardware_and_sharding.md`'s lessons table.
 
 ‡ Both CogVideoX-5b-I2V and CogVideoX1.5-5B-I2V are locked by a learned
 positional-embedding buffer to one fixed generation resolution — the same
